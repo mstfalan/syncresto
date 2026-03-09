@@ -257,6 +257,7 @@ dependencies:
 - **Repo**: https://github.com/mstfalan/syncresto
 - **Branch**: main
 - **Clone**: `git clone https://github.com/mstfalan/syncresto.git`
+- **Token**: `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` (sınırsız)
 
 ### GitHub Actions (Windows Build)
 - **Workflow**: `.github/workflows/windows-build.yml`

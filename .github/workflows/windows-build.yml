@@ -1,0 +1,41 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build Windows
+        run: flutter build windows --release
+
+      - name: Create zip package
+        run: |
+          cd build/windows/x64/runner/Release
+          Compress-Archive -Path * -DestinationPath ../../../../../SyncResto-Windows.zip
+
+      - name: Upload Windows Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyncResto-Windows
+          path: SyncResto-Windows.zip
+          retention-days: 30

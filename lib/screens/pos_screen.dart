@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/printer_service.dart';
+import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 
 class PosScreen extends StatefulWidget {
@@ -314,7 +316,7 @@ class _PosScreenState extends State<PosScreen> {
     if (_isLoading) {
       return const Scaffold(
         body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF16A34A)),
+          child: CircularProgressIndicator(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor),
         ),
       );
     }
@@ -332,13 +334,13 @@ class _PosScreenState extends State<PosScreen> {
                 // Header
                 Container(
                   padding: const EdgeInsets.all(16),
-                  color: const Color(0xFF16A34A),
+                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                   child: Row(
                     children: [
                       const Icon(Icons.restaurant, color: Colors.white),
                       const SizedBox(width: 8),
                       const Text(
-                        'GreenChef POS',
+                        'SyncResto POS',
                         style: TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -358,15 +360,15 @@ class _PosScreenState extends State<PosScreen> {
                 // Waiter info
                 Container(
                   padding: const EdgeInsets.all(12),
-                  color: const Color(0xFFF0FDF4),
+                  color: const Color(0xFFEFF6FF),
                   child: Row(
                     children: [
-                      const Icon(Icons.person, color: Color(0xFF16A34A), size: 20),
+                      Icon(Icons.person, color: Provider.of<ThemeProvider>(context, listen: false).primaryColor, size: 20),
                       const SizedBox(width: 8),
                       Text(
                         widget.waiter['name'] ?? 'Garson',
-                        style: const TextStyle(
-                          color: Color(0xFF16A34A),
+                        style: TextStyle(
+                          color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -392,7 +394,7 @@ class _PosScreenState extends State<PosScreen> {
                           onSelected: (_) {
                             setState(() => _selectedSectionId = section['id']);
                           },
-                          selectedColor: const Color(0xFF16A34A),
+                          selectedColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                           labelStyle: TextStyle(
                             color: isSelected ? Colors.white : Colors.black,
                           ),
@@ -428,14 +430,14 @@ class _PosScreenState extends State<PosScreen> {
                         child: Container(
                           decoration: BoxDecoration(
                             color: isSelected
-                                ? const Color(0xFF16A34A)
+                                ? Provider.of<ThemeProvider>(context, listen: false).primaryColor
                                 : hasTicket
                                     ? const Color(0xFFFEF3C7)
                                     : const Color(0xFFF3F4F6),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
                               color: isSelected
-                                  ? const Color(0xFF16A34A)
+                                  ? Provider.of<ThemeProvider>(context, listen: false).primaryColor
                                   : hasTicket
                                       ? const Color(0xFFF59E0B)
                                       : const Color(0xFFE5E7EB),
@@ -499,7 +501,7 @@ class _PosScreenState extends State<PosScreen> {
                           onSelected: (_) {
                             setState(() => _selectedCategoryId = category['id']);
                           },
-                          selectedColor: const Color(0xFF16A34A),
+                          selectedColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                           labelStyle: TextStyle(
                             color: isSelected ? Colors.white : Colors.black,
                           ),
@@ -558,7 +560,7 @@ class _PosScreenState extends State<PosScreen> {
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: Image.network(
-                                    'https://greenchef.com.tr${product['image']}',
+                                    widget.apiService.getImageUrl(product['image']?.toString()),
                                     width: 60,
                                     height: 60,
                                     fit: BoxFit.cover,
@@ -593,7 +595,7 @@ class _PosScreenState extends State<PosScreen> {
                               Text(
                                 '${product['price']} TL',
                                 style: const TextStyle(
-                                  color: Color(0xFF16A34A),
+                                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                                   fontWeight: FontWeight.bold,
                                   fontSize: 14,
                                 ),
@@ -660,7 +662,7 @@ class _PosScreenState extends State<PosScreen> {
                                     width: 28,
                                     height: 28,
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFF16A34A),
+                                      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                                       borderRadius: BorderRadius.circular(6),
                                     ),
                                     child: Center(
@@ -746,7 +748,7 @@ class _PosScreenState extends State<PosScreen> {
                               style: const TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 24,
-                                color: Color(0xFF16A34A),
+                                color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                               ),
                             ),
                           ],
@@ -790,7 +792,7 @@ class _PosScreenState extends State<PosScreen> {
                                 icon: const Icon(Icons.money),
                                 label: const Text('Nakit'),
                                 style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF16A34A),
+                                  backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                                   foregroundColor: Colors.white,
                                   padding: const EdgeInsets.symmetric(vertical: 12),
                                 ),
@@ -824,7 +826,7 @@ class _PosScreenState extends State<PosScreen> {
                         icon: const Icon(Icons.add),
                         label: const Text('Adisyon Ac'),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF16A34A),
+                          backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                           foregroundColor: Colors.white,
                           padding: const EdgeInsets.symmetric(vertical: 14),
                         ),

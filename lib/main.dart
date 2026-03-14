@@ -1,11 +1,13 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'services/storage_service.dart';
 import 'services/api_service.dart';
 import 'services/printer_service.dart';
 import 'services/sound_service.dart';
 import 'services/websocket_service.dart';
+import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
 
@@ -26,7 +28,25 @@ void main() async {
   final soundService = SoundService();
   final webSocketService = WebSocketService();
 
-  // Offline servisleri baslat
+  // Theme provider
+  final themeProvider = ThemeProvider();
+  await themeProvider.loadCachedTheme();
+
+  final savedApiUrl = storageService.getApiUrl();
+  if (savedApiUrl != null) {
+    apiService.setBaseUrl(savedApiUrl);
+  }
+  final savedApiKey = storageService.getApiKey();
+  if (savedApiKey != null) {
+    apiService.setApiKey(savedApiKey);
+  }
+
+  // Backend URL (for images/assets)
+  final savedBackendUrl = storageService.getBackendUrl();
+  if (savedBackendUrl != null) {
+    apiService.setBackendUrl(savedBackendUrl);
+  }
+
   await apiService.initOfflineServices();
 
   // Yazici ayarlarini yukle
@@ -55,29 +75,37 @@ void main() async {
     }
   };
 
-  runApp(GreenChefPosApp(
-    storageService: storageService,
-    apiService: apiService,
-    printerService: printerService,
-    soundService: soundService,
-    webSocketService: webSocketService,
-  ));
+  runApp(
+    ChangeNotifierProvider.value(
+      value: themeProvider,
+      child: SyncRestoPosApp(
+        storageService: storageService,
+        apiService: apiService,
+        printerService: printerService,
+        soundService: soundService,
+        webSocketService: webSocketService,
+        themeProvider: themeProvider,
+      ),
+    ),
+  );
 }
 
-class GreenChefPosApp extends StatelessWidget {
+class SyncRestoPosApp extends StatelessWidget {
   final StorageService storageService;
   final ApiService apiService;
   final PrinterService printerService;
   final SoundService soundService;
   final WebSocketService webSocketService;
+  final ThemeProvider themeProvider;
 
-  const GreenChefPosApp({
+  const SyncRestoPosApp({
     super.key,
     required this.storageService,
     required this.apiService,
     required this.printerService,
     required this.soundService,
     required this.webSocketService,
+    required this.themeProvider,
   });
 
   @override
@@ -85,30 +113,34 @@ class GreenChefPosApp extends StatelessWidget {
     // Check if API key exists
     final hasApiKey = storageService.getApiKey() != null;
 
-    return MaterialApp(
-      title: 'GreenChef POS',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF16A34A),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        fontFamily: 'Roboto',
-      ),
-      home: hasApiKey
-          ? InitialSyncScreen(
-              storageService: storageService,
-              apiService: apiService,
-              printerService: printerService,
-              webSocketService: webSocketService,
-            )
-          : SetupScreen(
-              storageService: storageService,
-              apiService: apiService,
-              printerService: printerService,
-              webSocketService: webSocketService,
+    return Consumer<ThemeProvider>(
+      builder: (context, theme, child) {
+        return MaterialApp(
+          title: theme.brandName,
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: theme.primaryColor,
+              brightness: Brightness.light,
             ),
+            useMaterial3: true,
+            fontFamily: 'Roboto',
+          ),
+          home: hasApiKey
+              ? InitialSyncScreen(
+                  storageService: storageService,
+                  apiService: apiService,
+                  printerService: printerService,
+                  webSocketService: webSocketService,
+                )
+              : SetupScreen(
+                  storageService: storageService,
+                  apiService: apiService,
+                  printerService: printerService,
+                  webSocketService: webSocketService,
+                ),
+        );
+      },
     );
   }
 }

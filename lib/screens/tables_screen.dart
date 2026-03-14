@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'dart:async';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
 import '../services/connectivity_service.dart';
+import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 import 'printer_settings_screen.dart';
 import '../widgets/ticket_modal.dart';
+import '../widgets/offline_data_modal.dart';
 
 class TablesScreen extends StatefulWidget {
   final StorageService storageService;
@@ -35,6 +38,7 @@ class _TablesScreenState extends State<TablesScreen> {
   bool _isLoading = true;
   int? _selectedSectionId;
   Timer? _clockTimer;
+  Timer? _refreshTimer;
   String _currentTime = '';
   String _currentDate = '';
 
@@ -42,6 +46,9 @@ class _TablesScreenState extends State<TablesScreen> {
   final ConnectivityService _connectivity = ConnectivityService();
   bool _isOnline = true;
   StreamSubscription<bool>? _connectivitySubscription;
+
+  // Ayarlar
+  bool _showProductImages = true;
 
   int? _safeInt(dynamic value) {
     if (value == null) return null;
@@ -53,16 +60,35 @@ class _TablesScreenState extends State<TablesScreen> {
   @override
   void initState() {
     super.initState();
+    _loadSettings();
     _loadData();
     _startClock();
+    _startAutoRefresh();
     _setupConnectivity();
+  }
+
+  Future<void> _loadSettings() async {
+    final showImages = await widget.storageService.getShowProductImages();
+    if (mounted) {
+      setState(() => _showProductImages = showImages);
+    }
   }
 
   @override
   void dispose() {
     _clockTimer?.cancel();
+    _refreshTimer?.cancel();
     _connectivitySubscription?.cancel();
     super.dispose();
+  }
+
+  void _startAutoRefresh() {
+    // Her 2 saniyede masaları güncelle (sessiz mod - loading gösterme)
+    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (_isOnline && mounted) {
+        _loadData(silent: true);
+      }
+    });
   }
 
   void _setupConnectivity() {
@@ -98,11 +124,16 @@ class _TablesScreenState extends State<TablesScreen> {
     return months[month - 1];
   }
 
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
+  Future<void> _loadData({bool silent = false}) async {
+    // Sadece ilk yüklemede loading göster
+    if (!silent) {
+      setState(() => _isLoading = true);
+    }
     try {
       final sections = await widget.apiService.getSections();
       final tables = await widget.apiService.getTables();
+
+      if (!mounted) return;
 
       setState(() {
         _sections = sections;
@@ -112,9 +143,13 @@ class _TablesScreenState extends State<TablesScreen> {
         }
       });
     } catch (e) {
-      _showError('Veri yuklenemedi: $e');
+      if (!silent) {
+        _showError('Veri yuklenemedi: $e');
+      }
     } finally {
-      setState(() => _isLoading = false);
+      if (!silent) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -168,6 +203,7 @@ class _TablesScreenState extends State<TablesScreen> {
         apiService: widget.apiService,
         printerService: widget.printerService,
         waiter: widget.waiter,
+        showProductImages: _showProductImages,
         onClose: () {
           Navigator.of(context).pop();
           _loadData(); // Refresh tables
@@ -213,12 +249,14 @@ class _TablesScreenState extends State<TablesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Provider.of<ThemeProvider>(context);
+
     return Scaffold(
       backgroundColor: Colors.grey[100],
       body: Column(
         children: [
           // Header
-          _buildHeader(),
+          _buildHeader(theme),
 
           // Section Tabs
           _buildSectionTabs(),
@@ -226,18 +264,18 @@ class _TablesScreenState extends State<TablesScreen> {
           // Tables Grid
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFF16A34A)))
-                : _buildTablesGrid(),
+                ? Center(child: CircularProgressIndicator(color: theme.primaryColor))
+                : _buildTablesGrid(theme),
           ),
 
           // Status Legend
-          _buildStatusLegend(),
+          _buildStatusLegend(theme),
         ],
       ),
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(ThemeProvider theme) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       decoration: BoxDecoration(
@@ -249,22 +287,11 @@ class _TablesScreenState extends State<TablesScreen> {
       child: Row(
         children: [
           // Logo
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: const Color(0xFF16A34A),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Icon(Icons.restaurant, color: Colors.white, size: 24),
-          ),
-          const SizedBox(width: 12),
-          const Text(
-            'GreenChef POS',
-            style: TextStyle(
-              color: Color(0xFF1F2937),
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-            ),
+          Image.asset(
+            'assets/images/logo.png',
+            width: 140,
+            height: 45,
+            fit: BoxFit.contain,
           ),
 
           const Spacer(),
@@ -322,48 +349,127 @@ class _TablesScreenState extends State<TablesScreen> {
           const Spacer(),
 
           // Waiter info
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.grey[100],
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  backgroundColor: const Color(0xFF16A34A),
-                  radius: 18,
-                  child: Text(
-                    (widget.waiter['name'] ?? 'G')[0].toUpperCase(),
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+          PopupMenuButton<String>(
+            offset: const Offset(0, 50),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            onSelected: (value) async {
+              if (value == 'toggle_images') {
+                setState(() => _showProductImages = !_showProductImages);
+                await widget.storageService.setShowProductImages(_showProductImages);
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem<String>(
+                value: 'toggle_images',
+                child: Row(
                   children: [
-                    Text(
-                      widget.waiter['name'] ?? 'Garson',
-                      style: const TextStyle(color: Color(0xFF1F2937), fontWeight: FontWeight.w500),
+                    Icon(
+                      _showProductImages ? Icons.image : Icons.image_not_supported,
+                      color: _showProductImages ? theme.primaryColor : Colors.grey,
+                      size: 20,
                     ),
-                    Text(
-                      'Garson',
-                      style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                    const SizedBox(width: 12),
+                    const Text('Urun Gorselleri'),
+                    const Spacer(),
+                    Switch(
+                      value: _showProductImages,
+                      onChanged: null,
+                      activeColor: theme.primaryColor,
                     ),
                   ],
                 ),
-              ],
+              ),
+            ],
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.grey[100],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: theme.primaryColor,
+                    radius: 18,
+                    child: Text(
+                      (widget.waiter['name'] ?? 'G')[0].toUpperCase(),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.waiter['name'] ?? 'Garson',
+                        style: const TextStyle(color: Color(0xFF1F2937), fontWeight: FontWeight.w500),
+                      ),
+                      Text(
+                        'Garson',
+                        style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(Icons.arrow_drop_down, color: Colors.grey[600]),
+                ],
+              ),
             ),
           ),
 
           const SizedBox(width: 16),
+
+          // Offline data button
+          FutureBuilder<Map<String, dynamic>>(
+            future: widget.apiService.getOfflineDataSummary(),
+            builder: (context, snapshot) {
+              final pendingCount = snapshot.data?['pending_count'] ?? 0;
+              final failedCount = snapshot.data?['failed_count'] ?? 0;
+              final hasData = pendingCount > 0 || failedCount > 0;
+
+              return Stack(
+                children: [
+                  IconButton(
+                    onPressed: _openOfflineDataModal,
+                    icon: Icon(
+                      Icons.cloud_sync,
+                      color: failedCount > 0
+                          ? Colors.red
+                          : (hasData ? Colors.orange : Colors.grey[700]),
+                    ),
+                    tooltip: 'Offline Veriler',
+                  ),
+                  if (hasData)
+                    Positioned(
+                      right: 6,
+                      top: 6,
+                      child: Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: failedCount > 0 ? Colors.red : Colors.orange,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Text(
+                          '${pendingCount + failedCount}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
 
           // Printer settings button
           IconButton(
             onPressed: _openPrinterSettings,
             icon: Icon(
               Icons.print,
-              color: widget.printerService.isConfigured ? const Color(0xFF16A34A) : Colors.grey[700],
+              color: widget.printerService.isConfigured ? theme.primaryColor : Colors.grey[700],
             ),
             tooltip: 'Yazici Ayarlari',
           ),
@@ -392,6 +498,19 @@ class _TablesScreenState extends State<TablesScreen> {
       // Ayarlar değiştiğinde UI'ı güncelle
       setState(() {});
     });
+  }
+
+  void _openOfflineDataModal() {
+    showDialog(
+      context: context,
+      builder: (context) => OfflineDataModal(
+        apiService: widget.apiService,
+        onSyncComplete: () {
+          _loadData(); // Masaları yenile
+          setState(() {}); // Badge'i güncelle
+        },
+      ),
+    );
   }
 
   Widget _buildSectionTabs() {
@@ -461,7 +580,7 @@ class _TablesScreenState extends State<TablesScreen> {
     );
   }
 
-  Widget _buildTablesGrid() {
+  Widget _buildTablesGrid(ThemeProvider theme) {
     final tables = _filteredTables;
 
     if (tables.isEmpty) {
@@ -480,23 +599,53 @@ class _TablesScreenState extends State<TablesScreen> {
       );
     }
 
-    return GridView.builder(
-      padding: const EdgeInsets.all(24),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 6,
-        childAspectRatio: 1,
-        crossAxisSpacing: 16,
-        mainAxisSpacing: 16,
-      ),
-      itemCount: tables.length,
-      itemBuilder: (context, index) {
-        final table = tables[index];
-        return _buildTableCard(table);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final tableCount = tables.length;
+        final availableWidth = constraints.maxWidth - 48; // padding
+        final availableHeight = constraints.maxHeight - 48;
+
+        // En uygun grid boyutunu bul (tüm masalar ekrana sığmalı)
+        int bestCols = 1;
+        int bestRows = tableCount;
+        double bestCellSize = 0;
+
+        for (int cols = 1; cols <= tableCount; cols++) {
+          final rows = (tableCount / cols).ceil();
+          final cellWidth = (availableWidth - (cols - 1) * 12) / cols;
+          final cellHeight = (availableHeight - (rows - 1) * 12) / rows;
+          final cellSize = cellWidth < cellHeight ? cellWidth : cellHeight;
+
+          if (cellSize > bestCellSize) {
+            bestCellSize = cellSize;
+            bestCols = cols;
+            bestRows = rows;
+          }
+        }
+
+        final cellWidth = (availableWidth - (bestCols - 1) * 12) / bestCols;
+        final cellHeight = (availableHeight - (bestRows - 1) * 12) / bestRows;
+
+        return GridView.builder(
+          padding: const EdgeInsets.all(24),
+          physics: const NeverScrollableScrollPhysics(), // Scroll kapalı
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: bestCols,
+            childAspectRatio: cellWidth / cellHeight,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+          ),
+          itemCount: tables.length,
+          itemBuilder: (context, index) {
+            final table = tables[index];
+            return _buildTableCard(table, theme);
+          },
+        );
       },
     );
   }
 
-  Widget _buildTableCard(Map<String, dynamic> table) {
+  Widget _buildTableCard(Map<String, dynamic> table, ThemeProvider theme) {
     final isOccupied = table['status'] == 'occupied' || table['current_ticket_id'] != null;
     final tableNumber = (table['table_number'] ?? 'M${table['id']}').toString().replaceAll('Masa ', '');
     final total = table['current_total'];
@@ -509,17 +658,11 @@ class _TablesScreenState extends State<TablesScreen> {
         borderRadius: BorderRadius.circular(12),
         child: Container(
           decoration: BoxDecoration(
-            gradient: isOccupied
-                ? const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF16A34A), Color(0xFF059669)],
-                  )
-                : null,
+            gradient: isOccupied ? theme.backgroundGradient : null,
             color: isOccupied ? null : Colors.white,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: isOccupied ? const Color(0xFF16A34A) : Colors.grey[300]!,
+              color: isOccupied ? theme.primaryColor : Colors.grey[300]!,
               width: 2,
             ),
             boxShadow: [
@@ -595,7 +738,7 @@ class _TablesScreenState extends State<TablesScreen> {
     );
   }
 
-  Widget _buildStatusLegend() {
+  Widget _buildStatusLegend(ThemeProvider theme) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       decoration: BoxDecoration(
@@ -607,7 +750,7 @@ class _TablesScreenState extends State<TablesScreen> {
         children: [
           _buildLegendItem('Bos', _emptyCount, Colors.grey[300]!),
           const SizedBox(width: 32),
-          _buildLegendItem('Dolu', _occupiedCount, const Color(0xFF16A34A)),
+          _buildLegendItem('Dolu', _occupiedCount, theme.primaryColor),
         ],
       ),
     );
@@ -656,9 +799,15 @@ class _TablesScreenState extends State<TablesScreen> {
 
   Color _parseColor(String colorStr) {
     try {
-      return Color(int.parse(colorStr.replaceFirst('#', '0xFF')));
+      // # işaretini kaldır ve parse et
+      String hex = colorStr.replaceAll('#', '');
+      if (hex.length == 6) {
+        hex = 'FF$hex';
+      }
+      return Color(int.parse(hex, radix: 16));
     } catch (e) {
-      return const Color(0xFF16A34A);
+      print('[Tables] Renk parse hatası: $colorStr - $e');
+      return Provider.of<ThemeProvider>(context, listen: false).primaryColor;
     }
   }
 }

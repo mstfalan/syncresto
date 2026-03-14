@@ -4,10 +4,28 @@ import 'connectivity_service.dart';
 import 'sync_service.dart';
 
 class ApiService {
-  static const String baseUrl = 'https://greenchef.com.tr/api';
+  static const String defaultBaseUrl = 'https://api.syncresto.com';
 
   late Dio _dio;
   String? _waiterToken;
+  String? _apiKey;
+  String _baseUrl = defaultBaseUrl;
+  String? _backendUrl;
+
+  String? get backendUrl => _backendUrl;
+
+  void setBackendUrl(String? url) {
+    _backendUrl = url;
+    _syncService.setBackendUrl(url);
+  }
+
+  /// Converts relative image path to full URL using backend URL
+  String getImageUrl(String? imagePath) {
+    if (imagePath == null || imagePath.isEmpty) return '';
+    if (imagePath.startsWith('http')) return imagePath;
+    if (_backendUrl == null) return imagePath;
+    return '$_backendUrl$imagePath';
+  }
 
   final LocalDbService _localDb = LocalDbService();
   final ConnectivityService _connectivity = ConnectivityService();
@@ -16,8 +34,12 @@ class ApiService {
   bool get isOnline => _connectivity.isOnline;
 
   ApiService() {
+    _initDio();
+  }
+
+  void _initDio() {
     _dio = Dio(BaseOptions(
-      baseUrl: baseUrl,
+      baseUrl: _baseUrl,
       connectTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(seconds: 15),
       headers: {
@@ -25,13 +47,28 @@ class ApiService {
       },
     ));
 
-    // Add logging interceptor
     _dio.interceptors.add(LogInterceptor(
       requestBody: true,
       responseBody: true,
       error: true,
       logPrint: (obj) => print('[API] $obj'),
     ));
+  }
+
+  void setBaseUrl(String url) {
+    _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    _initDio();
+    if (_apiKey != null) {
+      _dio.options.headers['X-API-Key'] = _apiKey;
+    }
+    if (_waiterToken != null) {
+      _dio.options.headers['Authorization'] = 'Bearer $_waiterToken';
+    }
+  }
+
+  void setApiKey(String apiKey) {
+    _apiKey = apiKey;
+    _dio.options.headers['X-API-Key'] = apiKey;
   }
 
   Dio get dio => _dio;
@@ -63,10 +100,15 @@ class ApiService {
 
   Future<Map<String, dynamic>> validateApiKey(String apiKey) async {
     try {
-      final response = await _dio.post('/pos-keys/validate', data: {
-        'apiKey': apiKey,
-      });
-      return response.data;
+      setApiKey(apiKey);
+      final response = await _dio.post('/api/pos/validate-key');
+      if (response.data['valid'] == true) {
+        return response.data;
+      }
+      return {
+        'valid': false,
+        'error': response.data['error'] ?? 'Gecersiz API Key',
+      };
     } on DioException catch (e) {
       return {
         'valid': false,
@@ -83,7 +125,7 @@ class ApiService {
     // Oncelikle online dene
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.post('/pos/waiters/login', data: {
+        final response = await _dio.post('/api/pos/waiters/login', data: {
           'pin': pin,
         });
 
@@ -127,7 +169,7 @@ class ApiService {
   Future<List<dynamic>> getSections() async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.get('/pos/tables/sections');
+        final response = await _dio.get('/api/pos/tables/sections');
         // Cache'e kaydet
         await _localDb.cacheSections(List<Map<String, dynamic>>.from(response.data));
         return response.data;
@@ -144,10 +186,16 @@ class ApiService {
   Future<List<dynamic>> getTables() async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.get('/pos/tables');
+        final response = await _dio.get('/api/pos/tables');
+        final serverTables = List<Map<String, dynamic>>.from(response.data);
+
         // Cache'e kaydet
-        await _localDb.cacheTables(List<Map<String, dynamic>>.from(response.data));
-        return response.data;
+        await _localDb.cacheTables(serverTables);
+
+        // Offline'da yapılan değişiklikleri birleştir
+        // (örn: offline kapatılan masa sunucuda hala açık görünüyor olabilir)
+        final mergedTables = await _localDb.mergeTablesWithOfflineChanges(serverTables);
+        return mergedTables;
       } on DioException catch (e) {
         print('[API] Online tables basarisiz: ${e.message}');
       }
@@ -163,7 +211,7 @@ class ApiService {
     if (!_connectivity.isOnline) return;
 
     try {
-      final response = await _dio.get('/pos/tables');
+      final response = await _dio.get('/api/pos/tables');
       await _localDb.cacheTables(List<Map<String, dynamic>>.from(response.data));
       print('[API] Masa durumları server\'dan güncellendi');
     } catch (e) {
@@ -178,7 +226,7 @@ class ApiService {
   Future<List<dynamic>> getCategories() async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.get('/categories');
+        final response = await _dio.get('/api/pos/categories');
         // Cache'e kaydet
         await _localDb.cacheCategories(List<Map<String, dynamic>>.from(response.data));
         return response.data;
@@ -195,7 +243,7 @@ class ApiService {
   Future<List<dynamic>> getProducts() async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.get('/products');
+        final response = await _dio.get('/api/pos/products');
         // Cache'e kaydet
         await _localDb.cacheProducts(List<Map<String, dynamic>>.from(response.data));
         return response.data;
@@ -220,7 +268,7 @@ class ApiService {
   }) async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.post('/pos/tickets/open', data: {
+        final response = await _dio.post('/api/pos/tickets/open', data: {
           'table_id': tableId,
           'waiter_id': waiterId,
           'customer_count': customerCount,
@@ -233,26 +281,38 @@ class ApiService {
 
     // Offline - local'de olustur ve sync queue'ya ekle
     print('[API] Offline ticket olusturuluyor...');
-    final ticketNumber = 'LOCAL-${DateTime.now().millisecondsSinceEpoch}';
+
+    // Masa numarasını bul
+    final tables = await _localDb.getCachedTables();
+    final table = tables.firstWhere(
+      (t) => t['id'] == tableId,
+      orElse: () => {'table_number': tableId.toString()},
+    );
+    final tableNumber = table['table_number']?.toString() ?? tableId.toString();
+
     final localTicketId = await _localDb.createLocalTicket(
       tableId: tableId,
       waiterId: waiterId,
       customerCount: customerCount,
-      ticketNumber: ticketNumber,
+      tableNumber: tableNumber,
     );
+
+    // Oluşturulan ticket'ı getir
+    final ticket = await _localDb.getLocalTicket(localTicketId);
 
     return {
       'success': true,
       'ticket_id': localTicketId,
-      'ticket_number': ticketNumber,
+      'ticket_number': ticket?['ticket_number'] ?? 'OFFLINE-$tableNumber',
       'offline': true,
+      'offline_permissions': ticket?['offline_permissions'],
     };
   }
 
   Future<Map<String, dynamic>?> getTableTicket(int tableId) async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.get('/pos/tickets/table/$tableId');
+        final response = await _dio.get('/api/pos/tickets/table/$tableId');
         return response.data;
       } on DioException catch (e) {
         if (e.response?.statusCode == 404) {
@@ -324,7 +384,7 @@ class ApiService {
   }) async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.post('/pos/tickets/$ticketId/items', data: {
+        final response = await _dio.post('/api/pos/tickets/$ticketId/items', data: {
           'product_id': productId,
           'product_name': productName,
           'unit_price': unitPrice,
@@ -372,7 +432,7 @@ class ApiService {
   }) async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.put('/pos/tickets/$ticketId/items/$itemId', data: {
+        final response = await _dio.put('/api/pos/tickets/$ticketId/items/$itemId', data: {
           if (quantity != null) 'quantity': quantity,
           if (notes != null) 'notes': notes,
           if (waiterId != null) 'waiter_id': waiterId,
@@ -398,7 +458,7 @@ class ApiService {
   }) async {
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.delete('/pos/tickets/$ticketId/items/$itemId', data: {
+        final response = await _dio.delete('/api/pos/tickets/$ticketId/items/$itemId', data: {
           'cancel_reason': cancelReason ?? 'Musteri istegi',
           if (waiterId != null) 'waiter_id': waiterId,
         });
@@ -446,7 +506,7 @@ class ApiService {
     // SERVER TICKET - online ise direkt kapat
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.post('/pos/tickets/$ticketId/close', data: {
+        final response = await _dio.post('/api/pos/tickets/$ticketId/close', data: {
           'payment_method': paymentMethod,
           'discount_amount': discountAmount,
           if (discountType != null) 'discount_type': discountType,
@@ -487,7 +547,7 @@ class ApiService {
     // SERVER TICKET - online ise direkt iptal et
     if (_connectivity.isOnline) {
       try {
-        final response = await _dio.post('/pos/tickets/$ticketId/void', data: {
+        final response = await _dio.post('/api/pos/tickets/$ticketId/void', data: {
           'reason': reason ?? 'Iptal',
           if (waiterId != null) 'waiter_id': waiterId,
         });
@@ -501,12 +561,36 @@ class ApiService {
     return {'success': false, 'error': 'Offline ve server ticket'};
   }
 
+  Future<Map<String, dynamic>> transferTable({
+    required int ticketId,
+    required int newTableId,
+    required int waiterId,
+  }) async {
+    if (!_connectivity.isOnline) {
+      return {'success': false, 'error': 'Masa degistirme icin internet gerekli'};
+    }
+
+    try {
+      final response = await _dio.post(
+        '/api/pos/tickets/$ticketId/transfer',
+        data: {
+          'new_table_id': newTableId,
+          'waiter_id': waiterId,
+        },
+      );
+      return response.data;
+    } catch (e) {
+      print('[API] transferTable error: $e');
+      return {'success': false, 'error': e.toString()};
+    }
+  }
+
   // =============================================
   // Settings
   // =============================================
 
   Future<Map<String, dynamic>> getSettings() async {
-    final response = await _dio.get('/settings');
+    final response = await _dio.get('/api/pos/settings');
     return response.data;
   }
 
@@ -524,7 +608,7 @@ class ApiService {
 
     try {
       final response = await _dio.get(
-        '/pos/printers',
+        '/api/pos/printers',
         options: Options(
           receiveTimeout: const Duration(seconds: 5), // Kısa timeout
         ),
@@ -605,7 +689,7 @@ class ApiService {
     }
 
     try {
-      final response = await _dio.post('/pos/tickets/$ticketId/print-kitchen', data: {
+      final response = await _dio.post('/api/pos/tickets/$ticketId/print-kitchen', data: {
         if (waiterId != null) 'waiter_id': waiterId,
       });
       return response.data;
@@ -625,6 +709,30 @@ class ApiService {
 
   Future<void> refreshCache() async {
     await _syncService.refreshCache();
+  }
+
+  // =============================================
+  // Offline Data Management
+  // =============================================
+
+  /// Offline işlemlerin özetini getir (UI için)
+  Future<Map<String, dynamic>> getOfflineDataSummary() async {
+    return await _syncService.getSyncStatus();
+  }
+
+  /// Hatalı işlemi tekrar dene
+  Future<void> retrySyncItem(int syncId) async {
+    await _syncService.retrySyncItem(syncId);
+  }
+
+  /// Hatalı işlemi sil
+  Future<void> deleteSyncItem(int syncId) async {
+    await _syncService.deleteSyncItem(syncId);
+  }
+
+  /// Tüm hatalı işlemleri temizle
+  Future<void> clearFailedSyncItems() async {
+    await _syncService.clearFailedItems();
   }
 
   void dispose() {

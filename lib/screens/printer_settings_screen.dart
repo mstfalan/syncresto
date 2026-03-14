@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/printer_service.dart';
 import '../services/api_service.dart';
+import '../providers/theme_provider.dart';
 
 class PrinterSettingsScreen extends StatefulWidget {
   final PrinterService printerService;
@@ -78,7 +80,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Yazici Ayarlari'),
-        backgroundColor: const Color(0xFF16A34A),
+        backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
         foregroundColor: Colors.white,
         actions: [
           // Sunucudan yenile butonu
@@ -312,7 +314,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 _showMessage('$name eklendi');
               },
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF16A34A),
+                backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                 foregroundColor: Colors.white,
               ),
               child: const Text('Ekle'),

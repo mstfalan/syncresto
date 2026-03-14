@@ -550,7 +550,7 @@ class PrinterService {
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     bytes += generator.text(
-      'www.greenchef.com.tr',
+      'SyncResto POS',
       styles: const PosStyles(align: PosAlign.center),
     );
 
@@ -734,7 +734,7 @@ class PrinterService {
       styles: const PosStyles(align: PosAlign.center, bold: true),
     );
     bytes += generator.text(
-      'www.greenchef.com.tr',
+      'SyncResto POS',
       styles: const PosStyles(align: PosAlign.center),
     );
 

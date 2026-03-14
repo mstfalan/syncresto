@@ -1,5 +1,5 @@
-name: greenchef_pos
-description: "A new Flutter project."
+name: syncresto_pos
+description: "SyncResto POS - Multi-tenant restaurant point of sale system"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -49,6 +49,7 @@ dependencies:
   flutter_blue_plus: ^1.35.2
   permission_handler: ^11.3.1
   audioplayers: ^6.1.0
+  uuid: ^4.5.1
 
 dev_dependencies:
   flutter_test:
@@ -73,9 +74,8 @@ flutter:
   uses-material-design: true
 
   # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  assets:
+    - assets/images/logo.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

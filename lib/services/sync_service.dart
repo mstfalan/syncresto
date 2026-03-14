@@ -19,9 +19,23 @@ class SyncService {
   Timer? _syncTimer;
   bool _isSyncing = false;
   bool _isInitialSyncDone = false;
+  String? _backendUrl;
 
   // Progress callback for UI
   void Function(String message, double progress)? onSyncProgress;
+
+  // Settings callback for theme updates
+  void Function(Map<String, dynamic> settings)? onSettingsLoaded;
+
+  void setBackendUrl(String? url) {
+    _backendUrl = url;
+  }
+
+  String _getFullImageUrl(String path) {
+    if (path.startsWith('http')) return path;
+    if (_backendUrl == null) return path;
+    return '$_backendUrl$path';
+  }
 
   Future<void> init(Dio dio) async {
     _dio = dio;
@@ -74,7 +88,7 @@ class SyncService {
     try {
       // 1. Kategoriler
       _reportProgress('Kategoriler indiriliyor...', 0.1);
-      final categoriesResponse = await _dio!.get('/categories');
+      final categoriesResponse = await _dio!.get('/api/pos/categories');
       if (categoriesResponse.data is List) {
         await _localDb.cacheCategories(List<Map<String, dynamic>>.from(categoriesResponse.data));
         print('[Sync] Kategoriler: ${(categoriesResponse.data as List).length}');
@@ -82,7 +96,7 @@ class SyncService {
 
       // 2. Ürünler
       _reportProgress('Ürünler indiriliyor...', 0.2);
-      final productsResponse = await _dio!.get('/products');
+      final productsResponse = await _dio!.get('/api/pos/products');
       List<Map<String, dynamic>> products = [];
       if (productsResponse.data is List) {
         products = List<Map<String, dynamic>>.from(productsResponse.data);
@@ -96,7 +110,7 @@ class SyncService {
 
       // 4. Salonlar
       _reportProgress('Salonlar indiriliyor...', 0.5);
-      final sectionsResponse = await _dio!.get('/pos/tables/sections');
+      final sectionsResponse = await _dio!.get('/api/pos/tables/sections');
       if (sectionsResponse.data is List) {
         await _localDb.cacheSections(List<Map<String, dynamic>>.from(sectionsResponse.data));
         print('[Sync] Salonlar: ${(sectionsResponse.data as List).length}');
@@ -104,7 +118,7 @@ class SyncService {
 
       // 5. Masalar
       _reportProgress('Masalar indiriliyor...', 0.6);
-      final tablesResponse = await _dio!.get('/pos/tables');
+      final tablesResponse = await _dio!.get('/api/pos/tables');
       if (tablesResponse.data is List) {
         await _localDb.cacheTables(List<Map<String, dynamic>>.from(tablesResponse.data));
         print('[Sync] Masalar: ${(tablesResponse.data as List).length}');
@@ -117,10 +131,14 @@ class SyncService {
       // 7. Ayarlar (varsa)
       _reportProgress('Ayarlar indiriliyor...', 0.9);
       try {
-        final settingsResponse = await _dio!.get('/settings');
+        final settingsResponse = await _dio!.get('/api/pos/settings');
         if (settingsResponse.data != null) {
-          await _localDb.cacheSettings(settingsResponse.data);
+          final settings = Map<String, dynamic>.from(settingsResponse.data);
+          await _localDb.cacheSettings(settings);
           print('[Sync] Ayarlar cache\'lendi');
+
+          // Tema güncellemesi için callback
+          onSettingsLoaded?.call(settings);
         }
       } catch (e) {
         print('[Sync] Ayarlar alınamadı (opsiyonel): $e');
@@ -155,7 +173,7 @@ class SyncService {
         // Tam URL oluştur
         String imageUrl = image.toString();
         if (!imageUrl.startsWith('http')) {
-          imageUrl = 'https://greenchef.com.tr$imageUrl';
+          imageUrl = _getFullImageUrl(imageUrl);
         }
         imageUrls.add(imageUrl);
       }
@@ -183,7 +201,7 @@ class SyncService {
   /// Tüm garsonları API'den al ve cache'le
   Future<void> _cacheAllWaiters() async {
     try {
-      final response = await _dio!.get('/pos/waiters');
+      final response = await _dio!.get('/api/pos/waiters');
       if (response.data is List) {
         final waiters = List<Map<String, dynamic>>.from(response.data);
         for (final waiter in waiters) {
@@ -223,7 +241,7 @@ class SyncService {
 
     try {
       // 1. Ürünleri güncelle
-      final productsResponse = await _dio!.get('/products');
+      final productsResponse = await _dio!.get('/api/pos/products');
       if (productsResponse.data is List) {
         final products = List<Map<String, dynamic>>.from(productsResponse.data);
         final cachedProducts = await _localDb.getCachedProducts();
@@ -272,25 +290,40 @@ class SyncService {
       }
 
       // 2. Kategorileri güncelle
-      final categoriesResponse = await _dio!.get('/categories');
+      final categoriesResponse = await _dio!.get('/api/pos/categories');
       if (categoriesResponse.data is List) {
         await _localDb.cacheCategories(List<Map<String, dynamic>>.from(categoriesResponse.data));
       }
 
       // 3. Masaları güncelle
-      final tablesResponse = await _dio!.get('/pos/tables');
+      final tablesResponse = await _dio!.get('/api/pos/tables');
       if (tablesResponse.data is List) {
         await _localDb.cacheTables(List<Map<String, dynamic>>.from(tablesResponse.data));
       }
 
       // 4. Salonları güncelle
-      final sectionsResponse = await _dio!.get('/pos/tables/sections');
+      final sectionsResponse = await _dio!.get('/api/pos/tables/sections');
       if (sectionsResponse.data is List) {
         await _localDb.cacheSections(List<Map<String, dynamic>>.from(sectionsResponse.data));
       }
 
       // 5. Garsonları güncelle
       await _cacheAllWaiters();
+
+      // 6. Ayarları güncelle (tema için önemli)
+      try {
+        final settingsResponse = await _dio!.get('/api/pos/settings');
+        if (settingsResponse.data != null) {
+          final settings = Map<String, dynamic>.from(settingsResponse.data);
+          await _localDb.cacheSettings(settings);
+          print('[Sync] Ayarlar güncellendi');
+
+          // Tema güncellemesi için callback
+          onSettingsLoaded?.call(settings);
+        }
+      } catch (e) {
+        print('[Sync] Ayarlar güncellenemedi: $e');
+      }
 
       print('[Sync] Arka plan güncelleme tamamlandı');
     } catch (e) {
@@ -312,12 +345,6 @@ class SyncService {
     return false;
   }
 
-  /// Tam görsel URL'i oluştur
-  String _getFullImageUrl(String imagePath) {
-    if (imagePath.startsWith('http')) return imagePath;
-    return 'https://greenchef.com.tr$imagePath';
-  }
-
   Future<void> syncPendingItems() async {
     if (_isSyncing || _dio == null) return;
     if (!_connectivity.isOnline) return;
@@ -326,35 +353,51 @@ class SyncService {
     print('[Sync] Bekleyen işlemler kontrol ediliyor...');
 
     try {
-      // 1. Önce ticket CREATE işlemleri (adisyon açma)
-      final ticketCreates = await _localDb.getPendingSyncItemsByType('ticket', 'create');
-      print('[Sync] ${ticketCreates.length} ticket create bekliyor');
-      for (final item in ticketCreates) {
-        await _processSyncItem(item);
+      // Dependency-aware sync: Bağımlılığı olmayan veya bağımlılığı tamamlanmış olanları sırala
+      final allPending = await _localDb.getPendingSyncItems();
+      print('[Sync] Toplam ${allPending.length} bekleyen işlem');
+
+      // Tamamlanmış sync_id'leri takip et
+      final completedSyncIds = <int>{};
+
+      // Önce bağımlılığı olmayanları işle
+      for (final item in allPending) {
+        final dependsOn = item['depends_on_sync_id'] as int?;
+
+        if (dependsOn == null) {
+          // Bağımlılık yok, direkt işle
+          final success = await _processSyncItem(item);
+          if (success) {
+            completedSyncIds.add(item['id'] as int);
+          }
+        }
       }
 
-      // 2. Sonra item işlemleri (ürün ekleme/iptal)
-      final itemOps = await _localDb.getPendingSyncItemsByEntityType('ticket_item');
-      print('[Sync] ${itemOps.length} item işlemi bekliyor');
-      for (final item in itemOps) {
-        await _processSyncItem(item);
-      }
+      // Sonra bağımlılığı tamamlanmış olanları işle
+      for (final item in allPending) {
+        final dependsOn = item['depends_on_sync_id'] as int?;
+        final syncId = item['id'] as int;
 
-      // 3. Son olarak ticket CLOSE işlemleri
-      final ticketClose = await _localDb.getPendingSyncItemsByType('ticket', 'close');
-      print('[Sync] ${ticketClose.length} ticket close bekliyor');
-      for (final item in ticketClose) {
-        await _processSyncItem(item);
-      }
-
-      // 4. Ticket VOID işlemleri
-      final ticketVoid = await _localDb.getPendingSyncItemsByType('ticket', 'void');
-      print('[Sync] ${ticketVoid.length} ticket void bekliyor');
-      for (final item in ticketVoid) {
-        await _processSyncItem(item);
+        if (dependsOn != null && !completedSyncIds.contains(syncId)) {
+          // Bağımlılık tamamlandı mı kontrol et
+          if (await _isDependencyCompleted(dependsOn)) {
+            final success = await _processSyncItem(item);
+            if (success) {
+              completedSyncIds.add(syncId);
+            }
+          } else {
+            print('[Sync] Bağımlılık henüz tamamlanmadı: $syncId depends on $dependsOn');
+          }
+        }
       }
 
       print('[Sync] Tüm işlemler tamamlandı');
+
+      // Sync tamamlandıktan sonra sunucudan güncel verileri çek ve cache'i güncelle
+      if (completedSyncIds.isNotEmpty) {
+        print('[Sync] Cache güncelleniyor...');
+        await _refreshCacheAfterSync();
+      }
     } catch (e) {
       print('[Sync] Hata: $e');
     } finally {
@@ -362,30 +405,74 @@ class SyncService {
     }
   }
 
-  Future<void> _processSyncItem(Map<String, dynamic> item) async {
+  // Sync sonrası cache'i güncelle
+  Future<void> _refreshCacheAfterSync() async {
+    try {
+      // Masaları güncelle
+      final tablesResponse = await _dio!.get('/api/pos/tables');
+      if (tablesResponse.data is List) {
+        await _localDb.cacheTables(List<Map<String, dynamic>>.from(tablesResponse.data));
+        print('[Sync] Masa cache güncellendi');
+      }
+
+      // Salonları güncelle
+      final sectionsResponse = await _dio!.get('/api/pos/tables/sections');
+      if (sectionsResponse.data is List) {
+        await _localDb.cacheSections(List<Map<String, dynamic>>.from(sectionsResponse.data));
+        print('[Sync] Salon cache güncellendi');
+      }
+
+      // Sync edilmiş local ticket'ları temizle
+      await _localDb.cleanupSyncedTickets();
+      print('[Sync] Eski ticket\'lar temizlendi');
+    } catch (e) {
+      print('[Sync] Cache güncelleme hatası: $e');
+    }
+  }
+
+  // Bağımlılık tamamlandı mı kontrol et
+  Future<bool> _isDependencyCompleted(int syncId) async {
+    final db = await _localDb.database;
+    final result = await db.query(
+      'sync_queue',
+      where: 'id = ?',
+      whereArgs: [syncId],
+    );
+
+    if (result.isEmpty) {
+      // Kayıt yok = tamamlanmış ve silinmiş olabilir
+      return true;
+    }
+
+    final status = result.first['status'] as String?;
+    return status == 'completed';
+  }
+
+  Future<bool> _processSyncItem(Map<String, dynamic> item) async {
     final syncId = item['id'] as int;
     final action = item['action'] as String;
     final entityType = item['entity_type'] as String;
     final localId = item['local_id'] as int?;
     final payload = _parsePayload(item['payload'] as String);
+    final description = item['description'] as String? ?? '$action $entityType';
 
-    print('[Sync] İşleniyor: $action $entityType (local_id: $localId)');
+    print('[Sync] İşleniyor: $description (sync_id: $syncId)');
 
     try {
       switch (entityType) {
         case 'ticket':
-          await _syncTicket(action, localId, payload, syncId);
-          break;
+          return await _syncTicket(action, localId, payload, syncId);
         case 'ticket_item':
-          await _syncTicketItem(action, localId, payload, syncId);
-          break;
+          return await _syncTicketItem(action, localId, payload, syncId);
         default:
           print('[Sync] Bilinmeyen entity type: $entityType');
           await _localDb.markSyncFailed(syncId, 'Unknown entity type');
+          return false;
       }
     } catch (e) {
       print('[Sync] İşlem hatası: $e');
       await _localDb.markSyncFailed(syncId, e.toString());
+      return false;
     }
   }
 
@@ -424,23 +511,43 @@ class SyncService {
     }
   }
 
-  Future<void> _syncTicket(String action, int? localId, Map<String, dynamic> payload, int syncId) async {
+  Future<bool> _syncTicket(String action, int? localId, Map<String, dynamic> payload, int syncId) async {
     switch (action) {
       case 'create':
+        // Önce local ticket bilgisini al (ticket_number için)
+        final localTicket = await _localDb.getLocalTicket(localId!);
+        final offlineTicketNumber = localTicket?['ticket_number'] as String?;
+
         // Adisyon aç
-        final response = await _dio!.post('/pos/tickets/open', data: {
+        final response = await _dio!.post('/api/pos/tickets/open', data: {
           'table_id': payload['table_id'],
           'waiter_id': payload['waiter_id'],
           'customer_count': payload['customer_count'] ?? 1,
+          'is_offline': true, // Server'a offline'dan geldiğini bildir
+          'offline_ticket_number': offlineTicketNumber, // OFFLINE-5-A1B2C3D4 formatında
         });
 
         if (response.data['success'] == true) {
-          final serverId = response.data['ticket_id'];
+          final serverId = response.data['ticket_id'] as int;
+          final merged = response.data['merged'] == true;
+
           await _localDb.updateTicketServerId(localId!, serverId);
-          await _localDb.markSyncComplete(syncId);
-          print('[Sync] Ticket sync başarılı: local=$localId, server=$serverId');
+          await _localDb.markSyncComplete(syncId, serverId: serverId);
+
+          // Ticket sync olduktan sonra tüm item'ların server_ticket_id'sini güncelle
+          final items = await _localDb.getItemsByLocalTicketId(localId);
+          for (final item in items) {
+            await _localDb.updateItemServerTicketId(item['local_id'] as int, serverId);
+          }
+
+          if (merged) {
+            print('[Sync] Ticket mevcut adisyona birleştirildi: local=$localId -> server=$serverId');
+          } else {
+            print('[Sync] Ticket sync başarılı: local=$localId, server=$serverId');
+          }
+          return true;
         }
-        break;
+        return false;
 
       case 'close':
         // Önce local ticket'ın server_id'sini al
@@ -448,86 +555,123 @@ class SyncService {
         if (ticketClose == null) {
           await _localDb.markSyncComplete(syncId); // Ticket yok, atla
           print('[Sync] Close: Ticket bulunamadı, atlanıyor');
-          return;
+          return true;
         }
 
         if (ticketClose['server_id'] == null) {
           // Server'da henüz oluşturulmamış - sonraki döngüde tekrar denenecek
           print('[Sync] Close: Ticket henüz sunucuda yok, bekleniyor...');
-          return; // markSyncComplete çağırmıyoruz, tekrar denenecek
+          return false; // markSyncComplete çağırmıyoruz, tekrar denenecek
         }
 
         final serverIdClose = ticketClose['server_id'];
-        final closeResponse = await _dio!.post('/pos/tickets/$serverIdClose/close', data: {
+        final closeResponse = await _dio!.post('/api/pos/tickets/$serverIdClose/close', data: {
           'payment_method': payload['payment_method'],
           'waiter_id': payload['waiter_id'] ?? 1,
           'discount_amount': payload['discount_amount'] ?? 0,
           'discount_type': payload['discount_type'],
+          'is_offline': true, // Offline'dan geldiğini bildir - yetki bypass için
         });
 
         if (closeResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Ticket close sync başarılı: server=$serverIdClose');
+          return true;
         }
-        break;
+        return false;
 
       case 'void':
         final ticketVoid = await _localDb.getLocalTicket(localId!);
         if (ticketVoid == null) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Void: Ticket bulunamadı, atlanıyor');
-          return;
+          return true;
         }
 
         if (ticketVoid['server_id'] == null) {
           // Server'da henüz oluşturulmamış - sonraki döngüde tekrar denenecek
           print('[Sync] Void: Ticket henüz sunucuda yok, bekleniyor...');
-          return;
+          return false;
         }
 
         final serverIdVoid = ticketVoid['server_id'];
-        final voidResponse = await _dio!.post('/pos/tickets/$serverIdVoid/void', data: {
+        final voidResponse = await _dio!.post('/api/pos/tickets/$serverIdVoid/void', data: {
           'waiter_id': payload['waiter_id'] ?? 1,
+          'is_offline': true, // Offline'dan geldiğini bildir - yetki bypass için
         });
 
         if (voidResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Ticket void sync başarılı: server=$serverIdVoid');
+          return true;
         }
-        break;
+        return false;
     }
+    return false;
   }
 
-  Future<void> _syncTicketItem(String action, int? localId, Map<String, dynamic> payload, int syncId) async {
+  Future<bool> _syncTicketItem(String action, int? localId, Map<String, dynamic> payload, int syncId) async {
     switch (action) {
       case 'add_item':
         // Local ticket'ın server_id'sini al
         final localTicketId = payload['local_ticket_id'] as int?;
         if (localTicketId == null) {
           await _localDb.markSyncFailed(syncId, 'local_ticket_id eksik');
-          return;
+          return false;
         }
 
+        int? serverTicketId;
+
+        // Önce local_tickets tablosundan dene
         final ticket = await _localDb.getLocalTicket(localTicketId);
-        if (ticket == null) {
-          await _localDb.markSyncFailed(syncId, 'Ticket bulunamadı');
-          return;
+        if (ticket != null) {
+          serverTicketId = ticket['server_id'] as int?;
         }
 
-        final serverTicketId = ticket['server_id'];
+        // Ticket silinmiş olabilir - depends_on_sync_id üzerinden server_id'yi bul
+        if (serverTicketId == null) {
+          final db = await _localDb.database;
+
+          // Bu sync kaydının depends_on_sync_id'sini al
+          final syncRecord = await db.query(
+            'sync_queue',
+            columns: ['depends_on_sync_id'],
+            where: 'id = ?',
+            whereArgs: [syncId],
+          );
+
+          if (syncRecord.isNotEmpty && syncRecord.first['depends_on_sync_id'] != null) {
+            final dependsOnId = syncRecord.first['depends_on_sync_id'] as int;
+
+            // depends_on kaydından server_id'yi al
+            final parentSync = await db.query(
+              'sync_queue',
+              columns: ['server_id'],
+              where: 'id = ?',
+              whereArgs: [dependsOnId],
+            );
+
+            if (parentSync.isNotEmpty && parentSync.first['server_id'] != null) {
+              serverTicketId = parentSync.first['server_id'] as int;
+              print('[Sync] Server ticket ID depends_on üzerinden bulundu: $serverTicketId');
+            }
+          }
+        }
+
         if (serverTicketId == null) {
           // Ticket henüz sync olmamış - sonraki döngüde tekrar denenecek
           print('[Sync] Item için ticket henüz sync olmamış, bekleniyor...');
-          return;
+          return false;
         }
 
-        final response = await _dio!.post('/pos/tickets/$serverTicketId/items', data: {
+        final response = await _dio!.post('/api/pos/tickets/$serverTicketId/items', data: {
           'product_id': payload['product_id'],
           'product_name': payload['product_name'],
           'unit_price': payload['unit_price'],
           'quantity': payload['quantity'] ?? 1,
           'notes': payload['notes'],
           'waiter_id': payload['waiter_id'] ?? 1,
+          'is_offline': true, // Offline sync - kapalı ticket'a da eklenebilir
         });
 
         if (response.data['success'] == true) {
@@ -536,29 +680,61 @@ class SyncService {
           await _localDb.updateItemServerTicketId(localId, serverTicketId);
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Item sync başarılı: local=$localId, server=$serverItemId');
+          return true;
         }
-        break;
+        return false;
 
       case 'cancel_item':
         // Item iptal sync'i
-        final localTicketId = payload['local_ticket_id'] as int?;
-        if (localTicketId == null) {
+        final localTicketIdCancel = payload['local_ticket_id'] as int?;
+        if (localTicketIdCancel == null) {
           await _localDb.markSyncComplete(syncId); // Eksik veri, atla
-          return;
+          return true;
         }
 
-        final ticket = await _localDb.getLocalTicket(localTicketId);
-        if (ticket == null || ticket['server_id'] == null) {
+        int? serverTicketIdCancel;
+
+        // Önce local_tickets tablosundan dene
+        final ticketCancel = await _localDb.getLocalTicket(localTicketIdCancel);
+        if (ticketCancel != null) {
+          serverTicketIdCancel = ticketCancel['server_id'] as int?;
+        }
+
+        // Ticket silinmiş olabilir - depends_on üzerinden server_id'yi bul
+        if (serverTicketIdCancel == null) {
+          final db = await _localDb.database;
+          final syncRecord = await db.query(
+            'sync_queue',
+            columns: ['depends_on_sync_id'],
+            where: 'id = ?',
+            whereArgs: [syncId],
+          );
+
+          if (syncRecord.isNotEmpty && syncRecord.first['depends_on_sync_id'] != null) {
+            final dependsOnId = syncRecord.first['depends_on_sync_id'] as int;
+            final parentSync = await db.query(
+              'sync_queue',
+              columns: ['server_id'],
+              where: 'id = ?',
+              whereArgs: [dependsOnId],
+            );
+            if (parentSync.isNotEmpty && parentSync.first['server_id'] != null) {
+              serverTicketIdCancel = parentSync.first['server_id'] as int;
+            }
+          }
+        }
+
+        if (serverTicketIdCancel == null) {
           print('[Sync] Item cancel için ticket henüz sync olmamış');
-          return;
+          return false;
         }
 
-        final serverTicketId = ticket['server_id'];
+        final serverTicketId = serverTicketIdCancel;
         final serverItemId = payload['server_item_id'];
 
         if (serverItemId != null) {
           try {
-            await _dio!.delete('/pos/tickets/$serverTicketId/items/$serverItemId');
+            await _dio!.delete('/api/pos/tickets/$serverTicketId/items/$serverItemId');
             print('[Sync] Item cancel sync başarılı: server_item=$serverItemId');
           } catch (e) {
             print('[Sync] Item cancel API hatası: $e');
@@ -566,8 +742,9 @@ class SyncService {
         }
 
         await _localDb.markSyncComplete(syncId);
-        break;
+        return true;
     }
+    return false;
   }
 
   // Server'dan masa durumlarını al ve local'i güncelle
@@ -576,7 +753,7 @@ class SyncService {
 
     try {
       print('[Sync] Server\'dan masa durumları alınıyor...');
-      final response = await _dio!.get('/pos/tables');
+      final response = await _dio!.get('/api/pos/tables');
       if (response.data is List) {
         final tables = List<Map<String, dynamic>>.from(response.data);
         // Local DB'yi güncelle
@@ -598,14 +775,14 @@ class SyncService {
 
     try {
       // Kategoriler
-      final categoriesResponse = await _dio!.get('/categories');
+      final categoriesResponse = await _dio!.get('/api/pos/categories');
       if (categoriesResponse.data is List) {
         await _localDb.cacheCategories(List<Map<String, dynamic>>.from(categoriesResponse.data));
         print('[Sync] Kategoriler cache\'lendi: ${(categoriesResponse.data as List).length}');
       }
 
       // Ürünler
-      final productsResponse = await _dio!.get('/products');
+      final productsResponse = await _dio!.get('/api/pos/products');
       List<Map<String, dynamic>> products = [];
       if (productsResponse.data is List) {
         products = List<Map<String, dynamic>>.from(productsResponse.data);
@@ -620,14 +797,14 @@ class SyncService {
       }
 
       // Salonlar
-      final sectionsResponse = await _dio!.get('/pos/tables/sections');
+      final sectionsResponse = await _dio!.get('/api/pos/tables/sections');
       if (sectionsResponse.data is List) {
         await _localDb.cacheSections(List<Map<String, dynamic>>.from(sectionsResponse.data));
         print('[Sync] Salonlar cache\'lendi: ${(sectionsResponse.data as List).length}');
       }
 
       // Masalar
-      final tablesResponse = await _dio!.get('/pos/tables');
+      final tablesResponse = await _dio!.get('/api/pos/tables');
       if (tablesResponse.data is List) {
         await _localDb.cacheTables(List<Map<String, dynamic>>.from(tablesResponse.data));
         print('[Sync] Masalar cache\'lendi: ${(tablesResponse.data as List).length}');
@@ -704,6 +881,28 @@ class SyncService {
     waiter['sections'] = jsonDecode(waiter['sections'] as String? ?? '[]');
 
     return waiter;
+  }
+
+  // UI için sync durumu
+  Future<Map<String, dynamic>> getSyncStatus() async {
+    return await _localDb.getOfflineDataSummary();
+  }
+
+  // Hatalı işlemi tekrar dene
+  Future<void> retrySyncItem(int syncId) async {
+    await _localDb.retrySyncItem(syncId);
+    // Hemen sync başlat
+    syncPendingItems();
+  }
+
+  // Hatalı işlemi sil
+  Future<void> deleteSyncItem(int syncId) async {
+    await _localDb.deleteSyncItem(syncId);
+  }
+
+  // Tüm hatalı işlemleri temizle
+  Future<void> clearFailedItems() async {
+    await _localDb.clearFailedSyncItems();
   }
 
   void dispose() {

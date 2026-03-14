@@ -24,7 +24,7 @@ class SoundService {
       // Fallback - try URL sound
       try {
         await _audioPlayer.play(
-          UrlSource('https://www.greenchef.com.tr/sounds/notification.mp3'),
+          UrlSource('https://api.syncresto.com/sounds/notification.mp3'),
         );
       } catch (e2) {
         print('[Sound] URL ses de calinamadi: $e2');

@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/image_cache_service.dart';
+import '../providers/theme_provider.dart';
 
 class ProductDetailModal extends StatefulWidget {
   final ApiService apiService;
@@ -30,10 +32,8 @@ class ProductDetailModal extends StatefulWidget {
 class _ProductDetailModalState extends State<ProductDetailModal> {
   int _quantity = 1;
   String _notes = '';
-  double? _customPrice;
   final List<Map<String, dynamic>> _selectedExtras = [];
   final TextEditingController _notesController = TextEditingController();
-  final TextEditingController _priceController = TextEditingController();
   bool _isLoading = false;
   final ImageCacheService _imageCache = ImageCacheService();
 
@@ -64,7 +64,6 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
   @override
   void dispose() {
     _notesController.dispose();
-    _priceController.dispose();
     super.dispose();
   }
 
@@ -79,7 +78,6 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
   }
 
   double get _unitPrice {
-    if (_customPrice != null) return _customPrice!;
     return _basePrice + _extrasTotal;
   }
 
@@ -206,9 +204,9 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-      decoration: const BoxDecoration(
-        color: Color(0xFF16A34A),
-        borderRadius: BorderRadius.only(
+      decoration: BoxDecoration(
+        color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
+        borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(16),
           topRight: Radius.circular(16),
         ),
@@ -264,7 +262,7 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
             decoration: BoxDecoration(
-              color: const Color(0xFF16A34A),
+              color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
@@ -298,7 +296,7 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
 
   Widget _buildProductImage() {
     final imagePath = widget.product['image']?.toString() ?? '';
-    final imageUrl = 'https://greenchef.com.tr$imagePath';
+    final imageUrl = widget.apiService.getImageUrl(imagePath);
 
     // Önce cache'den dene
     try {
@@ -324,8 +322,8 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Container(
             color: Colors.grey[200],
-            child: const Center(
-              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF16A34A)),
+            child: Center(
+              child: CircularProgressIndicator(strokeWidth: 2, color: Provider.of<ThemeProvider>(context, listen: false).primaryColor),
             ),
           );
         }
@@ -413,7 +411,7 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: Color(0xFF16A34A), width: 2),
+                  borderSide: BorderSide(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor, width: 2),
                 ),
               ),
             ),
@@ -453,9 +451,10 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
   Widget _buildOptionChip({
     required String label,
     required bool isSelected,
-    Color color = const Color(0xFF16A34A),
+    Color? color,
     required VoidCallback onTap,
   }) {
+    final themeColor = color ?? Provider.of<ThemeProvider>(context, listen: false).primaryColor;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -464,10 +463,10 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            color: isSelected ? color : Colors.grey[100],
+            color: isSelected ? themeColor : Colors.grey[100],
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: isSelected ? color : Colors.grey[300]!,
+              color: isSelected ? themeColor : Colors.grey[300]!,
             ),
           ),
           child: Row(
@@ -544,41 +543,6 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
             ],
           ),
 
-          const SizedBox(height: 24),
-
-          // Özel Fiyat
-          _buildSectionTitle('Ozel Fiyat (Opsiyonel)'),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _priceController,
-            onChanged: (value) {
-              setState(() {
-                _customPrice = double.tryParse(value);
-              });
-            },
-            style: const TextStyle(color: Color(0xFF1F2937)),
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: InputDecoration(
-              hintText: '${_basePrice.toStringAsFixed(2)} TL',
-              hintStyle: TextStyle(color: Colors.grey[500]),
-              suffixText: 'TL',
-              suffixStyle: const TextStyle(color: Color(0xFF1F2937)),
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: Colors.grey[300]!),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: Colors.grey[300]!),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: Color(0xFF16A34A), width: 2),
-              ),
-            ),
-          ),
 
           const Spacer(),
 
@@ -586,9 +550,9 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: const Color(0xFF16A34A).withValues(alpha: 0.1),
+              color: Provider.of<ThemeProvider>(context, listen: false).primaryColor.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF16A34A)),
+              border: Border.all(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor),
             ),
             child: Column(
               children: [
@@ -602,8 +566,8 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
                 const SizedBox(height: 4),
                 Text(
                   '${_totalPrice.toStringAsFixed(2)} TL',
-                  style: const TextStyle(
-                    color: Color(0xFF16A34A),
+                  style: TextStyle(
+                    color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
                   ),
@@ -628,7 +592,7 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
             child: ElevatedButton(
               onPressed: _isLoading ? null : () => _addItem(closeAfter: false),
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF16A34A),
+                backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
@@ -662,8 +626,8 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
             child: OutlinedButton(
               onPressed: _isLoading ? null : () => _addItem(closeAfter: true),
               style: OutlinedButton.styleFrom(
-                foregroundColor: const Color(0xFF16A34A),
-                side: const BorderSide(color: Color(0xFF16A34A)),
+                foregroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
+                side: BorderSide(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor),
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
@@ -688,7 +652,7 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
     required VoidCallback onTap,
   }) {
     return Material(
-      color: const Color(0xFF16A34A),
+      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: onTap,

@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:path/path.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:uuid/uuid.dart';
 
 class LocalDbService {
   static Database? _database;
@@ -29,11 +30,11 @@ class LocalDbService {
     }
 
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'greenchef_pos.db');
+    final path = join(dbPath, 'syncresto_pos.db');
 
     return await openDatabase(
       path,
-      version: 1,
+      version: 2, // v2: depends_on_sync_id, offline_permissions eklendi
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -112,6 +113,7 @@ class LocalDbService {
         server_id INTEGER,
         ticket_number TEXT NOT NULL,
         table_id INTEGER NOT NULL,
+        table_number TEXT,
         waiter_id INTEGER NOT NULL,
         customer_count INTEGER DEFAULT 1,
         status TEXT DEFAULT 'open',
@@ -124,7 +126,8 @@ class LocalDbService {
         closed_at TEXT,
         synced INTEGER DEFAULT 0,
         synced_at TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        offline_permissions TEXT
       )
     ''');
 
@@ -165,7 +168,9 @@ class LocalDbService {
         status TEXT DEFAULT 'pending',
         error_message TEXT,
         created_at TEXT NOT NULL,
-        processed_at TEXT
+        processed_at TEXT,
+        depends_on_sync_id INTEGER,
+        description TEXT
       )
     ''');
 
@@ -178,7 +183,39 @@ class LocalDbService {
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Gelecekte migration'lar buraya eklenecek
+    print('[LocalDb] Migration: $oldVersion -> $newVersion');
+
+    if (oldVersion < 2) {
+      // v2: sync_queue'ya depends_on_sync_id ve description ekle
+      try {
+        await db.execute('ALTER TABLE sync_queue ADD COLUMN depends_on_sync_id INTEGER');
+        print('[LocalDb] sync_queue.depends_on_sync_id eklendi');
+      } catch (e) {
+        print('[LocalDb] depends_on_sync_id zaten var: $e');
+      }
+
+      try {
+        await db.execute('ALTER TABLE sync_queue ADD COLUMN description TEXT');
+        print('[LocalDb] sync_queue.description eklendi');
+      } catch (e) {
+        print('[LocalDb] description zaten var: $e');
+      }
+
+      // v2: local_tickets'a offline_permissions ve table_number ekle
+      try {
+        await db.execute('ALTER TABLE local_tickets ADD COLUMN offline_permissions TEXT');
+        print('[LocalDb] local_tickets.offline_permissions eklendi');
+      } catch (e) {
+        print('[LocalDb] offline_permissions zaten var: $e');
+      }
+
+      try {
+        await db.execute('ALTER TABLE local_tickets ADD COLUMN table_number TEXT');
+        print('[LocalDb] local_tickets.table_number eklendi');
+      } catch (e) {
+        print('[LocalDb] table_number zaten var: $e');
+      }
+    }
   }
 
   // ==================== CACHE İŞLEMLERİ ====================
@@ -298,25 +335,41 @@ class LocalDbService {
   Future<int> createLocalTicket({
     required int tableId,
     required int waiterId,
-    required String ticketNumber,
+    required String tableNumber,
     int customerCount = 1,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
+    // Benzersiz ticket numarası: OFFLINE-{masa_no}-{UUID8}
+    final uuid = const Uuid().v4().substring(0, 8).toUpperCase();
+    final ticketNumber = 'OFFLINE-$tableNumber-$uuid';
+
+    // Offline'da tüm yetkiler açık
+    final offlinePermissions = jsonEncode({
+      'close_ticket': true,
+      'void_ticket': true,
+      'payment_cash': true,
+      'payment_card': true,
+      'add_item': true,
+      'cancel_item': true,
+    });
+
     final localId = await db.insert('local_tickets', {
       'ticket_number': ticketNumber,
       'table_id': tableId,
+      'table_number': tableNumber,
       'waiter_id': waiterId,
       'customer_count': customerCount,
       'status': 'open',
       'opened_at': now,
       'created_at': now,
       'synced': 0,
+      'offline_permissions': offlinePermissions,
     });
 
-    // Sync kuyruğuna ekle
-    await addToSyncQueue(
+    // Sync kuyruğuna ekle (bu sync_id'yi döndürmeli)
+    final syncId = await addToSyncQueueWithReturn(
       action: 'create',
       entityType: 'ticket',
       localId: localId,
@@ -325,6 +378,15 @@ class LocalDbService {
         'waiter_id': waiterId,
         'customer_count': customerCount,
       },
+      description: 'Masa $tableNumber: Adisyon açıldı',
+    );
+
+    // Local ticket'a sync_id'yi kaydet (item'lar bağımlılık için kullanacak)
+    await db.update(
+      'local_tickets',
+      {'synced': syncId}, // synced alanını geçici olarak sync_id olarak kullan
+      where: 'local_id = ?',
+      whereArgs: [localId],
     );
 
     // Masa durumunu güncelle
@@ -335,6 +397,7 @@ class LocalDbService {
       whereArgs: [tableId],
     );
 
+    print('[LocalDb] Offline ticket oluşturuldu: $ticketNumber (local_id: $localId, sync_id: $syncId)');
     return localId;
   }
 
@@ -449,7 +512,12 @@ class LocalDbService {
       'synced': 0,
     });
 
-    // Sync kuyruğuna ekle
+    // Ticket'ın sync_id'sini al (bağımlılık için)
+    final ticket = await getLocalTicket(localTicketId);
+    final ticketSyncId = ticket?['synced'] as int?; // synced alanında sync_id tutuyoruz
+    final tableNumber = ticket?['table_number'] ?? '';
+
+    // Sync kuyruğuna ekle - ticket create'e bağımlı
     await addToSyncQueue(
       action: 'add_item',
       entityType: 'ticket_item',
@@ -462,6 +530,8 @@ class LocalDbService {
         'quantity': quantity,
         'notes': notes,
       },
+      description: 'Masa $tableNumber: $productName x$quantity eklendi',
+      dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
     );
 
     return localItemId;
@@ -519,6 +589,8 @@ class LocalDbService {
     if (ticket == null) return;
 
     final total = (ticket['subtotal'] as num) - discountAmount;
+    final tableNumber = ticket['table_number'] ?? '';
+    final ticketSyncId = ticket['synced'] as int?;
 
     await db.update(
       'local_tickets',
@@ -543,7 +615,10 @@ class LocalDbService {
     );
     print('[LocalDb] Masa boşaltıldı (close): ${ticket['table_id']}');
 
-    // Sync kuyruğuna ekle
+    // Ödeme yöntemi label
+    final paymentLabel = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı';
+
+    // Sync kuyruğuna ekle - ticket create'e bağımlı
     await addToSyncQueue(
       action: 'close',
       entityType: 'ticket',
@@ -555,6 +630,8 @@ class LocalDbService {
         'waiter_id': waiterId,
       },
       priority: 1, // Yüksek öncelik
+      description: 'Masa $tableNumber: Hesap kapatıldı ($paymentLabel)',
+      dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
     );
   }
 
@@ -568,6 +645,9 @@ class LocalDbService {
 
     final ticket = await getLocalTicket(localTicketId);
     if (ticket == null) return;
+
+    final tableNumber = ticket['table_number'] ?? '';
+    final ticketSyncId = ticket['synced'] as int?;
 
     await db.update(
       'local_tickets',
@@ -588,13 +668,15 @@ class LocalDbService {
     );
     print('[LocalDb] Masa boşaltıldı (void): ${ticket['table_id']}');
 
-    // Sync kuyruğuna ekle
+    // Sync kuyruğuna ekle - ticket create'e bağımlı
     await addToSyncQueue(
       action: 'void',
       entityType: 'ticket',
       localId: localTicketId,
       payload: {'waiter_id': waiterId},
       priority: 1,
+      description: 'Masa $tableNumber: Adisyon iptal edildi',
+      dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
     );
   }
 
@@ -607,11 +689,36 @@ class LocalDbService {
     int? serverId,
     required Map<String, dynamic> payload,
     int priority = 0,
+    String? description,
+    int? dependsOnSyncId,
+  }) async {
+    await addToSyncQueueWithReturn(
+      action: action,
+      entityType: entityType,
+      localId: localId,
+      serverId: serverId,
+      payload: payload,
+      priority: priority,
+      description: description,
+      dependsOnSyncId: dependsOnSyncId,
+    );
+  }
+
+  // Sync kuyruğuna ekle ve sync_id döndür
+  Future<int> addToSyncQueueWithReturn({
+    required String action,
+    required String entityType,
+    int? localId,
+    int? serverId,
+    required Map<String, dynamic> payload,
+    int priority = 0,
+    String? description,
+    int? dependsOnSyncId,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
-    await db.insert('sync_queue', {
+    final syncId = await db.insert('sync_queue', {
       'action': action,
       'entity_type': entityType,
       'local_id': localId,
@@ -620,7 +727,12 @@ class LocalDbService {
       'priority': priority,
       'status': 'pending',
       'created_at': now,
+      'description': description,
+      'depends_on_sync_id': dependsOnSyncId,
     });
+
+    print('[LocalDb] Sync queue eklendi: $action $entityType (sync_id: $syncId, depends_on: $dependsOnSyncId)');
+    return syncId;
   }
 
   // Bekleyen sync işlemlerini getir
@@ -662,14 +774,18 @@ class LocalDbService {
   }
 
   // Sync işlemini tamamla
-  Future<void> markSyncComplete(int syncId) async {
+  Future<void> markSyncComplete(int syncId, {int? serverId}) async {
     final db = await database;
+    final updateData = <String, dynamic>{
+      'status': 'completed',
+      'processed_at': DateTime.now().toIso8601String(),
+    };
+    if (serverId != null) {
+      updateData['server_id'] = serverId;
+    }
     await db.update(
       'sync_queue',
-      {
-        'status': 'completed',
-        'processed_at': DateTime.now().toIso8601String(),
-      },
+      updateData,
       where: 'id = ?',
       whereArgs: [syncId],
     );
@@ -851,6 +967,19 @@ class LocalDbService {
 
     for (final ticket in closedTickets) {
       final localId = ticket['local_id'] as int;
+
+      // Bu ticket için pending sync işlemi var mı kontrol et
+      final pendingSync = await db.query(
+        'sync_queue',
+        where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
+        whereArgs: [localId, '%"local_ticket_id":$localId%'],
+      );
+
+      if (pendingSync.isNotEmpty) {
+        print('[LocalDb] Ticket $localId için pending işlem var, temizlik atlanıyor');
+        continue;
+      }
+
       // Önce itemları sil
       await db.delete(
         'local_ticket_items',
@@ -926,6 +1055,186 @@ class LocalDbService {
         whereArgs: [tableId],
       );
     }
+  }
+
+  // Local ticket'ın item'larını getir
+  Future<List<Map<String, dynamic>>> getItemsByLocalTicketId(int localTicketId) async {
+    final db = await database;
+    return await db.query(
+      'local_ticket_items',
+      where: 'local_ticket_id = ?',
+      whereArgs: [localTicketId],
+    );
+  }
+
+  // Offline data özeti (UI için)
+  Future<Map<String, dynamic>> getOfflineDataSummary() async {
+    final db = await database;
+
+    // Bekleyen işlemler
+    final pending = await db.query(
+      'sync_queue',
+      where: "status = 'pending'",
+      orderBy: 'created_at ASC',
+    );
+
+    // Hatalı işlemler
+    final failed = await db.query(
+      'sync_queue',
+      where: "status = 'failed' OR (status = 'pending' AND retry_count >= max_retries)",
+    );
+
+    // Son 24 saatte tamamlanan
+    final oneDayAgo = DateTime.now().subtract(const Duration(days: 1)).toIso8601String();
+    final completedResult = await db.rawQuery(
+      "SELECT COUNT(*) as count FROM sync_queue WHERE status = 'completed' AND processed_at > ?",
+      [oneDayAgo],
+    );
+    final completedCount = completedResult.first['count'] as int? ?? 0;
+
+    return {
+      'pending': pending.map((item) {
+        return {
+          'id': item['id'],
+          'action': item['action'],
+          'entity_type': item['entity_type'],
+          'description': item['description'] ?? _generateDescription(item),
+          'created_at': item['created_at'],
+          'retry_count': item['retry_count'],
+          'error_message': item['error_message'],
+        };
+      }).toList(),
+      'failed': failed.map((item) {
+        return {
+          'id': item['id'],
+          'action': item['action'],
+          'entity_type': item['entity_type'],
+          'description': item['description'] ?? _generateDescription(item),
+          'created_at': item['created_at'],
+          'retry_count': item['retry_count'],
+          'error_message': item['error_message'],
+        };
+      }).toList(),
+      'completed_count': completedCount,
+      'pending_count': pending.length,
+      'failed_count': failed.length,
+    };
+  }
+
+  // Açıklama oluştur (eski kayıtlar için)
+  String _generateDescription(Map<String, dynamic> item) {
+    final action = item['action'] as String?;
+    final entityType = item['entity_type'] as String?;
+
+    if (entityType == 'ticket') {
+      if (action == 'create') return 'Adisyon açıldı';
+      if (action == 'close') return 'Hesap kapatıldı';
+      if (action == 'void') return 'Adisyon iptal edildi';
+    } else if (entityType == 'ticket_item') {
+      if (action == 'add_item') return 'Ürün eklendi';
+      if (action == 'cancel_item') return 'Ürün iptal edildi';
+    }
+    return '$action $entityType';
+  }
+
+  // Hatalı işlemi tekrar dene
+  Future<void> retrySyncItem(int syncId) async {
+    final db = await database;
+    await db.update(
+      'sync_queue',
+      {
+        'status': 'pending',
+        'retry_count': 0,
+        'error_message': null,
+      },
+      where: 'id = ?',
+      whereArgs: [syncId],
+    );
+    print('[LocalDb] Sync item retry: $syncId');
+  }
+
+  // Hatalı işlemi sil
+  Future<void> deleteSyncItem(int syncId) async {
+    final db = await database;
+    await db.delete(
+      'sync_queue',
+      where: 'id = ?',
+      whereArgs: [syncId],
+    );
+    print('[LocalDb] Sync item silindi: $syncId');
+  }
+
+  // Tüm hatalı işlemleri sil
+  Future<void> clearFailedSyncItems() async {
+    final db = await database;
+    await db.delete(
+      'sync_queue',
+      where: "status = 'failed' OR (status = 'pending' AND retry_count >= max_retries)",
+    );
+    print('[LocalDb] Tüm hatalı işlemler temizlendi');
+  }
+
+  // Offline'da kapatılmış ama henüz sync olmamış masaların table_id'lerini getir
+  // Bu methodla sunucudan gelen masa listesini güncelleyebiliriz
+  Future<Set<int>> getOfflineClosedTableIds() async {
+    final db = await database;
+
+    // Closed veya voided olup, henüz sync olmamış ticketlar
+    // synced = sync_id (0 değilse bir bağımlılık var demek), server_id = null (henüz sunucuya sync olmamış)
+    final results = await db.query(
+      'local_tickets',
+      columns: ['table_id'],
+      where: "status IN ('closed', 'voided') AND server_id IS NULL",
+    );
+
+    return results.map((r) => r['table_id'] as int).toSet();
+  }
+
+  // Offline'da açılmış ama henüz sync olmamış masaların table_id'lerini getir
+  Future<Set<int>> getOfflineOpenTableIds() async {
+    final db = await database;
+
+    // Open olup, henüz sunucuya sync olmamış ticketlar
+    final results = await db.query(
+      'local_tickets',
+      columns: ['table_id'],
+      where: "status = 'open' AND server_id IS NULL",
+    );
+
+    return results.map((r) => r['table_id'] as int).toSet();
+  }
+
+  // Sunucu tablosunu offline değişikliklerle birleştir
+  Future<List<Map<String, dynamic>>> mergeTablesWithOfflineChanges(
+    List<Map<String, dynamic>> serverTables,
+  ) async {
+    final closedTableIds = await getOfflineClosedTableIds();
+    final openTableIds = await getOfflineOpenTableIds();
+
+    if (closedTableIds.isEmpty && openTableIds.isEmpty) {
+      return serverTables;
+    }
+
+    print('[LocalDb] Offline değişiklikler birleştiriliyor - kapalı: $closedTableIds, açık: $openTableIds');
+
+    return serverTables.map((table) {
+      final tableId = table['id'] as int;
+      final newTable = Map<String, dynamic>.from(table);
+
+      // Offline'da kapatılan masa: boş göster
+      if (closedTableIds.contains(tableId)) {
+        newTable['status'] = 'empty';
+        newTable['current_ticket_id'] = null;
+        print('[LocalDb] Masa $tableId offline kapatıldı, empty gösteriliyor');
+      }
+      // Offline'da açılan masa: dolu göster
+      else if (openTableIds.contains(tableId)) {
+        newTable['status'] = 'occupied';
+        print('[LocalDb] Masa $tableId offline açıldı, occupied gösteriliyor');
+      }
+
+      return newTable;
+    }).toList();
   }
 
   // Veritabanını kapat

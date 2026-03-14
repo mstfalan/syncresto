@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/printer_service.dart';
+import '../providers/theme_provider.dart';
 import '../screens/printer_settings_screen.dart';
 import 'add_item_modal.dart';
 import 'discount_modal.dart';
@@ -11,6 +13,7 @@ class TicketModal extends StatefulWidget {
   final PrinterService printerService;
   final Map<String, dynamic> waiter;
   final VoidCallback onClose;
+  final bool showProductImages;
 
   const TicketModal({
     super.key,
@@ -19,6 +22,7 @@ class TicketModal extends StatefulWidget {
     required this.printerService,
     required this.waiter,
     required this.onClose,
+    this.showProductImages = true,
   });
 
   @override
@@ -55,6 +59,25 @@ class _TicketModalState extends State<TicketModal> {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return int.tryParse(value.toString());
+  }
+
+  /// Garsonun belirli bir yetkiye sahip olup olmadığını kontrol eder
+  bool _hasPermission(String permission) {
+    // Offline ticket ise tüm yetkiler açık
+    if (_isOfflineTicket) {
+      return true;
+    }
+
+    final permissions = widget.waiter['permissions'] as Map<String, dynamic>?;
+    if (permissions == null) return true; // Yetki bilgisi yoksa varsayılan olarak izin ver
+    return permissions[permission] == true;
+  }
+
+  /// Ticket offline'da mı oluşturuldu?
+  bool get _isOfflineTicket {
+    if (_ticket == null) return false;
+    // Offline ticket'lar: server_id == null veya offline == true
+    return _ticket!['offline'] == true || _ticket!['server_id'] == null;
   }
 
   Future<void> _loadTicket() async {
@@ -246,6 +269,7 @@ class _TicketModalState extends State<TicketModal> {
         waiterId: _waiterId,
         onItemAdded: () => _loadTicket(),
         onClose: () => Navigator.pop(context),
+        showProductImages: widget.showProductImages,
       ),
     );
   }
@@ -414,6 +438,107 @@ class _TicketModalState extends State<TicketModal> {
     );
   }
 
+  Future<void> _openTransferTableModal() async {
+    if (_ticket == null) return;
+
+    // Boş masaları getir
+    List<dynamic> emptyTables = [];
+    try {
+      final tables = await widget.apiService.getTables();
+      emptyTables = tables.where((t) {
+        final status = t['status']?.toString() ?? 'empty';
+        final tableId = _safeInt(t['id']);
+        final currentTableId = _safeInt(widget.table['id']);
+        return status == 'empty' && tableId != currentTableId;
+      }).toList();
+    } catch (e) {
+      _showError('Masalar yuklenemedi');
+      return;
+    }
+
+    if (emptyTables.isEmpty) {
+      _showError('Bos masa bulunamadi');
+      return;
+    }
+
+    if (!mounted) return;
+
+    // Masa seçim dialogu
+    final selectedTable = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Masa Degistir'),
+        content: SizedBox(
+          width: 400,
+          height: 400,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Mevcut: ${widget.table['section_name']} - Masa ${widget.table['table_number']}',
+                style: TextStyle(color: Colors.grey[600]),
+              ),
+              const SizedBox(height: 16),
+              const Text('Yeni masa secin:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: emptyTables.length,
+                  itemBuilder: (context, index) {
+                    final table = emptyTables[index];
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: Color(
+                          int.parse((table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')),
+                        ),
+                        child: Text(
+                          '${table['table_number']}',
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      title: Text('Masa ${table['table_number']}'),
+                      subtitle: Text(table['section_name'] ?? ''),
+                      onTap: () => Navigator.pop(context, table),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Iptal'),
+          ),
+        ],
+      ),
+    );
+
+    if (selectedTable == null) return;
+
+    // Masa değiştir
+    try {
+      final ticketId = _safeInt(_ticket!['id']);
+      final newTableId = _safeInt(selectedTable['id']);
+      if (ticketId == null || newTableId == null) {
+        _showError('Gecersiz masa bilgisi');
+        return;
+      }
+
+      await widget.apiService.transferTable(
+        ticketId: ticketId,
+        newTableId: newTableId,
+        waiterId: _waiterId,
+      );
+
+      _showSuccess('Masa degistirildi: ${selectedTable['section_name']} - Masa ${selectedTable['table_number']}');
+      widget.onClose();
+    } catch (e) {
+      _showError('Masa degistirilemedi: $e');
+    }
+  }
+
   double get _calculatedDiscount {
     if (_ticket == null) return 0;
     final subtotal = (_ticket!['subtotal'] as num?)?.toDouble() ?? 0;
@@ -464,9 +589,9 @@ class _TicketModalState extends State<TicketModal> {
             // Header
             Container(
               padding: const EdgeInsets.all(20),
-              decoration: const BoxDecoration(
-                color: Color(0xFF16A34A),
-                borderRadius: BorderRadius.only(
+              decoration: BoxDecoration(
+                color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
+                borderRadius: const BorderRadius.only(
                   topLeft: Radius.circular(16),
                   topRight: Radius.circular(16),
                 ),
@@ -495,7 +620,7 @@ class _TicketModalState extends State<TicketModal> {
             // Body
             Expanded(
               child: _isLoading
-                  ? const Center(child: CircularProgressIndicator(color: Color(0xFF16A34A)))
+                  ? Center(child: CircularProgressIndicator(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor))
                   : _ticket == null
                       ? _buildEmptyTicket()
                       : _buildTicketContent(),
@@ -563,16 +688,16 @@ class _TicketModalState extends State<TicketModal> {
                           width: 56,
                           height: 56,
                           decoration: BoxDecoration(
-                            color: isSelected ? const Color(0xFF16A34A) : Colors.white,
+                            color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.white,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: isSelected ? const Color(0xFF16A34A) : Colors.grey[300]!,
+                              color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.grey[300]!,
                               width: 2,
                             ),
                             boxShadow: isSelected
                                 ? [
                                     BoxShadow(
-                                      color: const Color(0xFF16A34A).withOpacity(0.3),
+                                      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor.withOpacity(0.3),
                                       blurRadius: 8,
                                       offset: const Offset(0, 2),
                                     )
@@ -610,16 +735,16 @@ class _TicketModalState extends State<TicketModal> {
                           width: 56,
                           height: 56,
                           decoration: BoxDecoration(
-                            color: isSelected ? const Color(0xFF16A34A) : Colors.white,
+                            color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.white,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: isSelected ? const Color(0xFF16A34A) : Colors.grey[300]!,
+                              color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.grey[300]!,
                               width: 2,
                             ),
                             boxShadow: isSelected
                                 ? [
                                     BoxShadow(
-                                      color: const Color(0xFF16A34A).withOpacity(0.3),
+                                      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor.withOpacity(0.3),
                                       blurRadius: 8,
                                       offset: const Offset(0, 2),
                                     )
@@ -647,21 +772,42 @@ class _TicketModalState extends State<TicketModal> {
 
           const SizedBox(height: 32),
 
-          // Open ticket button
-          SizedBox(
-            width: 300,
-            height: 56,
-            child: ElevatedButton.icon(
-              onPressed: _openTicket,
-              icon: const Icon(Icons.receipt_long),
-              label: const Text('Adisyon Ac', style: TextStyle(fontSize: 18)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF16A34A),
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          // Open ticket button - open_ticket yetkisi gerekli
+          if (_hasPermission('open_ticket'))
+            SizedBox(
+              width: 300,
+              height: 56,
+              child: ElevatedButton.icon(
+                onPressed: _openTicket,
+                icon: const Icon(Icons.receipt_long),
+                label: const Text('Adisyon Ac', style: TextStyle(fontSize: 18)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            )
+          else
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.orange[50],
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.orange[200]!),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.warning_amber, color: Colors.orange[700], size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Adisyon acma yetkiniz yok',
+                    style: TextStyle(color: Colors.orange[700], fontWeight: FontWeight.w500),
+                  ),
+                ],
               ),
             ),
-          ),
         ],
       ),
     );
@@ -726,63 +872,89 @@ class _TicketModalState extends State<TicketModal> {
           child: ListView(
             padding: const EdgeInsets.all(12),
             children: [
-              _buildSmallActionButton(
-                icon: Icons.add,
-                label: 'Urun Ekle',
-                color: const Color(0xFF16A34A),
-                onPressed: _openAddItemModal,
-              ),
-              const SizedBox(height: 8),
-              _buildSmallActionButton(
-                icon: Icons.restaurant,
-                label: 'Mutfaga Gonder',
-                color: const Color(0xFFF59E0B),
-                onPressed: _sendToKitchen,
-              ),
-              const SizedBox(height: 8),
-              _buildSmallActionButton(
-                icon: Icons.print,
-                label: 'Yazdir',
-                color: Colors.blueGrey,
-                onPressed: _printTicket,
-              ),
-              const SizedBox(height: 8),
-              _buildSmallActionButton(
-                icon: Icons.swap_horiz,
-                label: 'Masa Degistir',
-                color: Colors.blueGrey,
-                onPressed: () => _showSuccess('Masa degistirme yakin zamanda'),
-              ),
-              const SizedBox(height: 8),
-              _buildSmallActionButton(
-                icon: Icons.percent,
-                label: _localDiscount > 0 ? 'Indirim (%${_localDiscount.toStringAsFixed(0)})' : 'Indirim',
-                color: _localDiscount > 0 ? const Color(0xFFF59E0B) : Colors.blueGrey,
-                onPressed: _openDiscountModal,
-              ),
+              // Ürün Ekle - add_item yetkisi gerekli
+              if (_hasPermission('add_item')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.add,
+                  label: 'Urun Ekle',
+                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
+                  onPressed: _openAddItemModal,
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Mutfağa Gönder - print_receipt yetkisi gerekli
+              if (_hasPermission('print_receipt')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.restaurant,
+                  label: 'Mutfaga Gonder',
+                  color: const Color(0xFFF59E0B),
+                  onPressed: _sendToKitchen,
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Yazdır - print_receipt yetkisi gerekli
+              if (_hasPermission('print_receipt')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.print,
+                  label: 'Yazdir',
+                  color: Colors.blueGrey,
+                  onPressed: _printTicket,
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Masa Değiştir - transfer_table yetkisi gerekli
+              if (_hasPermission('transfer_table')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.swap_horiz,
+                  label: 'Masa Degistir',
+                  color: Colors.blueGrey,
+                  onPressed: _openTransferTableModal,
+                ),
+                const SizedBox(height: 8),
+              ],
+              // İndirim - apply_discount yetkisi gerekli
+              if (_hasPermission('apply_discount')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.percent,
+                  label: _localDiscount > 0 ? 'Indirim (%${_localDiscount.toStringAsFixed(0)})' : 'Indirim',
+                  color: _localDiscount > 0 ? const Color(0xFFF59E0B) : Colors.blueGrey,
+                  onPressed: _openDiscountModal,
+                ),
+                const SizedBox(height: 8),
+              ],
 
-              Divider(color: Colors.grey[300], height: 20),
+              // Ödeme butonları için divider (en az biri varsa göster)
+              if (_hasPermission('close_ticket') || _hasPermission('void_ticket'))
+                Divider(color: Colors.grey[300], height: 20),
 
-              _buildSmallActionButton(
-                icon: Icons.payments,
-                label: 'Nakit',
-                color: const Color(0xFF16A34A),
-                onPressed: () => _closeTicket('cash'),
-              ),
-              const SizedBox(height: 8),
-              _buildSmallActionButton(
-                icon: Icons.credit_card,
-                label: 'Kredi Karti',
-                color: const Color(0xFF3B82F6),
-                onPressed: () => _closeTicket('credit_card'),
-              ),
-              const SizedBox(height: 8),
-              _buildSmallActionButton(
-                icon: Icons.delete_outline,
-                label: 'Adisyon Iptal',
-                color: const Color(0xFFDC2626),
-                onPressed: _voidTicket,
-              ),
+              // Nakit - close_ticket yetkisi gerekli
+              if (_hasPermission('close_ticket')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.payments,
+                  label: 'Nakit',
+                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
+                  onPressed: () => _closeTicket('cash'),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Kredi Kartı - close_ticket yetkisi gerekli
+              if (_hasPermission('close_ticket')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.credit_card,
+                  label: 'Kredi Karti',
+                  color: const Color(0xFF3B82F6),
+                  onPressed: () => _closeTicket('credit_card'),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Adisyon İptal - void_ticket yetkisi gerekli
+              if (_hasPermission('void_ticket'))
+                _buildSmallActionButton(
+                  icon: Icons.delete_outline,
+                  label: 'Adisyon Iptal',
+                  color: const Color(0xFFDC2626),
+                  onPressed: _voidTicket,
+                ),
             ],
           ),
         ),
@@ -845,7 +1017,7 @@ class _TicketModalState extends State<TicketModal> {
             width: 32,
             height: 32,
             decoration: BoxDecoration(
-              color: isCancelled ? Colors.red[300] : const Color(0xFF16A34A),
+              color: isCancelled ? Colors.red[300] : Provider.of<ThemeProvider>(context, listen: false).primaryColor,
               borderRadius: BorderRadius.circular(6),
             ),
             child: Center(
@@ -893,8 +1065,8 @@ class _TicketModalState extends State<TicketModal> {
             ),
           ),
 
-          // Cancel button
-          if (!isCancelled)
+          // Cancel button - cancel_item yetkisi gerekli
+          if (!isCancelled && _hasPermission('cancel_item'))
             IconButton(
               onPressed: () {
                 final itemId = _safeInt(item['id']);
@@ -956,7 +1128,7 @@ class _TicketModalState extends State<TicketModal> {
           Text(
             value,
             style: TextStyle(
-              color: isDiscount ? Colors.red : (isTotal ? const Color(0xFF16A34A) : const Color(0xFF1F2937)),
+              color: isDiscount ? Colors.red : (isTotal ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : const Color(0xFF1F2937)),
               fontWeight: isTotal ? FontWeight.bold : FontWeight.w500,
               fontSize: isTotal ? 24 : 14,
             ),

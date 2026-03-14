@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
 import '../services/sync_service.dart';
 import '../services/connectivity_service.dart';
+import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 
 class InitialSyncScreen extends StatefulWidget {
@@ -51,6 +53,17 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
           _statusMessage = 'Veriler kontrol ediliyor...';
           _progress = 0.5;
         });
+
+        // Cache'den tema yükle
+        final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+        await themeProvider.loadCachedTheme();
+
+        // Settings callback for theme (arka plan güncellemesi için de gerekli)
+        _syncService.onSettingsLoaded = (settings) {
+          if (mounted) {
+            themeProvider.updateFromSettings(settings);
+          }
+        };
 
         // Online ise arka planda güncelleme yap
         if (_connectivity.isOnline) {
@@ -101,6 +114,14 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
         }
       };
 
+      // Settings callback for theme
+      _syncService.onSettingsLoaded = (settings) {
+        if (mounted) {
+          final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+          themeProvider.updateFromSettings(settings);
+        }
+      };
+
       // Sync baslat
       await _syncService.performInitialSync();
 
@@ -125,8 +146,8 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
   }
 
   void _connectWebSocket() {
-    // WebSocket bağlantısını başlat
-    widget.webSocketService.connect('https://greenchef.com.tr/api');
+    final apiUrl = widget.storageService.getApiUrl() ?? 'https://api.syncresto.com';
+    widget.webSocketService.connect(apiUrl);
   }
 
   void _navigateToLogin() {
@@ -156,14 +177,12 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Provider.of<ThemeProvider>(context);
+
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF16A34A), Color(0xFF15803D)],
-          ),
+        decoration: BoxDecoration(
+          gradient: theme.backgroundGradient,
         ),
         child: Center(
           child: Container(
@@ -184,24 +203,17 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 // Logo
-                Container(
-                  width: 100,
-                  height: 100,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF16A34A).withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(24),
-                  ),
-                  child: const Icon(
-                    Icons.restaurant,
-                    size: 56,
-                    color: Color(0xFF16A34A),
-                  ),
+                Image.asset(
+                  'assets/images/logo.png',
+                  width: 200,
+                  height: 70,
+                  fit: BoxFit.contain,
                 ),
                 const SizedBox(height: 24),
 
                 // Title
                 const Text(
-                  'GreenChef POS',
+                  'SyncResto POS',
                   style: TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
@@ -250,7 +262,7 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
                       icon: const Icon(Icons.refresh),
                       label: const Text('Tekrar Dene'),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF16A34A),
+                        backgroundColor: theme.primaryColor,
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -277,7 +289,7 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
                           value: _progress,
                           minHeight: 12,
                           backgroundColor: Colors.grey[200],
-                          valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF16A34A)),
+                          valueColor: AlwaysStoppedAnimation<Color>(theme.primaryColor),
                         ),
                       ),
                       const SizedBox(height: 8),

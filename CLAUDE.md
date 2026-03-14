@@ -1,14 +1,258 @@
-# GreenChef POS - Claude Code Memory
+# SyncResto POS - Claude Code Memory
 
 ## Proje Bilgileri
 | Özellik | Değer |
 |---------|-------|
-| **Proje** | GreenChef POS - Flutter masaüstü uygulaması |
+| **Proje** | SyncResto POS - Multi-tenant Flutter masaüstü uygulaması |
 | **Platform** | macOS (Windows/Linux desteği planlanıyor) |
-| **Backend** | Node.js + Express + PostgreSQL (AWS) |
-| **Sunucu IP** | 63.178.229.236 |
-| **API URL** | https://greenchef.com.tr/api |
-| **Mimari** | Offline-First + Real-time Sync |
+| **Mimari** | Multi-Tenant SaaS + Offline-First |
+| **SyncResto API** | https://api.syncresto.com (Proxy) |
+| **SyncResto Server** | 18.194.103.51 (EC2) |
+| **Örnek Tenant** | GreenChef (63.178.229.236) |
+
+---
+
+## 🏢 Multi-Tenant Mimari (Mart 2026)
+
+### Genel Bakış
+SyncResto POS, tek bir Flutter uygulaması ile birden fazla restorana hizmet veren multi-tenant bir SaaS ürünüdür. Her restoran kendi API key'i ile sisteme bağlanır.
+
+### Mimari Diyagramı
+```
+┌─────────────────┐     ┌─────────────────────┐     ┌──────────────────┐
+│  SyncResto POS  │────▶│  SyncResto API      │────▶│  Tenant Backend  │
+│  (Flutter App)  │     │  (Proxy Server)     │     │  (GreenChef etc) │
+│                 │     │  18.194.103.51      │     │  63.178.229.236  │
+└─────────────────┘     └─────────────────────┘     └──────────────────┘
+        │                        │                          │
+        │  X-API-Key Header      │  Tenant Resolution       │
+        │  SR_xxxxxxxx_xxx...    │  backend_url lookup      │
+        ▼                        ▼                          ▼
+   ┌─────────┐            ┌───────────┐             ┌────────────┐
+   │ Offline │            │ PostgreSQL│             │ PostgreSQL │
+   │ SQLite  │            │ (RDS)     │             │ (Tenant)   │
+   └─────────┘            └───────────┘             └────────────┘
+```
+
+### API Key Sistemi
+- **Format**: `SR_xxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxx` (40 karakter)
+- **Prefix**: `SR_` (tanımlama)
+- **Lookup**: İlk 11 karakter (hızlı DB sorgusu)
+- **Hash**: SHA-256 ile saklanır (güvenlik)
+- **Örnek**: `SR_bdfea51f_8fc954e9914c6ffa2a920d6f` (GreenChef)
+
+### SyncResto API Endpoints (Proxy)
+| Endpoint | Method | Açıklama |
+|----------|--------|----------|
+| `/api/pos/validate-key` | POST | API key doğrula, restaurant bilgisi dön |
+| `/api/pos/waiters/login` | POST | PIN ile garson girişi |
+| `/api/pos/waiters` | GET | Garson listesi |
+| `/api/pos/tables/sections` | GET | Salonları getir |
+| `/api/pos/tables` | GET | Masaları getir |
+| `/api/pos/categories` | GET | Kategorileri getir |
+| `/api/pos/products` | GET | Ürünleri getir |
+| `/api/pos/settings` | GET | Ayarları getir (tema, marka) |
+| `/api/pos/tickets/*` | ALL | Adisyon işlemleri |
+| `/api/pos/printers` | GET | Yazıcıları getir |
+
+### Tenant Veritabanı (SyncResto RDS)
+```sql
+-- restaurants: Ana müşteri tablosu
+CREATE TABLE public.restaurants (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255),
+    slug VARCHAR(100) UNIQUE,
+    schema_name VARCHAR(63) UNIQUE,
+    backend_url VARCHAR(255),  -- Tenant API URL
+    is_active BOOLEAN DEFAULT true
+);
+
+-- pos_api_keys: API key tablosu
+CREATE TABLE public.pos_api_keys (
+    id SERIAL PRIMARY KEY,
+    restaurant_id INTEGER REFERENCES restaurants(id),
+    api_key_hash VARCHAR(64),      -- SHA-256 hash
+    api_key_prefix VARCHAR(11),    -- "SR_xxxxxxxx"
+    name VARCHAR(100),             -- "Kasa 1", "Tablet 2"
+    is_active BOOLEAN DEFAULT true
+);
+
+-- restaurant_licenses: POS lisans kontrolü
+CREATE TABLE public.restaurant_licenses (
+    restaurant_id INTEGER,
+    module_id INTEGER,  -- pos_panel module
+    is_active BOOLEAN,
+    expires_at TIMESTAMP
+);
+```
+
+---
+
+## 🎨 Dinamik Tema Sistemi (Mart 2026)
+
+### ThemeProvider
+Her restoran kendi marka renklerini kullanabilir. Renkler API'den alınır ve cache'lenir.
+
+**Dosya**: `lib/providers/theme_provider.dart`
+
+```dart
+class ThemeProvider extends ChangeNotifier {
+  Color _primaryColor = Color(0xFF2563EB);  // Default: SyncResto mavisi
+  Color _secondaryColor;
+  String _brandName = 'SyncResto POS';
+  String? _brandLogoUrl;
+
+  // Gradient sadece primary color'ın tonlarını kullanır
+  LinearGradient get backgroundGradient {
+    final hsl = HSLColor.fromColor(_primaryColor);
+    final darkerShade = hsl.withLightness((hsl.lightness - 0.08).clamp(0.0, 1.0)).toColor();
+    return LinearGradient(colors: [_primaryColor, darkerShade]);
+  }
+
+  void updateFromSettings(Map<String, dynamic> settings) {
+    _primaryColor = parseColor(settings['primary_color'], _defaultPrimary);
+    _secondaryColor = generateSecondary(_primaryColor);
+    _brandName = settings['brand_name'] ?? 'SyncResto POS';
+    _brandLogoUrl = settings['brand_logo'];
+    notifyListeners();
+  }
+}
+```
+
+### Settings API Response
+```json
+{
+  "primary_color": "#dc2626",
+  "secondary_color": "#b91c1c",
+  "brand_name": "Joi Lezzet Köşesi",
+  "brand_logo": "https://joilezzetkosesi.com/uploads/logo.png"
+}
+```
+
+### Salon Renkleri
+Her salon (section) kendi rengine sahip olabilir:
+- ALT KAT: `#3b82f6` (mavi)
+- BALKON: `#22c55e` (yeşil)
+- ÜST KAT: `#f59e0b` (turuncu)
+
+---
+
+## 🔐 Garson Yetki Sistemi (Mart 2026)
+
+### Yetkiler
+| Yetki | Açıklama | Buton |
+|-------|----------|-------|
+| `open_ticket` | Adisyon açabilir | Adisyon Aç |
+| `add_item` | Ürün ekleyebilir | Ürün Ekle |
+| `cancel_item` | Ürün iptal edebilir | Ürün X butonu |
+| `apply_discount` | İndirim uygulayabilir | İndirim |
+| `close_ticket` | Hesap kapatabilir | Nakit, Kredi Kartı |
+| `void_ticket` | Adisyon iptal edebilir | Adisyon İptal |
+| `transfer_table` | Masa değiştirebilir | Masa Değiştir |
+| `print_receipt` | Fiş yazdırabilir | Yazdır, Mutfağa Gönder |
+| `view_all_tables` | Tüm masaları görebilir | - |
+| `edit_prices` | Fiyat değiştirebilir | - |
+
+### API Response (Login)
+```json
+{
+  "success": true,
+  "waiter": {
+    "id": 1,
+    "name": "Ahmet",
+    "permissions": {
+      "open_ticket": true,
+      "add_item": true,
+      "cancel_item": true,
+      "apply_discount": false,
+      "close_ticket": false,
+      "void_ticket": false,
+      "transfer_table": true,
+      "print_receipt": true
+    }
+  }
+}
+```
+
+### Flutter Implementasyonu
+**Dosya**: `lib/widgets/ticket_modal.dart`
+
+```dart
+bool _hasPermission(String permission) {
+  final permissions = widget.waiter['permissions'] as Map<String, dynamic>?;
+  if (permissions == null) return true; // Yetki bilgisi yoksa izin ver
+  return permissions[permission] == true;
+}
+
+// Kullanım örneği:
+if (_hasPermission('apply_discount')) ...[
+  _buildSmallActionButton(
+    icon: Icons.percent,
+    label: 'Indirim',
+    onPressed: _openDiscountModal,
+  ),
+],
+```
+
+---
+
+## ⚡ Auto-Refresh ve Responsive Grid (Mart 2026)
+
+### Masalar Ekranı Auto-Refresh
+**Dosya**: `lib/screens/tables_screen.dart`
+
+```dart
+Timer? _refreshTimer;
+
+void _startAutoRefresh() {
+  _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+    if (_isOnline && mounted) {
+      _loadData(silent: true);  // UI flickering'i önle
+    }
+  });
+}
+
+Future<void> _loadData({bool silent = false}) async {
+  if (!silent) {
+    setState(() => _isLoading = true);  // Loading göster
+  }
+  // ... veri yükle ...
+}
+```
+
+### Responsive Grid (Masalar)
+Tüm masalar ekrana sığacak şekilde otomatik grid hesaplaması:
+
+```dart
+return LayoutBuilder(
+  builder: (context, constraints) {
+    final tableCount = tables.length;
+    int bestCols = 1;
+    double bestCellSize = 0;
+
+    // Optimal sütun sayısını bul
+    for (int cols = 1; cols <= tableCount; cols++) {
+      final rows = (tableCount / cols).ceil();
+      final cellWidth = (availableWidth - (cols - 1) * 12) / cols;
+      final cellHeight = (availableHeight - (rows - 1) * 12) / rows;
+      final cellSize = min(cellWidth, cellHeight);
+      if (cellSize > bestCellSize) {
+        bestCellSize = cellSize;
+        bestCols = cols;
+      }
+    }
+
+    return GridView.builder(
+      physics: const NeverScrollableScrollPhysics(), // Scroll yok
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: bestCols,
+        childAspectRatio: 1.0,
+      ),
+      // ...
+    );
+  },
+);
+```
 
 ---
 
@@ -278,20 +522,185 @@ git push origin main
 
 ---
 
-## SSH Bağlantısı
+---
+
+## 🖥️ Sunucu Bilgileri
+
+### SyncResto API Server (Proxy)
+| Özellik | Değer |
+|---------|-------|
+| **IP** | 18.194.103.51 |
+| **SSH** | `ssh -i ~/.ssh/babystorybook-key.pem ubuntu@18.194.103.51` |
+| **Path** | `~/syncresto-api/` |
+| **PM2** | `pm2 restart syncresto-api` |
+| **Logs** | `pm2 logs syncresto-api --lines 50` |
+| **Domain** | api.syncresto.com |
+
+### GreenChef Backend (Örnek Tenant)
+| Özellik | Değer |
+|---------|-------|
+| **IP** | 63.178.229.236 |
+| **SSH** | `ssh -i ~/.ssh/greenchef-key.pem ubuntu@63.178.229.236` |
+| **Path** | `/var/www/greenchef/` |
+| **PM2** | `pm2 restart greenchef` |
+| **Logs** | `pm2 logs greenchef --lines 50` |
+| **Domain** | greenchef.com.tr, joilezzetkosesi.com |
+
+### PostgreSQL Bağlantıları
 ```bash
-ssh -i ~/.ssh/greenchef-key.pem ubuntu@63.178.229.236
+# SyncResto RDS (Tenant yönetimi)
+PGPASSWORD='ZNTo3ppGS0GfzdJUItiAox' psql -h babystorybook-db.postgres.database.azure.com -U babystorybookadmin -d postgres
+
+# GreenChef RDS (Restoran verileri)
+PGPASSWORD='GreenChef2026Secure' psql -h 63.178.229.236 -U greenchefadmin -d greenchef
 ```
 
-## PM2 Komutları
+---
+
+## 🧪 Test Komutları
+
+### API Key Doğrulama
 ```bash
-pm2 restart greenchef
-pm2 logs greenchef --lines 50
+curl -s -X POST 'https://api.syncresto.com/api/pos/validate-key' \
+  -H 'X-API-Key: SR_bdfea51f_8fc954e9914c6ffa2a920d6f' \
+  -H 'Content-Type: application/json' | python3 -m json.tool
 ```
+
+### Garson Login
+```bash
+curl -s -X POST 'https://api.syncresto.com/api/pos/waiters/login' \
+  -H 'X-API-Key: SR_bdfea51f_8fc954e9914c6ffa2a920d6f' \
+  -H 'Content-Type: application/json' \
+  -d '{"pin":"1234"}' | python3 -m json.tool
+```
+
+---
 
 ## Flutter Komutları
 ```bash
 cd /Users/mustafalan/specpulse/projects/greenchef_pos
 flutter run -d macos
 flutter clean && flutter pub get
+
+# Kill ve restart
+pkill -f flutter; flutter run -d macos
 ```
+
+---
+
+## 📝 Değişiklik Geçmişi
+
+### Mart 2026 - Multi-Tenant SaaS Dönüşümü
+1. **SyncResto Proxy Mimarisi**: GreenChef-specific backend → Multi-tenant proxy
+2. **API Key Sistemi**: Restaurant bazlı API key authentication
+3. **Dinamik Tema**: Her restoran kendi renk/logo ile çalışıyor
+4. **Garson Yetkileri**: 10 farklı yetki, UI'da conditional rendering
+5. **Auto-Refresh**: Masalar 2 saniyede bir güncelleniyor (silent mode)
+6. **Responsive Grid**: Tüm masalar ekrana sığıyor, scroll yok
+7. **Branding**: GreenChef → SyncResto POS
+
+### 14 Mart 2026 - Offline Sync İyileştirmeleri
+
+#### Problem
+Offline modda açılan ticket'lar server'a sync edilirken item'lar kayboluyordu (₺0 toplam). Ayrıca aynı masada zaten açık adisyon varsa hata veriyordu.
+
+#### Çözümler
+
+**1. Benzersiz Offline Ticket Numarası**
+- Format: `OFFLINE-{masa_no}-{UUID8}` (örn: `OFFLINE-5-A7F3B2C1`)
+- Çakışma riski yok (16^8 = 4.3 milyar kombinasyon)
+- Aynı masada birden fazla offline ticket olabilir
+
+**2. Server Değişiklikleri** (`/var/www/greenchef/api/pos/tickets.js`)
+```javascript
+// Offline ticket için "zaten açık adisyon var" kontrolü bypass
+if (existingTicket && !req.body.is_offline) {
+  return res.status(400).json({ error: 'Bu masada zaten açık adisyon var' });
+}
+
+// Offline ticket numarasını kullan
+if (req.body.is_offline && req.body.offline_ticket_number) {
+  ticketNumber = req.body.offline_ticket_number;
+}
+
+// Close/void için yetki bypass (is_offline === true || is_offline === "true")
+const isOfflineClose = req.body.is_offline === true || req.body.is_offline === "true";
+if (waiter_id && !isOfflineClose) {
+  // yetki kontrolü
+}
+
+// Add item için kapalı ticket'a ekleme (is_offline true ise)
+const ticketQuery = is_offline
+  ? "SELECT id, status FROM tickets WHERE id = $1"
+  : "SELECT id, status FROM tickets WHERE id = $1 AND status = 'open'";
+```
+
+**3. Flutter Sync Değişiklikleri** (`lib/services/sync_service.dart`)
+```dart
+// Ticket create sonrası server_id'yi sync_queue'ya kaydet
+await _localDb.markSyncComplete(syncId, serverId: serverId);
+
+// Item sync'te is_offline gönder (kapalı ticket'a da eklenebilir)
+final response = await _dio!.post('/api/pos/tickets/$serverTicketId/items', data: {
+  // ... diğer alanlar
+  'is_offline': true, // Offline sync - kapalı ticket'a da eklenebilir
+});
+
+// Ticket silinmiş olsa bile depends_on_sync_id üzerinden server_id bul
+if (serverTicketId == null) {
+  final syncRecord = await db.query('sync_queue', where: 'id = ?', whereArgs: [syncId]);
+  final dependsOnId = syncRecord.first['depends_on_sync_id'];
+  final parentSync = await db.query('sync_queue', where: 'id = ?', whereArgs: [dependsOnId]);
+  serverTicketId = parentSync.first['server_id'];
+}
+```
+
+**4. Cleanup İyileştirmesi** (`lib/services/local_db_service.dart`)
+```dart
+// Pending item'ları olan ticket'ları silme
+Future<void> cleanupSyncedTickets() async {
+  for (final ticket in closedTickets) {
+    // Bu ticket için pending sync işlemi var mı kontrol et
+    final pendingSync = await db.query('sync_queue',
+      where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
+      whereArgs: [localId, '%"local_ticket_id":$localId%'],
+    );
+
+    if (pendingSync.isNotEmpty) {
+      continue; // Temizlik atla
+    }
+    // ... silme işlemi
+  }
+}
+```
+
+**5. markSyncComplete Güncelleme**
+```dart
+Future<void> markSyncComplete(int syncId, {int? serverId}) async {
+  final updateData = {
+    'status': 'completed',
+    'processed_at': DateTime.now().toIso8601String(),
+  };
+  if (serverId != null) {
+    updateData['server_id'] = serverId;
+  }
+  await db.update('sync_queue', updateData, where: 'id = ?', whereArgs: [syncId]);
+}
+```
+
+#### Sonuç
+- ✅ Offline'da masa açılıyor
+- ✅ Ürün ekleniyor
+- ✅ Hesap kapatılıyor (nakit/kart)
+- ✅ Online olunca sync ediliyor
+- ✅ Web sitesinde item'larıyla birlikte görünüyor
+- ✅ Aynı masada birden fazla offline ticket olabilir (farklı ödeme yöntemleri)
+
+---
+
+### Şubat-Mart 2026 - Temel Özellikler
+1. Termal yazıcı entegrasyonu (ESC/POS, TCP/IP)
+2. WebSocket real-time bildirimler
+3. Offline-first mimari (SQLite)
+4. Görsel önbellekleme
+5. PIN tabanlı garson girişi

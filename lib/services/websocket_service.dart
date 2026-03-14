@@ -42,7 +42,7 @@ class WebSocketService {
         onConnectionChange?.call(true);
 
         // Join as POS client
-        _socket!.emit('pos_join', {'device': 'greenchef_pos'});
+        _socket!.emit('pos_join', {'device': 'syncresto_pos'});
       });
 
       _socket!.onDisconnect((_) {

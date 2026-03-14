@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
+import '../providers/theme_provider.dart';
 import 'tables_screen.dart';
 import 'setup_screen.dart';
 
@@ -147,6 +149,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
   @override
   Widget build(BuildContext context) {
     final keyName = widget.storageService.getApiKeyName() ?? 'POS';
+    final theme = Provider.of<ThemeProvider>(context);
 
     return Scaffold(
       body: RawKeyboardListener(
@@ -183,12 +186,8 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
           }
         },
         child: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF16A34A), Color(0xFF15803D)],
-            ),
+          decoration: BoxDecoration(
+            gradient: theme.backgroundGradient,
           ),
           child: Center(
             child: SingleChildScrollView(
@@ -210,18 +209,11 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
                   mainAxisSize: MainAxisSize.min,
                 children: [
                   // Logo
-                  Container(
-                    width: 80,
-                    height: 80,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF16A34A).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Icon(
-                      Icons.person,
-                      size: 48,
-                      color: Color(0xFF16A34A),
-                    ),
+                  Image.asset(
+                    'assets/images/logo.png',
+                    width: 180,
+                    height: 60,
+                    fit: BoxFit.contain,
                   ),
                   const SizedBox(height: 24),
 
@@ -277,10 +269,10 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
                         height: 50,
                         margin: const EdgeInsets.symmetric(horizontal: 6),
                         decoration: BoxDecoration(
-                          color: filled ? const Color(0xFF16A34A) : const Color(0xFFF3F4F6),
+                          color: filled ? theme.primaryColor : const Color(0xFFF3F4F6),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: filled ? const Color(0xFF16A34A) : const Color(0xFFE5E7EB),
+                            color: filled ? theme.primaryColor : const Color(0xFFE5E7EB),
                             width: 2,
                           ),
                         ),
@@ -296,7 +288,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
 
                   // Numpad
                   if (_isLoading)
-                    const CircularProgressIndicator(color: Color(0xFF16A34A))
+                    CircularProgressIndicator(color: theme.primaryColor)
                   else
                     _buildNumpad(),
 
@@ -306,18 +298,18 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: const Color(0xFFF0FDF4),
+                      color: theme.primaryColor.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(Icons.check_circle, color: Color(0xFF16A34A), size: 16),
+                        Icon(Icons.check_circle, color: theme.primaryColor, size: 16),
                         const SizedBox(width: 8),
                         Text(
                           keyName,
-                          style: const TextStyle(
-                            color: Color(0xFF16A34A),
+                          style: TextStyle(
+                            color: theme.primaryColor,
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
                           ),

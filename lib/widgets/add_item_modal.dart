@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/image_cache_service.dart';
+import '../providers/theme_provider.dart';
 import 'product_detail_modal.dart';
 
 class AddItemModal extends StatefulWidget {
@@ -10,6 +12,7 @@ class AddItemModal extends StatefulWidget {
   final int waiterId;
   final VoidCallback onItemAdded;
   final VoidCallback onClose;
+  final bool showProductImages;
 
   const AddItemModal({
     super.key,
@@ -18,6 +21,7 @@ class AddItemModal extends StatefulWidget {
     required this.waiterId,
     required this.onItemAdded,
     required this.onClose,
+    this.showProductImages = true,
   });
 
   @override
@@ -199,7 +203,7 @@ class _AddItemModalState extends State<AddItemModal> {
             // Products grid
             Expanded(
               child: _isLoading
-                  ? const Center(child: CircularProgressIndicator(color: Color(0xFF16A34A)))
+                  ? Center(child: CircularProgressIndicator(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor))
                   : _buildProductsGrid(),
             ),
           ],
@@ -212,7 +216,7 @@ class _AddItemModalState extends State<AddItemModal> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       decoration: BoxDecoration(
-        color: const Color(0xFF16A34A),
+        color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.1),
@@ -267,7 +271,7 @@ class _AddItemModalState extends State<AddItemModal> {
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF16A34A), width: 2),
+            borderSide: BorderSide(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor, width: 2),
           ),
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         ),
@@ -306,10 +310,10 @@ class _AddItemModalState extends State<AddItemModal> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFF16A34A) : Colors.white,
+            color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.white,
             borderRadius: BorderRadius.circular(20),
             border: Border.all(
-              color: isSelected ? const Color(0xFF16A34A) : Colors.grey[300]!,
+              color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.grey[300]!,
             ),
           ),
           child: Text(
@@ -343,9 +347,9 @@ class _AddItemModalState extends State<AddItemModal> {
 
     return GridView.builder(
       padding: const EdgeInsets.all(16),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 5,
-        childAspectRatio: 0.8,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: widget.showProductImages ? 5 : 6,
+        childAspectRatio: widget.showProductImages ? 0.8 : 2.0,
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
       ),
@@ -384,45 +388,48 @@ class _AddItemModalState extends State<AddItemModal> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Image
-                Expanded(
-                  flex: 3,
-                  child: ClipRRect(
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(12),
-                      topRight: Radius.circular(12),
+                // Image (sadece showProductImages true ise göster)
+                if (widget.showProductImages)
+                  Expanded(
+                    flex: 3,
+                    child: ClipRRect(
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(12),
+                        topRight: Radius.circular(12),
+                      ),
+                      child: hasImage
+                          ? _buildProductImage(product)
+                          : _buildPlaceholder(product),
                     ),
-                    child: hasImage
-                        ? _buildProductImage(product)
-                        : _buildPlaceholder(product),
                   ),
-                ),
 
                 // Info
                 Expanded(
-                  flex: 2,
+                  flex: widget.showProductImages ? 2 : 1,
                   child: Padding(
                     padding: const EdgeInsets.all(8),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: widget.showProductImages ? MainAxisAlignment.start : MainAxisAlignment.center,
                       children: [
                         Text(
                           product['name']?.toString() ?? '',
-                          maxLines: 2,
+                          maxLines: widget.showProductImages ? 2 : 3,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                            color: Color(0xFF1f2937),
+                            fontSize: widget.showProductImages ? 13 : 14,
+                            color: const Color(0xFF1f2937),
                           ),
                         ),
-                        const Spacer(),
+                        if (widget.showProductImages) const Spacer(),
+                        if (!widget.showProductImages) const SizedBox(height: 4),
                         Text(
                           '${product['price'] ?? 0} TL',
-                          style: const TextStyle(
-                            color: Color(0xFF16A34A),
+                          style: TextStyle(
+                            color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                             fontWeight: FontWeight.bold,
-                            fontSize: 15,
+                            fontSize: widget.showProductImages ? 15 : 16,
                           ),
                         ),
                       ],
@@ -462,7 +469,7 @@ class _AddItemModalState extends State<AddItemModal> {
       return _buildPlaceholder(product);
     }
 
-    final imageUrl = 'https://greenchef.com.tr$imagePath';
+    final imageUrl = widget.apiService.getImageUrl(imagePath);
 
     // Cache hazır mı ve dosya var mı kontrol et
     if (_imageCacheReady) {
@@ -490,8 +497,8 @@ class _AddItemModalState extends State<AddItemModal> {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Container(
             color: Colors.grey[200],
-            child: const Center(
-              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF16A34A)),
+            child: Center(
+              child: CircularProgressIndicator(strokeWidth: 2, color: Provider.of<ThemeProvider>(context, listen: false).primaryColor),
             ),
           );
         }

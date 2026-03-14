@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../providers/theme_provider.dart';
 
 enum DiscountType { percentage, amount }
 
@@ -266,9 +268,9 @@ class _DiscountModalState extends State<DiscountModal> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF16A34A).withValues(alpha: 0.1),
+                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFF16A34A)),
+                  border: Border.all(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor),
                 ),
                 child: Column(
                   children: [
@@ -301,8 +303,8 @@ class _DiscountModalState extends State<DiscountModal> {
                         ),
                         Text(
                           '${_newTotal.toStringAsFixed(2)} TL',
-                          style: const TextStyle(
-                            color: Color(0xFF16A34A),
+                          style: TextStyle(
+                            color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                             fontSize: 24,
                             fontWeight: FontWeight.bold,
                           ),

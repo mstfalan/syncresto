@@ -6,7 +6,10 @@ import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
 import '../services/sync_service.dart';
 import '../services/connectivity_service.dart';
+import '../services/version_service.dart';
+import '../services/log_service.dart';
 import '../providers/theme_provider.dart';
+import '../widgets/update_modal.dart';
 import 'pin_login_screen.dart';
 
 class InitialSyncScreen extends StatefulWidget {
@@ -30,11 +33,14 @@ class InitialSyncScreen extends StatefulWidget {
 class _InitialSyncScreenState extends State<InitialSyncScreen> {
   final SyncService _syncService = SyncService();
   final ConnectivityService _connectivity = ConnectivityService();
+  final VersionService _versionService = VersionService();
+  final LogService _logService = LogService();
 
   String _statusMessage = 'Kontrol ediliyor...';
   double _progress = 0;
   bool _hasError = false;
   String? _errorMessage;
+  bool _updateCheckDone = false;
 
   @override
   void initState() {
@@ -44,6 +50,48 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
 
   Future<void> _checkAndSync() async {
     try {
+      // Servisleri başlat
+      final apiKey = widget.storageService.getApiKey();
+      if (apiKey != null) {
+        _versionService.init(widget.apiService.dio, apiKey);
+        await _logService.init(widget.apiService.dio, apiKey);
+      }
+
+      // Versiyon kontrolü (internet varsa)
+      if (_connectivity.isOnline && apiKey != null && !_updateCheckDone) {
+        setState(() {
+          _statusMessage = 'Guncelleme kontrol ediliyor...';
+          _progress = 0.05;
+        });
+
+        final updateResult = await _versionService.checkForUpdates();
+        _updateCheckDone = true;
+
+        if (updateResult.isUpdateRequired || updateResult.isUpdateAvailable) {
+          // Güncelleme modal'ını göster
+          if (mounted) {
+            await UpdateModal.show(
+              context,
+              updateResult,
+              onLater: () {
+                // Opsiyonel güncelleme reddedildi, devam et
+                _logService.info(
+                  LogType.update,
+                  'Guncelleme reddedildi: ${updateResult.versionInfo?.currentVersion}',
+                );
+              },
+            );
+
+            // Zorunlu güncelleme ise modal kapanmaz, uygulama güncellenir
+            // Opsiyonel güncelleme reddedildiyse devam ediyoruz
+            if (updateResult.isUpdateRequired) {
+              // Modal açık kalacak, buraya ulaşılmaz
+              return;
+            }
+          }
+        }
+      }
+
       // Cache dolu mu kontrol et
       final cacheReady = await _syncService.isCacheReady();
 

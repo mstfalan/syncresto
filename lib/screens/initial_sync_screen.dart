@@ -8,6 +8,7 @@ import '../services/sync_service.dart';
 import '../services/connectivity_service.dart';
 import '../services/version_service.dart';
 import '../services/log_service.dart';
+import '../services/license_service.dart';
 import '../providers/theme_provider.dart';
 import '../widgets/update_modal.dart';
 import 'pin_login_screen.dart';
@@ -35,6 +36,7 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
   final ConnectivityService _connectivity = ConnectivityService();
   final VersionService _versionService = VersionService();
   final LogService _logService = LogService();
+  final LicenseService _licenseService = LicenseService();
 
   String _statusMessage = 'Kontrol ediliyor...';
   double _progress = 0;
@@ -55,6 +57,45 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
       if (apiKey != null) {
         _versionService.init(widget.apiService.dio, apiKey);
         await _logService.init(widget.apiService.dio, apiKey);
+        _licenseService.init(widget.apiService.dio, apiKey);
+      }
+
+      // Lisans kontrolü
+      setState(() {
+        _statusMessage = 'Lisans kontrol ediliyor...';
+        _progress = 0.02;
+      });
+
+      final licenseResult = await _licenseService.checkLicense();
+
+      if (!licenseResult.isValid && !licenseResult.canUseOffline) {
+        // Lisans geçersiz ve offline kullanım da mümkün değil
+        String errorMsg;
+        if (licenseResult.status == LicenseStatus.expired) {
+          errorMsg = 'Lisans süresi doldu!\n\nLütfen lisansınızı yenileyiniz.\n\nSon kontrol: ${licenseResult.licenseInfo?.checkedAt.toString().substring(0, 16)}';
+        } else if (licenseResult.status == LicenseStatus.inactive) {
+          errorMsg = 'Lisans devre dışı!\n\nLütfen SyncResto yöneticinize başvurunuz.';
+        } else if (licenseResult.status == LicenseStatus.notFound) {
+          errorMsg = 'Lisans bulunamadı!\n\nLütfen internete bağlanın ve tekrar deneyin.';
+        } else {
+          errorMsg = 'Lisans doğrulanamadı!\n\n${licenseResult.errorMessage ?? 'Bilinmeyen hata'}';
+        }
+
+        setState(() {
+          _hasError = true;
+          _errorMessage = errorMsg;
+        });
+        return;
+      }
+
+      // Lisans uyarısı (yakında sona erecek)
+      if (licenseResult.licenseInfo != null &&
+          licenseResult.licenseInfo!.daysRemaining > 0 &&
+          licenseResult.licenseInfo!.daysRemaining <= 7) {
+        _logService.warning(
+          LogType.general,
+          'Lisans ${licenseResult.licenseInfo!.daysRemaining} gun icinde sona erecek',
+        );
       }
 
       // Versiyon kontrolü (internet varsa)

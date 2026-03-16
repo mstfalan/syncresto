@@ -4,7 +4,7 @@ project(syncresto_pos LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "SyncResto POS")
+set(BINARY_NAME "syncresto_pos")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.

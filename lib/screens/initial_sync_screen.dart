@@ -293,9 +293,23 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
 
   Future<void> _goToSetup() async {
     // Tüm verileri temizle (SharedPreferences + SQLite cache + License)
-    await widget.storageService.clearAll();
-    await _syncService.clearAllCache();
-    await _licenseService.clearLicense();
+    try {
+      await widget.storageService.clearAll();
+    } catch (e) {
+      print('[Setup] Storage temizleme hatası: $e');
+    }
+
+    try {
+      await _syncService.clearAllCache();
+    } catch (e) {
+      print('[Setup] Cache temizleme hatası: $e');
+    }
+
+    try {
+      await _licenseService.clearLicense();
+    } catch (e) {
+      print('[Setup] License temizleme hatası: $e');
+    }
 
     if (!mounted) return;
 

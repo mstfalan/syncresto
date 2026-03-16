@@ -291,9 +291,14 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
     _checkAndSync();
   }
 
-  void _goToSetup() {
-    // Mevcut verileri temizle ve Setup ekranına git
-    widget.storageService.clearAll();
+  Future<void> _goToSetup() async {
+    // Tüm verileri temizle (SharedPreferences + SQLite cache + License)
+    await widget.storageService.clearAll();
+    await _syncService.clearAllCache();
+    await _licenseService.clearLicense();
+
+    if (!mounted) return;
+
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (context) => SetupScreen(

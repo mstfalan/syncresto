@@ -6,8 +6,12 @@ import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
 import '../services/connectivity_service.dart';
+import '../services/log_service.dart';
+import '../services/license_service.dart';
+import '../services/sync_service.dart';
 import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
+import 'initial_sync_screen.dart';
 import 'printer_settings_screen.dart';
 import '../widgets/ticket_modal.dart';
 import '../widgets/offline_data_modal.dart';
@@ -44,8 +48,12 @@ class _TablesScreenState extends State<TablesScreen> {
 
   // Offline monitoring
   final ConnectivityService _connectivity = ConnectivityService();
+  final LogService _logService = LogService();
+  final LicenseService _licenseService = LicenseService();
+  final SyncService _syncService = SyncService();
   bool _isOnline = true;
   StreamSubscription<bool>? _connectivitySubscription;
+  Timer? _licenseCheckTimer;
 
   // Ayarlar
   bool _showProductImages = true;
@@ -65,6 +73,7 @@ class _TablesScreenState extends State<TablesScreen> {
     _startClock();
     _startAutoRefresh();
     _setupConnectivity();
+    _startLicenseCheck();
   }
 
   Future<void> _loadSettings() async {
@@ -78,6 +87,7 @@ class _TablesScreenState extends State<TablesScreen> {
   void dispose() {
     _clockTimer?.cancel();
     _refreshTimer?.cancel();
+    _licenseCheckTimer?.cancel();
     _connectivitySubscription?.cancel();
     super.dispose();
   }
@@ -89,6 +99,120 @@ class _TablesScreenState extends State<TablesScreen> {
         _loadData(silent: true);
       }
     });
+  }
+
+  /// Periyodik lisans kontrolü - her 12 saatte bir
+  /// Online: API'den kontrol et
+  /// Offline: Local cache'den kontrol et (son 12 saat içinde online kontrol yapılmış olmalı)
+  void _startLicenseCheck() {
+    // İlk kontrol hemen (uygulama açıldığında)
+    _checkLicense();
+
+    // Her 12 saatte bir kontrol (43200 saniye = 12 saat)
+    _licenseCheckTimer = Timer.periodic(const Duration(hours: 12), (_) {
+      _checkLicense();
+    });
+  }
+
+  Future<void> _checkLicense() async {
+    if (!mounted) return;
+
+    try {
+      final result = await _licenseService.checkLicense(forceOnline: _isOnline);
+
+      if (!mounted) return;
+
+      // Lisans geçersiz ve offline kullanım da mümkün değil
+      // VEYA 12 saatten fazla offline (internet bağlantısı gerekli)
+      bool shouldBlock = !result.isValid && !result.canUseOffline;
+      String errorMsg = '';
+
+      // 12 saat kontrolü - son online kontrol ne zaman yapıldı?
+      if (!shouldBlock && result.licenseInfo != null) {
+        final hoursSinceCheck = result.licenseInfo!.hoursSinceLastCheck;
+        if (hoursSinceCheck >= 12) {
+          // 12 saatten fazla offline - internet bağlantısı gerekli
+          if (!_isOnline) {
+            shouldBlock = true;
+            errorMsg = 'İnternet Bağlantısı Gerekli\n\n'
+                'Son ${hoursSinceCheck} saattir offline çalışıyorsunuz.\n\n'
+                'Lisans doğrulaması için lütfen internete bağlanın.';
+            _logService.warning(LogType.general, 'Offline sure asimi - internet gerekli', details: {
+              'hours_since_check': hoursSinceCheck,
+              'waiter': widget.waiter['name'],
+            });
+          }
+          // Online ise zaten checkLicense içinde kontrol yapılıyor
+        }
+      }
+
+      if (!shouldBlock && !result.isValid && !result.canUseOffline) {
+        shouldBlock = true;
+      }
+
+      if (shouldBlock) {
+        // Hata mesajı belirlenmemişse lisans durumuna göre belirle
+        if (errorMsg.isEmpty) {
+          _logService.warning(LogType.general, 'Lisans gecersiz - oturum sonlandiriliyor', details: {
+            'status': result.status.name,
+            'waiter': widget.waiter['name'],
+          });
+
+          if (result.status == LicenseStatus.inactive) {
+            errorMsg = 'Lisans devre dışı bırakıldı.\n\nLütfen SyncResto yöneticinize başvurun.';
+          } else if (result.status == LicenseStatus.expired) {
+            errorMsg = 'Lisans süresi doldu.\n\nLütfen lisansınızı yenileyiniz.';
+          } else {
+            errorMsg = 'Lisans doğrulanamadı.\n\nLütfen internet bağlantınızı kontrol edin.';
+          }
+
+          // Cache'i temizle (sadece lisans hatası durumunda)
+          await _syncService.clearAllCache();
+          await _licenseService.clearLicense();
+        }
+
+        // Hata mesajı göster ve InitialSyncScreen'e yönlendir
+        if (mounted) {
+          await showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (ctx) => AlertDialog(
+              title: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.red[700], size: 28),
+                  const SizedBox(width: 12),
+                  Text(errorMsg.contains('İnternet') ? 'Bağlantı Gerekli' : 'Lisans Hatası'),
+                ],
+              ),
+              content: Text(errorMsg),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    // InitialSyncScreen'e yönlendir (tekrar lisans kontrolü için)
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                        builder: (context) => InitialSyncScreen(
+                          storageService: widget.storageService,
+                          apiService: widget.apiService,
+                          printerService: widget.printerService,
+                          webSocketService: widget.webSocketService,
+                        ),
+                      ),
+                      (route) => false,
+                    );
+                  },
+                  child: const Text('Tamam'),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('[License] Kontrol hatası: $e');
+      // Hata olursa sessizce devam et, sonraki kontrolde tekrar denenecek
+    }
   }
 
   void _setupConnectivity() {
@@ -225,6 +349,12 @@ class _TablesScreenState extends State<TablesScreen> {
           ),
           TextButton(
             onPressed: () async {
+              // Logout log'u
+              _logService.logAction('Oturum kapatildi', details: {
+                'waiter_id': widget.waiter['id'],
+                'waiter_name': widget.waiter['name'],
+              });
+
               await widget.storageService.clearWaiterSession();
               widget.apiService.clearWaiterToken();
               if (mounted) {

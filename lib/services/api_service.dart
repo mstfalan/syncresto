@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'sync_service.dart';
+import 'log_service.dart';
 
 class ApiService {
   static const String defaultBaseUrl = 'https://api.syncresto.com';
@@ -30,6 +31,7 @@ class ApiService {
   final LocalDbService _localDb = LocalDbService();
   final ConnectivityService _connectivity = ConnectivityService();
   final SyncService _syncService = SyncService();
+  final LogService _logService = LogService();
 
   bool get isOnline => _connectivity.isOnline;
 
@@ -103,13 +105,18 @@ class ApiService {
       setApiKey(apiKey);
       final response = await _dio.post('/api/pos/validate-key');
       if (response.data['valid'] == true) {
+        _logService.info(LogType.general, 'API key dogrulandi', details: {
+          'restaurant': response.data['restaurant_name'],
+        });
         return response.data;
       }
+      _logService.warning(LogType.general, 'API key gecersiz');
       return {
         'valid': false,
         'error': response.data['error'] ?? 'Gecersiz API Key',
       };
     } on DioException catch (e) {
+      _logService.error(LogType.error, 'API key dogrulama hatasi', error: e);
       return {
         'valid': false,
         'error': e.response?.data?['error'] ?? 'Baglanti hatasi',
@@ -132,12 +139,35 @@ class ApiService {
         // Basarili ise garsonu cache'le
         if (response.data['success'] == true && response.data['waiter'] != null) {
           await _syncService.cacheWaiter(response.data['waiter']);
+          _logService.logLogin(
+            response.data['waiter']['id'] as int? ?? 0,
+            response.data['waiter']['name'] as String? ?? 'Bilinmeyen',
+          );
+        } else {
+          _logService.warning(LogType.login, 'Basarisiz giris denemesi (online)');
         }
 
         return response.data;
       } on DioException catch (e) {
+        // 401/403 = API key geçersiz veya pasif - offline'a fallback YAPMA
+        if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+          print('[API] API key gecersiz veya pasif: ${e.response?.statusCode}');
+          _logService.error(LogType.login, 'API key gecersiz veya pasif', details: {
+            'status': e.response?.statusCode,
+            'error': e.response?.data?['error'],
+          });
+          // Cache'i temizle - kullanıcı artık bu cihazı kullanamaz
+          await _syncService.clearAllCache();
+          return {
+            'success': false,
+            'error': e.response?.data?['error'] ?? 'API key gecersiz veya pasif. Lutfen yoneticiyle iletisime gecin.',
+            'api_key_invalid': true,
+          };
+        }
+
         // Network hatasi - offline dene
-        print('[API] Online login basarisiz, offline deneniyor: ${e.message}');
+        print('[API] Online login basarisiz (network), offline deneniyor: ${e.message}');
+        _logService.warning(LogType.login, 'Online login basarisiz, offline deneniyor', details: {'error': e.message});
       }
     }
 
@@ -147,6 +177,11 @@ class ApiService {
 
     if (cachedWaiter != null) {
       print('[API] Offline login basarili: ${cachedWaiter['name']}');
+      _logService.logLogin(
+        cachedWaiter['id'] as int? ?? 0,
+        cachedWaiter['name'] as String? ?? 'Bilinmeyen',
+      );
+      _logService.info(LogType.login, 'Offline giris basarili', details: {'waiter': cachedWaiter['name']});
       return {
         'success': true,
         'waiter': cachedWaiter,
@@ -154,6 +189,7 @@ class ApiService {
       };
     }
 
+    _logService.warning(LogType.login, 'Basarisiz giris denemesi', details: {'offline': !_connectivity.isOnline});
     return {
       'success': false,
       'error': _connectivity.isOnline
@@ -273,9 +309,17 @@ class ApiService {
           'waiter_id': waiterId,
           'customer_count': customerCount,
         });
+        if (response.data['success'] == true) {
+          _logService.logAction('Masa acildi (online)', details: {
+            'table_id': tableId,
+            'ticket_id': response.data['ticket_id'],
+            'waiter_id': waiterId,
+          });
+        }
         return response.data;
       } on DioException catch (e) {
         print('[API] Online openTicket basarisiz: ${e.message}');
+        _logService.warning(LogType.action, 'Online masa acma basarisiz', details: {'table_id': tableId, 'error': e.message});
       }
     }
 
@@ -299,6 +343,13 @@ class ApiService {
 
     // Oluşturulan ticket'ı getir
     final ticket = await _localDb.getLocalTicket(localTicketId);
+
+    _logService.logAction('Masa acildi (offline)', details: {
+      'table_id': tableId,
+      'table_number': tableNumber,
+      'local_ticket_id': localTicketId,
+      'waiter_id': waiterId,
+    });
 
     return {
       'success': true,
@@ -393,9 +444,19 @@ class ApiService {
           if (portion != null) 'portion': portion,
           if (waiterId != null) 'waiter_id': waiterId,
         });
+        if (response.data['success'] == true) {
+          _logService.logAction('Urun eklendi (online)', details: {
+            'ticket_id': ticketId,
+            'product_id': productId,
+            'product_name': productName,
+            'quantity': quantity,
+            'unit_price': unitPrice,
+          });
+        }
         return response.data;
       } on DioException catch (e) {
         print('[API] Online addTicketItem basarisiz: ${e.message}');
+        _logService.warning(LogType.action, 'Online urun ekleme basarisiz', details: {'ticket_id': ticketId, 'product_name': productName, 'error': e.message});
       }
     }
 
@@ -415,6 +476,14 @@ class ApiService {
       notes: notes,
       waiterId: waiterId ?? 1,
     );
+
+    _logService.logAction('Urun eklendi (offline)', details: {
+      'local_ticket_id': localTicketId ?? ticketId,
+      'product_id': productId,
+      'product_name': productName,
+      'quantity': quantity,
+      'unit_price': unitPrice,
+    });
 
     return {
       'success': true,
@@ -437,13 +506,22 @@ class ApiService {
           if (notes != null) 'notes': notes,
           if (waiterId != null) 'waiter_id': waiterId,
         });
+        if (response.data['success'] == true) {
+          _logService.logAction('Urun guncellendi', details: {
+            'ticket_id': ticketId,
+            'item_id': itemId,
+            'quantity': quantity,
+          });
+        }
         return response.data;
       } on DioException catch (e) {
         print('[API] Online updateTicketItem basarisiz: ${e.message}');
+        _logService.error(LogType.error, 'Urun guncelleme hatasi', error: e, details: {'ticket_id': ticketId, 'item_id': itemId});
         rethrow;
       }
     }
 
+    _logService.warning(LogType.action, 'Urun guncelleme basarisiz: offline mod', details: {'ticket_id': ticketId, 'item_id': itemId});
     return {
       'success': false,
       'error': 'Offline modda item guncelleme desteklenmiyor',
@@ -462,13 +540,22 @@ class ApiService {
           'cancel_reason': cancelReason ?? 'Musteri istegi',
           if (waiterId != null) 'waiter_id': waiterId,
         });
+        if (response.data['success'] == true) {
+          _logService.logAction('Urun silindi', details: {
+            'ticket_id': ticketId,
+            'item_id': itemId,
+            'cancel_reason': cancelReason,
+          });
+        }
         return response.data;
       } on DioException catch (e) {
         print('[API] Online deleteTicketItem basarisiz: ${e.message}');
+        _logService.error(LogType.error, 'Urun silme hatasi', error: e, details: {'ticket_id': ticketId, 'item_id': itemId});
         rethrow;
       }
     }
 
+    _logService.warning(LogType.action, 'Urun silme basarisiz: offline mod', details: {'ticket_id': ticketId, 'item_id': itemId});
     return {
       'success': false,
       'error': 'Offline modda item silme desteklenmiyor',
@@ -496,6 +583,14 @@ class ApiService {
         discountType: discountType,
         waiterId: waiterId ?? 1,
       );
+
+      _logService.logAction('Adisyon kapatildi (local)', details: {
+        'local_ticket_id': ticketId,
+        'payment_method': paymentMethod,
+        'discount_amount': discountAmount,
+        'total': localTicket['total'],
+      });
+
       // Online ise hemen sync'i tetikle (arka planda)
       if (_connectivity.isOnline) {
         _syncService.syncPendingItems();
@@ -512,13 +607,22 @@ class ApiService {
           if (discountType != null) 'discount_type': discountType,
           if (waiterId != null) 'waiter_id': waiterId,
         });
+        if (response.data['success'] == true) {
+          _logService.logAction('Adisyon kapatildi (online)', details: {
+            'ticket_id': ticketId,
+            'payment_method': paymentMethod,
+            'discount_amount': discountAmount,
+          });
+        }
         return response.data;
       } on DioException catch (e) {
         print('[API] Online closeTicket basarisiz: ${e.message}');
+        _logService.error(LogType.error, 'Adisyon kapatma hatasi', error: e, details: {'ticket_id': ticketId});
         return {'success': false, 'error': e.message};
       }
     }
 
+    _logService.warning(LogType.action, 'Adisyon kapatma basarisiz: offline ve server ticket', details: {'ticket_id': ticketId});
     return {'success': false, 'error': 'Offline ve server ticket'};
   }
 
@@ -537,6 +641,12 @@ class ApiService {
         localTicketId: ticketId,
         waiterId: waiterId ?? 1,
       );
+
+      _logService.logAction('Adisyon iptal edildi (local)', details: {
+        'local_ticket_id': ticketId,
+        'reason': reason,
+      });
+
       // Online ise hemen sync'i tetikle (arka planda)
       if (_connectivity.isOnline) {
         _syncService.syncPendingItems();
@@ -551,13 +661,21 @@ class ApiService {
           'reason': reason ?? 'Iptal',
           if (waiterId != null) 'waiter_id': waiterId,
         });
+        if (response.data['success'] == true) {
+          _logService.logAction('Adisyon iptal edildi (online)', details: {
+            'ticket_id': ticketId,
+            'reason': reason,
+          });
+        }
         return response.data;
       } on DioException catch (e) {
         print('[API] Online voidTicket basarisiz: ${e.message}');
+        _logService.error(LogType.error, 'Adisyon iptal hatasi', error: e, details: {'ticket_id': ticketId});
         return {'success': false, 'error': e.message};
       }
     }
 
+    _logService.warning(LogType.action, 'Adisyon iptal basarisiz: offline ve server ticket', details: {'ticket_id': ticketId});
     return {'success': false, 'error': 'Offline ve server ticket'};
   }
 
@@ -567,6 +685,7 @@ class ApiService {
     required int waiterId,
   }) async {
     if (!_connectivity.isOnline) {
+      _logService.warning(LogType.action, 'Masa degistirme basarisiz: internet yok', details: {'ticket_id': ticketId, 'new_table_id': newTableId});
       return {'success': false, 'error': 'Masa degistirme icin internet gerekli'};
     }
 
@@ -578,9 +697,17 @@ class ApiService {
           'waiter_id': waiterId,
         },
       );
+      if (response.data['success'] == true) {
+        _logService.logAction('Masa degistirildi', details: {
+          'ticket_id': ticketId,
+          'new_table_id': newTableId,
+          'waiter_id': waiterId,
+        });
+      }
       return response.data;
     } catch (e) {
       print('[API] transferTable error: $e');
+      _logService.error(LogType.error, 'Masa degistirme hatasi', error: e, details: {'ticket_id': ticketId, 'new_table_id': newTableId});
       return {'success': false, 'error': e.toString()};
     }
   }
@@ -685,6 +812,7 @@ class ApiService {
     int? waiterId,
   }) async {
     if (!_connectivity.isOnline) {
+      _logService.warning(LogType.action, 'Mutfak fisi gonderilemedi: internet yok', details: {'ticket_id': ticketId});
       return {'success': false, 'error': 'Çevrimdışı modda mutfak fişi gönderilemez'};
     }
 
@@ -692,9 +820,17 @@ class ApiService {
       final response = await _dio.post('/api/pos/tickets/$ticketId/print-kitchen', data: {
         if (waiterId != null) 'waiter_id': waiterId,
       });
+      if (response.data['success'] == true) {
+        final itemCount = (response.data['items'] as List?)?.length ?? 0;
+        _logService.logAction('Mutfak fisi gonderildi', details: {
+          'ticket_id': ticketId,
+          'item_count': itemCount,
+        });
+      }
       return response.data;
     } on DioException catch (e) {
       print('[API] printKitchen hatası: ${e.message}');
+      _logService.error(LogType.error, 'Mutfak fisi gonderme hatasi', error: e, details: {'ticket_id': ticketId});
       return {'success': false, 'error': e.response?.data?['error'] ?? e.message};
     }
   }

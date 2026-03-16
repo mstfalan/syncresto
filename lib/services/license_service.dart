@@ -121,13 +121,17 @@ class LicenseCheckResult {
   bool get isExpired => status == LicenseStatus.expired;
   bool get canUseOffline {
     // Offline kullanım için:
-    // 1. Son 24 saat içinde kontrol edilmiş olmalı
-    // 2. Lisans geçerli olmalı (veya süresi 7 gün içinde dolmuş olmalı - grace period)
+    // 1. Lisans bilgisi mevcut olmalı
+    // 2. Son 12 saat içinde online kontrol edilmiş olmalı
+    // 3. Lisans aktif ve geçerli olmalı
+    // NOT: API key pasif edilmişse, online kontrol sırasında cache temizlenecek
+    //      ve bu fonksiyon false dönecek
     if (licenseInfo == null) return false;
-    if (licenseInfo!.hoursSinceLastCheck > 24) return false;
+    if (!licenseInfo!.isActive) return false; // Lisans pasif ise offline kullanım yok
+    if (licenseInfo!.hoursSinceLastCheck > 12) return false; // 12 saatten eski kontrol
     if (licenseInfo!.isValid) return true;
-    // Grace period: Lisans süresi 7 gün önce dolmuşsa hala kullanılabilir
-    if (licenseInfo!.daysRemaining >= -7) return true;
+    // Grace period: Sadece SÜRE dolmuş lisanslar için (pasif edilmiş değil)
+    if (licenseInfo!.isExpired && licenseInfo!.daysRemaining >= -3) return true;
     return false;
   }
 }
@@ -172,18 +176,55 @@ class LicenseService {
     if (shouldCheckOnline && _dio != null && _apiKey != null) {
       try {
         final onlineResult = await _checkLicenseOnline();
-        if (onlineResult.licenseInfo != null) {
+
+        // Online kontrol başarılı - sonucu kaydet ve döndür
+        if (onlineResult.status == LicenseStatus.valid && onlineResult.licenseInfo != null) {
           await _saveLicenseLicenseLocally(onlineResult.licenseInfo!);
           _cachedLicenseInfo = onlineResult.licenseInfo;
           return onlineResult;
         }
+
+        // Online kontrol başarısız (API key pasif, lisans yok vs.)
+        // Local cache'i de geçersiz kıl!
+        if (onlineResult.status == LicenseStatus.inactive ||
+            onlineResult.status == LicenseStatus.expired) {
+          await clearLicense(); // Local cache'i temizle
+          _logService.warning(
+            LogType.general,
+            'Lisans geçersiz - cache temizlendi',
+            details: {'status': onlineResult.status.name},
+          );
+          return onlineResult;
+        }
+      } on DioException catch (e) {
+        // Network hatası - sadece bu durumda offline'a izin ver
+        if (e.type == DioExceptionType.connectionTimeout ||
+            e.type == DioExceptionType.receiveTimeout ||
+            e.type == DioExceptionType.connectionError ||
+            e.type == DioExceptionType.unknown) {
+          debugPrint('[LicenseService] Network hatası, offline moda geçiliyor: ${e.message}');
+          // Network hatası - local'e devam
+        } else {
+          // 401, 403 gibi hatalar - lisans geçersiz
+          if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+            await clearLicense();
+            _logService.warning(
+              LogType.general,
+              'API key geçersiz veya pasif - cache temizlendi',
+            );
+            return LicenseCheckResult(
+              status: LicenseStatus.inactive,
+              errorMessage: e.response?.data?['error'] ?? 'API key geçersiz',
+            );
+          }
+        }
       } catch (e) {
         debugPrint('[LicenseService] Online kontrol hatası: $e');
-        // Online başarısız, local'e devam
+        // Bilinmeyen hata - local'e devam
       }
     }
 
-    // 4. Local lisansı değerlendir
+    // 4. Local lisansı değerlendir (sadece network hatası durumunda buraya gelir)
     if (localLicense != null) {
       _cachedLicenseInfo = localLicense;
 
@@ -193,7 +234,7 @@ class LicenseService {
           licenseInfo: localLicense,
         );
       } else if (localLicense.isExpired) {
-        // Grace period kontrolü
+        // Grace period kontrolü - sadece süresi dolanlar için
         if (localLicense.daysRemaining >= -7) {
           _logService.warning(
             LogType.general,
@@ -209,6 +250,7 @@ class LicenseService {
           licenseInfo: localLicense,
         );
       } else {
+        // isActive = false - lisans pasif edilmiş
         return LicenseCheckResult(
           status: LicenseStatus.inactive,
           licenseInfo: localLicense,
@@ -272,6 +314,23 @@ class LicenseService {
           errorMessage: response.data['error'] ?? 'Lisans geçersiz',
         );
       }
+    } on DioException catch (e) {
+      // 401/403 = API key geçersiz veya pasif
+      if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+        debugPrint('[LicenseService] API key geçersiz: ${e.response?.statusCode}');
+        _logService.warning(
+          LogType.general,
+          'API key geçersiz veya pasif',
+          details: {'status': e.response?.statusCode},
+        );
+        return LicenseCheckResult(
+          status: LicenseStatus.inactive,
+          errorMessage: e.response?.data?['error'] ?? 'API key geçersiz veya pasif',
+        );
+      }
+      // Network hatası - rethrow ile üst katmana bildir
+      debugPrint('[LicenseService] Network hatası: ${e.message}');
+      rethrow;
     } catch (e) {
       debugPrint('[LicenseService] Online kontrol hatası: $e');
       return LicenseCheckResult(

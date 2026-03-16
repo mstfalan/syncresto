@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'log_service.dart';
 
 /// Yazıcı türleri
 enum PrinterType {
@@ -15,6 +16,8 @@ class PrinterService {
   static final PrinterService _instance = PrinterService._internal();
   factory PrinterService() => _instance;
   PrinterService._internal();
+
+  final LogService _logService = LogService();
 
   // Çoklu yazıcı desteği - her tür için ayrı ayar
   Map<String, Map<String, dynamic>> _printers = {};
@@ -228,6 +231,10 @@ class PrinterService {
     final config = _getPrinterConfig(printerType ?? 'cashier');
     if (config == null || config['ip'] == null) {
       onStatusChange?.call('Yazici ayarlanmamis', true);
+      _logService.warning(LogType.action, 'Fis yazdirma basarisiz: yazici ayarlanmamis', details: {
+        'ticket_number': ticket['ticket_number'],
+        'printer_type': printerType ?? 'cashier',
+      });
       return false;
     }
 
@@ -245,14 +252,26 @@ class PrinterService {
 
       if (success) {
         onStatusChange?.call('Fis yazdirildi', false);
+        _logService.logAction('Fis yazdirildi', details: {
+          'ticket_number': ticket['ticket_number'],
+          'printer_ip': ip,
+          'printer_type': printerType ?? 'cashier',
+        });
       } else {
         onStatusChange?.call('Yazdirma hatasi', true);
+        _logService.error(LogType.error, 'Fis yazdirma hatasi', details: {
+          'ticket_number': ticket['ticket_number'],
+          'printer_ip': ip,
+        });
       }
 
       return success;
     } catch (e) {
       print('[Printer] Ticket yazdirilirken hata: $e');
       onStatusChange?.call('Hata: $e', true);
+      _logService.error(LogType.error, 'Fis yazdirma hatasi', error: e, details: {
+        'ticket_number': ticket['ticket_number'],
+      });
       return false;
     }
   }
@@ -265,6 +284,11 @@ class PrinterService {
 
     if (config == null || config['ip'] == null) {
       onStatusChange?.call('${PrinterService.getPrinterTypeName(type)} yazicisi ayarlanmamis', true);
+      _logService.warning(LogType.action, 'Siparis fisi yazdirma basarisiz: yazici ayarlanmamis', details: {
+        'order_number': order['order_number'],
+        'department': department,
+        'printer_type': type,
+      });
       return false;
     }
 
@@ -282,12 +306,28 @@ class PrinterService {
 
       if (success) {
         onStatusChange?.call('Siparis fisi yazdirildi (${PrinterService.getPrinterTypeName(type)})', false);
+        _logService.logAction('Siparis fisi yazdirildi', details: {
+          'order_number': order['order_number'],
+          'department': department,
+          'printer_ip': ip,
+          'printer_type': type,
+        });
+      } else {
+        _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', details: {
+          'order_number': order['order_number'],
+          'department': department,
+          'printer_ip': ip,
+        });
       }
 
       return success;
     } catch (e) {
       print('[Printer] Order yazdirilirken hata: $e');
       onStatusChange?.call('Hata: $e', true);
+      _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', error: e, details: {
+        'order_number': order['order_number'],
+        'department': department,
+      });
       return false;
     }
   }
@@ -802,6 +842,11 @@ class PrinterService {
 
     if (config == null || config['ip'] == null) {
       onStatusChange?.call('${PrinterService.getPrinterTypeName(printerType)} yazicisi ayarlanmamis', true);
+      _logService.warning(LogType.action, 'Mutfak fisi yazdirma basarisiz: yazici ayarlanmamis', details: {
+        'ticket_number': ticket['ticket_number'],
+        'printer_type': printerType,
+        'item_count': items.length,
+      });
       return false;
     }
 
@@ -821,14 +866,29 @@ class PrinterService {
 
       if (success) {
         onStatusChange?.call('Mutfak fisi yazdirildi (${items.length} urun)', false);
+        _logService.logAction('Mutfak fisi yazdirildi', details: {
+          'ticket_number': ticket['ticket_number'],
+          'printer_ip': ip,
+          'printer_type': printerType,
+          'item_count': items.length,
+        });
       } else {
         onStatusChange?.call('Mutfak fisi yazdirilamadi', true);
+        _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi', details: {
+          'ticket_number': ticket['ticket_number'],
+          'printer_ip': ip,
+          'item_count': items.length,
+        });
       }
 
       return success;
     } catch (e) {
       print('[Printer] Mutfak fisi yazdirilirken hata: $e');
       onStatusChange?.call('Hata: $e', true);
+      _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi', error: e, details: {
+        'ticket_number': ticket['ticket_number'],
+        'item_count': items.length,
+      });
       return false;
     }
   }
@@ -853,14 +913,30 @@ class PrinterService {
 
       if (success) {
         onStatusChange?.call('Mutfak fisi yazdirildi ($ip)', false);
+        _logService.logAction('Mutfak fisi yazdirildi (IP)', details: {
+          'ticket_number': ticket['ticket_number'],
+          'printer_ip': ip,
+          'printer_port': port,
+          'item_count': items.length,
+        });
       } else {
         onStatusChange?.call('Mutfak fisi yazdirilamadi ($ip)', true);
+        _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi (IP)', details: {
+          'ticket_number': ticket['ticket_number'],
+          'printer_ip': ip,
+          'item_count': items.length,
+        });
       }
 
       return success;
     } catch (e) {
       print('[Printer] Mutfak fisi yazdirilirken hata ($ip): $e');
       onStatusChange?.call('Hata: $e', true);
+      _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi (IP)', error: e, details: {
+        'ticket_number': ticket['ticket_number'],
+        'printer_ip': ip,
+        'item_count': items.length,
+      });
       return false;
     }
   }

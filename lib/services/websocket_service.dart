@@ -1,4 +1,5 @@
 import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'log_service.dart';
 
 class WebSocketService {
   static final WebSocketService _instance = WebSocketService._internal();
@@ -8,6 +9,7 @@ class WebSocketService {
   IO.Socket? _socket;
   bool _isConnected = false;
   String? _serverUrl;
+  final LogService _logService = LogService();
 
   // Event callbacks
   Function(Map<String, dynamic>)? onNewOrder;
@@ -40,6 +42,7 @@ class WebSocketService {
         print('[WebSocket] Connected successfully');
         _isConnected = true;
         onConnectionChange?.call(true);
+        _logService.info(LogType.general, 'WebSocket baglantisi kuruldu', details: {'server': _serverUrl});
 
         // Join as POS client
         _socket!.emit('pos_join', {'device': 'syncresto_pos'});
@@ -49,23 +52,31 @@ class WebSocketService {
         print('[WebSocket] Disconnected');
         _isConnected = false;
         onConnectionChange?.call(false);
+        _logService.warning(LogType.general, 'WebSocket baglantisi kesildi');
       });
 
       _socket!.onConnectError((error) {
         print('[WebSocket] Connect error: $error');
         _isConnected = false;
         onConnectionChange?.call(false);
+        _logService.error(LogType.error, 'WebSocket baglanti hatasi', details: {'error': error.toString()});
       });
 
       _socket!.onError((error) {
         print('[WebSocket] Error: $error');
+        _logService.error(LogType.error, 'WebSocket hatasi', details: {'error': error.toString()});
       });
 
       // Listen for new orders
       _socket!.on('new_web_order', (data) {
         print('[WebSocket] New order received');
         if (data != null && data['order'] != null) {
-          onNewOrder?.call(Map<String, dynamic>.from(data['order']));
+          final order = Map<String, dynamic>.from(data['order']);
+          _logService.logAction('Yeni web siparisi alindi', details: {
+            'order_number': order['order_number'],
+            'customer_name': order['customer_name'],
+          });
+          onNewOrder?.call(order);
         }
       });
 
@@ -73,7 +84,12 @@ class WebSocketService {
       _socket!.on('order_update', (data) {
         print('[WebSocket] Order update received');
         if (data != null && data['order'] != null) {
-          onOrderUpdate?.call(Map<String, dynamic>.from(data['order']));
+          final order = Map<String, dynamic>.from(data['order']);
+          _logService.logAction('Siparis guncellendi (websocket)', details: {
+            'order_number': order['order_number'],
+            'status': order['status'],
+          });
+          onOrderUpdate?.call(order);
         }
       });
 
@@ -86,6 +102,9 @@ class WebSocketService {
           if (data['settings'] != null) {
             order['_settings'] = Map<String, dynamic>.from(data['settings']);
           }
+          _logService.logAction('Yazdirma istegi alindi (websocket)', details: {
+            'order_number': order['order_number'],
+          });
           onPrintRequest?.call(order);
         }
       });
@@ -99,6 +118,7 @@ class WebSocketService {
       print('[WebSocket] Connection error: $e');
       _isConnected = false;
       onConnectionChange?.call(false);
+      _logService.error(LogType.error, 'WebSocket baglanti hatasi', error: e);
     }
   }
 

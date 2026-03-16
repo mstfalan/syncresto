@@ -13,6 +13,9 @@ import '../providers/theme_provider.dart';
 import '../widgets/update_modal.dart';
 import 'pin_login_screen.dart';
 
+// Re-export ApiKeyInvalidException for this file
+export '../services/sync_service.dart' show ApiKeyInvalidException;
+
 class InitialSyncScreen extends StatefulWidget {
   final StorageService storageService;
   final ApiService apiService;
@@ -226,11 +229,34 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
       await Future.delayed(const Duration(milliseconds: 500));
       _navigateToLogin();
 
-    } catch (e) {
+    } on ApiKeyInvalidException catch (e) {
+      // API key geçersiz veya pasif
       setState(() {
         _hasError = true;
-        _errorMessage = 'Veri indirme hatasi:\n$e\n\nLutfen tekrar deneyin.';
+        _errorMessage = 'Lisans Hatası\n\n$e\n\nLütfen SyncResto yöneticinize başvurun.';
       });
+
+      // Cache'i temizle
+      await _syncService.clearAllCache();
+      await _licenseService.clearLicense();
+    } catch (e) {
+      // Genel hata - ama önce 401/403 kontrol et
+      final errorStr = e.toString().toLowerCase();
+      if (errorStr.contains('401') || errorStr.contains('403') || errorStr.contains('unauthorized')) {
+        setState(() {
+          _hasError = true;
+          _errorMessage = 'Lisans Hatası\n\nAPI key geçersiz veya lisans pasif edilmiş.\n\nLütfen SyncResto yöneticinize başvurun.';
+        });
+
+        // Cache'i temizle
+        await _syncService.clearAllCache();
+        await _licenseService.clearLicense();
+      } else {
+        setState(() {
+          _hasError = true;
+          _errorMessage = 'Veri indirme hatasi:\n$e\n\nLutfen tekrar deneyin.';
+        });
+      }
     }
   }
 

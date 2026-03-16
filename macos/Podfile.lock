@@ -4,10 +4,14 @@ PODS:
     - FlutterMacOS
   - connectivity_plus (0.0.1):
     - FlutterMacOS
+  - device_info_plus (0.0.1):
+    - FlutterMacOS
   - flutter_blue_plus_darwin (0.0.2):
     - Flutter
     - FlutterMacOS
   - FlutterMacOS (1.0.0)
+  - package_info_plus (0.0.1):
+    - FlutterMacOS
   - shared_preferences_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
@@ -18,8 +22,10 @@ PODS:
 DEPENDENCIES:
   - audioplayers_darwin (from `Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin`)
   - connectivity_plus (from `Flutter/ephemeral/.symlinks/plugins/connectivity_plus/macos`)
+  - device_info_plus (from `Flutter/ephemeral/.symlinks/plugins/device_info_plus/macos`)
   - flutter_blue_plus_darwin (from `Flutter/ephemeral/.symlinks/plugins/flutter_blue_plus_darwin/darwin`)
   - FlutterMacOS (from `Flutter/ephemeral`)
+  - package_info_plus (from `Flutter/ephemeral/.symlinks/plugins/package_info_plus/macos`)
   - shared_preferences_foundation (from `Flutter/ephemeral/.symlinks/plugins/shared_preferences_foundation/darwin`)
   - sqflite_darwin (from `Flutter/ephemeral/.symlinks/plugins/sqflite_darwin/darwin`)
 
@@ -28,10 +34,14 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin
   connectivity_plus:
     :path: Flutter/ephemeral/.symlinks/plugins/connectivity_plus/macos
+  device_info_plus:
+    :path: Flutter/ephemeral/.symlinks/plugins/device_info_plus/macos
   flutter_blue_plus_darwin:
     :path: Flutter/ephemeral/.symlinks/plugins/flutter_blue_plus_darwin/darwin
   FlutterMacOS:
     :path: Flutter/ephemeral
+  package_info_plus:
+    :path: Flutter/ephemeral/.symlinks/plugins/package_info_plus/macos
   shared_preferences_foundation:
     :path: Flutter/ephemeral/.symlinks/plugins/shared_preferences_foundation/darwin
   sqflite_darwin:
@@ -40,8 +50,10 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   audioplayers_darwin: 835ced6edd4c9fc8ebb0a7cc9e294a91d99917d5
   connectivity_plus: 4adf20a405e25b42b9c9f87feff8f4b6fde18a4e
+  device_info_plus: a56e6e74dbbd2bb92f2da12c64ddd4f67a749041
   flutter_blue_plus_darwin: 20a08bfeaa0f7804d524858d3d8744bcc1b6dbc3
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  package_info_plus: f0052d280d17aa382b932f399edf32507174e870
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
   sqflite_darwin: 20b2a3a3b70e43edae938624ce550a3cbf66a3d0
 

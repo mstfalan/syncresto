@@ -5,6 +5,16 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'image_cache_service.dart';
+import 'log_service.dart';
+
+/// API key geçersiz veya pasif olduğunda fırlatılır
+class ApiKeyInvalidException implements Exception {
+  final String message;
+  ApiKeyInvalidException(this.message);
+
+  @override
+  String toString() => message;
+}
 
 class SyncService {
   static final SyncService _instance = SyncService._internal();
@@ -14,6 +24,7 @@ class SyncService {
   final LocalDbService _localDb = LocalDbService();
   final ConnectivityService _connectivity = ConnectivityService();
   final ImageCacheService _imageCache = ImageCacheService();
+  final LogService _logService = LogService();
 
   Dio? _dio;
   Timer? _syncTimer;
@@ -75,6 +86,7 @@ class SyncService {
   Future<void> performInitialSync() async {
     if (!_connectivity.isOnline || _dio == null) {
       print('[Sync] İlk sync için internet gerekli!');
+      _logService.warning(LogType.sync, 'Ilk sync basarisiz: internet yok');
       return;
     }
 
@@ -84,6 +96,7 @@ class SyncService {
     }
 
     print('[Sync] ========== İLK SYNC BAŞLIYOR ==========');
+    _logService.logSync('Ilk sync baslatildi', operation: 'initial_sync_start');
 
     try {
       // 1. Kategoriler
@@ -152,8 +165,27 @@ class SyncService {
       print('[Sync] ========== İLK SYNC TAMAMLANDI ==========');
       print('[Sync] Görsel cache boyutu: $cacheSize');
 
+      _logService.logSync('Ilk sync tamamlandi', operation: 'initial_sync_complete', count: products.length);
+
+    } on DioException catch (e) {
+      print('[Sync] İlk sync DioException: ${e.response?.statusCode}');
+
+      // 401/403 = API key geçersiz veya pasif
+      if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+        _logService.error(LogType.sync, 'API key gecersiz veya pasif', details: {
+          'status': e.response?.statusCode,
+          'error': e.response?.data?['error'],
+        });
+        throw ApiKeyInvalidException(
+          e.response?.data?['error'] ?? 'API key geçersiz veya lisans pasif edilmiş.',
+        );
+      }
+
+      _logService.logSyncError('Ilk sync hatasi', operation: 'initial_sync', error: e);
+      rethrow;
     } catch (e) {
       print('[Sync] İlk sync hatası: $e');
+      _logService.logSyncError('Ilk sync hatasi', operation: 'initial_sync', error: e);
       rethrow;
     }
   }
@@ -238,6 +270,7 @@ class SyncService {
     if (!_connectivity.isOnline || _dio == null) return;
 
     print('[Sync] Arka plan güncelleme başlıyor...');
+    _logService.logSync('Arka plan cache guncellemesi baslatildi', operation: 'background_update_start');
 
     try {
       // 1. Ürünleri güncelle
@@ -326,8 +359,10 @@ class SyncService {
       }
 
       print('[Sync] Arka plan güncelleme tamamlandı');
+      _logService.logSync('Arka plan cache guncellemesi tamamlandi', operation: 'background_update_complete');
     } catch (e) {
       print('[Sync] Arka plan güncelleme hatası: $e');
+      _logService.logSyncError('Arka plan cache guncellemesi hatasi', operation: 'background_update', error: e);
     }
   }
 
@@ -393,6 +428,10 @@ class SyncService {
 
       print('[Sync] Tüm işlemler tamamlandı');
 
+      if (completedSyncIds.isNotEmpty) {
+        _logService.logSync('Sync tamamlandi', count: completedSyncIds.length, operation: 'sync_complete');
+      }
+
       // Sync tamamlandıktan sonra sunucudan güncel verileri çek ve cache'i güncelle
       if (completedSyncIds.isNotEmpty) {
         print('[Sync] Cache güncelleniyor...');
@@ -400,6 +439,7 @@ class SyncService {
       }
     } catch (e) {
       print('[Sync] Hata: $e');
+      _logService.logSyncError('Sync islemi basarisiz', operation: 'sync_pending', error: e);
     } finally {
       _isSyncing = false;
     }
@@ -471,6 +511,11 @@ class SyncService {
       }
     } catch (e) {
       print('[Sync] İşlem hatası: $e');
+      _logService.logSyncError(
+        'Sync islemi basarisiz: $description',
+        operation: '$action $entityType',
+        error: e,
+      );
       await _localDb.markSyncFailed(syncId, e.toString());
       return false;
     }
@@ -542,11 +587,14 @@ class SyncService {
 
           if (merged) {
             print('[Sync] Ticket mevcut adisyona birleştirildi: local=$localId -> server=$serverId');
+            _logService.logSync('Offline ticket birlesitirildi', operation: 'ticket_merge', count: 1);
           } else {
             print('[Sync] Ticket sync başarılı: local=$localId, server=$serverId');
+            _logService.logSync('Ticket sync basarili', operation: 'ticket_create', count: 1);
           }
           return true;
         }
+        _logService.logSyncError('Ticket create sync basarisiz', operation: 'ticket_create');
         return false;
 
       case 'close':
@@ -576,8 +624,10 @@ class SyncService {
         if (closeResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Ticket close sync başarılı: server=$serverIdClose');
+          _logService.logSync('Ticket close sync basarili', operation: 'ticket_close', count: 1);
           return true;
         }
+        _logService.logSyncError('Ticket close sync basarisiz', operation: 'ticket_close');
         return false;
 
       case 'void':
@@ -603,8 +653,10 @@ class SyncService {
         if (voidResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Ticket void sync başarılı: server=$serverIdVoid');
+          _logService.logSync('Ticket void sync basarili', operation: 'ticket_void', count: 1);
           return true;
         }
+        _logService.logSyncError('Ticket void sync basarisiz', operation: 'ticket_void');
         return false;
     }
     return false;
@@ -680,8 +732,10 @@ class SyncService {
           await _localDb.updateItemServerTicketId(localId, serverTicketId);
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Item sync başarılı: local=$localId, server=$serverItemId');
+          _logService.logSync('Item sync basarili', operation: 'item_add', count: 1);
           return true;
         }
+        _logService.logSyncError('Item sync basarisiz', operation: 'item_add');
         return false;
 
       case 'cancel_item':
@@ -736,8 +790,10 @@ class SyncService {
           try {
             await _dio!.delete('/api/pos/tickets/$serverTicketId/items/$serverItemId');
             print('[Sync] Item cancel sync başarılı: server_item=$serverItemId');
+            _logService.logSync('Item cancel sync basarili', operation: 'item_cancel', count: 1);
           } catch (e) {
             print('[Sync] Item cancel API hatası: $e');
+            _logService.logSyncError('Item cancel sync hatasi', operation: 'item_cancel', error: e);
           }
         }
 
@@ -903,6 +959,31 @@ class SyncService {
   // Tüm hatalı işlemleri temizle
   Future<void> clearFailedItems() async {
     await _localDb.clearFailedSyncItems();
+  }
+
+  /// Tüm cache'i temizle (API key pasif olduğunda çağrılır)
+  Future<void> clearAllCache() async {
+    try {
+      final db = await _localDb.database;
+
+      // Tüm cache tablolarını temizle
+      await db.delete('cached_waiters');
+      await db.delete('cached_categories');
+      await db.delete('cached_products');
+      await db.delete('cached_tables');
+      await db.delete('cached_sections');
+      await db.delete('cached_settings');
+      await db.delete('sync_queue');
+      await db.delete('offline_tickets');
+      await db.delete('offline_ticket_items');
+
+      _isInitialSyncDone = false;
+      _logService.warning(LogType.sync, 'Tum cache temizlendi (API key pasif)');
+      print('[Sync] Tüm cache temizlendi');
+    } catch (e) {
+      print('[Sync] Cache temizleme hatası: $e');
+      _logService.error(LogType.sync, 'Cache temizleme hatasi', details: {'error': e.toString()});
+    }
   }
 
   void dispose() {

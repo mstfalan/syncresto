@@ -81,6 +81,8 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
           widget.apiService.setWaiterToken(token);
         }
 
+        // Log artık api_service.waiterLogin içinde tutuluyor
+
         if (mounted) {
           Navigator.of(context).pushReplacement(
             MaterialPageRoute(
@@ -95,12 +97,14 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
           );
         }
       } else {
+        // Log artık api_service.waiterLogin içinde tutuluyor
         setState(() {
           _errorMessage = result['error'] ?? 'Gecersiz PIN';
           _pin = '';
         });
       }
     } catch (e) {
+      // Log artık api_service.waiterLogin içinde tutuluyor
       setState(() {
         _errorMessage = 'Giris hatasi';
         _pin = '';

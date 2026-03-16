@@ -62,22 +62,24 @@ class _TicketModalState extends State<TicketModal> {
   }
 
   /// Garsonun belirli bir yetkiye sahip olup olmadığını kontrol eder
+  /// - Online modda: Garsonun yetkilerine göre butonlar gösterilir
+  /// - Offline modda: Sadece temel işlemlere izin verilir (adisyon aç, ürün ekle, nakit/kart ile kapat, iptal)
   bool _hasPermission(String permission) {
-    // Offline ticket ise tüm yetkiler açık
-    if (_isOfflineTicket) {
-      return true;
+    // Offline moddayken sadece belirli işlemlere izin ver
+    if (!widget.apiService.isOnline) {
+      // Offline modda izin verilen işlemler:
+      // - open_ticket: Adisyon açma
+      // - add_item: Ürün ekleme
+      // - close_ticket: Hesap kapatma (nakit/kart)
+      // - void_ticket: Adisyon iptal
+      const offlineAllowedPermissions = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket'];
+      return offlineAllowedPermissions.contains(permission);
     }
 
+    // Online modda garsonun yetkilerini kontrol et
     final permissions = widget.waiter['permissions'] as Map<String, dynamic>?;
-    if (permissions == null) return true; // Yetki bilgisi yoksa varsayılan olarak izin ver
+    if (permissions == null) return false; // Yetki bilgisi yoksa varsayılan olarak izin verme
     return permissions[permission] == true;
-  }
-
-  /// Ticket offline'da mı oluşturuldu?
-  bool get _isOfflineTicket {
-    if (_ticket == null) return false;
-    // Offline ticket'lar: server_id == null veya offline == true
-    return _ticket!['offline'] == true || _ticket!['server_id'] == null;
   }
 
   Future<void> _loadTicket() async {

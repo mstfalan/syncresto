@@ -12,6 +12,7 @@ import '../services/license_service.dart';
 import '../providers/theme_provider.dart';
 import '../widgets/update_modal.dart';
 import 'pin_login_screen.dart';
+import 'setup_screen.dart';
 
 // Re-export ApiKeyInvalidException for this file
 export '../services/sync_service.dart' show ApiKeyInvalidException;
@@ -290,6 +291,21 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
     _checkAndSync();
   }
 
+  void _goToSetup() {
+    // Mevcut verileri temizle ve Setup ekranına git
+    widget.storageService.clearAll();
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (context) => SetupScreen(
+          storageService: widget.storageService,
+          apiService: widget.apiService,
+          printerService: widget.printerService,
+          webSocketService: widget.webSocketService,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context);
@@ -379,6 +395,23 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
                       style: ElevatedButton.styleFrom(
                         backgroundColor: theme.primaryColor,
                         foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: OutlinedButton.icon(
+                      onPressed: _goToSetup,
+                      icon: const Icon(Icons.key),
+                      label: const Text('Yeni API Key Gir'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.grey[700],
+                        side: BorderSide(color: Colors.grey[400]!),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),

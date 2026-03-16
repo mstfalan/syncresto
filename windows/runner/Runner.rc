@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.greenchef" "\0"
-            VALUE "FileDescription", "greenchef_pos" "\0"
+            VALUE "CompanyName", "SyncResto" "\0"
+            VALUE "FileDescription", "SyncResto POS" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "greenchef_pos" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.greenchef. All rights reserved." "\0"
-            VALUE "OriginalFilename", "greenchef_pos.exe" "\0"
-            VALUE "ProductName", "greenchef_pos" "\0"
+            VALUE "InternalName", "SyncResto POS" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 SyncResto. All rights reserved." "\0"
+            VALUE "OriginalFilename", "SyncResto POS.exe" "\0"
+            VALUE "ProductName", "SyncResto POS" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

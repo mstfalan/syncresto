@@ -231,8 +231,15 @@ class VersionService {
 
       _logService.logUpdate('İndirme başladı: ${versionInfo.currentVersion}');
 
-      // İndirme
-      final response = await Dio().download(
+      // İndirme - redirect'leri takip et
+      final downloadDio = Dio(BaseOptions(
+        followRedirects: true,
+        maxRedirects: 5,
+        receiveTimeout: const Duration(minutes: 10),
+        connectTimeout: const Duration(seconds: 30),
+      ));
+
+      final response = await downloadDio.download(
         downloadUrl,
         filePath,
         onReceiveProgress: (received, total) {
@@ -240,7 +247,7 @@ class VersionService {
         },
       );
 
-      if (response.statusCode != 200) {
+      if (response.statusCode != 200 && response.statusCode != 302) {
         throw Exception('İndirme hatası: ${response.statusCode}');
       }
 
@@ -285,46 +292,217 @@ class VersionService {
     }
   }
 
-  /// Güncellemeyi uygula (updater script'i çalıştır)
+  /// Dosyaya log yaz (debug için)
+  Future<void> _writeDebugLog(String message) async {
+    try {
+      final home = Platform.environment['HOME'];
+      if (home == null) return;
+      final logFile = File('$home/syncresto_update.log');
+      final timestamp = DateTime.now().toIso8601String();
+      await logFile.writeAsString('[$timestamp] $message\n', mode: FileMode.append);
+    } catch (_) {}
+  }
+
+  /// Güncellemeyi uygula
   Future<bool> applyUpdate(File updateFile) async {
     try {
-      final appDir = await _getApplicationDirectory();
-      if (appDir == null) {
-        throw Exception('Uygulama dizini bulunamadı');
-      }
-
+      await _writeDebugLog('=== Güncelleme başlıyor ===');
+      await _writeDebugLog('Update file: ${updateFile.path}');
       _logService.logUpdate('Güncelleme uygulanıyor...');
 
-      // Updater script yolu
-      final updaterPath = _platform == 'windows'
-          ? '${appDir.path}\\updater.bat'
-          : '${appDir.path}/updater.sh';
+      if (_platform == 'macos') {
+        // macOS: ZIP'i çıkart ve ~/Applications'a kopyala (izin sorunu yok)
+        final home = Platform.environment['HOME'];
+        if (home == null) {
+          throw Exception('HOME dizini bulunamadı');
+        }
 
-      final updaterFile = File(updaterPath);
-      if (!await updaterFile.exists()) {
-        throw Exception('Updater script bulunamadı: $updaterPath');
-      }
+        final userAppsDir = Directory('$home/Applications');
+        if (!await userAppsDir.exists()) {
+          await userAppsDir.create(recursive: true);
+        }
 
-      // Updater'ı çalıştır ve uygulamayı kapat
-      if (_platform == 'windows') {
-        await Process.start(
-          'cmd',
-          ['/c', 'start', '', updaterPath, updateFile.path, appDir.path],
+        final tempDir = await getTemporaryDirectory();
+        final extractDir = Directory('${tempDir.path}/SyncResto_Update');
+
+        // Önceki çıkartmayı temizle
+        if (await extractDir.exists()) {
+          await extractDir.delete(recursive: true);
+        }
+        await extractDir.create();
+
+        await _writeDebugLog('HOME: $home');
+        await _writeDebugLog('Extract dir: ${extractDir.path}');
+        debugPrint('[VersionService] ZIP çıkartılıyor: ${updateFile.path}');
+        debugPrint('[VersionService] Extract dir: ${extractDir.path}');
+
+        // ZIP'i çıkart
+        final unzipResult = await Process.run('unzip', [
+          '-o',
+          updateFile.path,
+          '-d', extractDir.path,
+        ]);
+
+        await _writeDebugLog('Unzip exit code: ${unzipResult.exitCode}');
+        await _writeDebugLog('Unzip stdout: ${unzipResult.stdout}');
+        await _writeDebugLog('Unzip stderr: ${unzipResult.stderr}');
+        debugPrint('[VersionService] Unzip exit code: ${unzipResult.exitCode}');
+        debugPrint('[VersionService] Unzip stdout: ${unzipResult.stdout}');
+        debugPrint('[VersionService] Unzip stderr: ${unzipResult.stderr}');
+
+        if (unzipResult.exitCode != 0) {
+          await _writeDebugLog('HATA: ZIP çıkartma başarısız');
+          throw Exception('ZIP çıkartma hatası: ${unzipResult.stderr}');
+        }
+
+        // Çıkartılan dosyaları listele
+        final listResult = await Process.run('ls', ['-la', extractDir.path]);
+        await _writeDebugLog('Extracted files: ${listResult.stdout}');
+        debugPrint('[VersionService] Extracted files: ${listResult.stdout}');
+
+        final appPath = '$home/Applications/SyncResto POS.app';
+        // ZIP içinde nested olabilir, kontrol et
+        String newAppPath = '${extractDir.path}/SyncResto POS.app';
+
+        // Eğer direkt yoksa, içindeki klasöre bak
+        final directApp = Directory(newAppPath);
+        if (!await directApp.exists()) {
+          debugPrint('[VersionService] Direkt app bulunamadı, nested kontrol ediliyor...');
+          // macOS klasör yapısı bazen __MACOSX içerir
+          final findResult = await Process.run('find', [
+            extractDir.path,
+            '-name', '*.app',
+            '-type', 'd',
+            '-maxdepth', '3',
+          ]);
+          debugPrint('[VersionService] Find result: ${findResult.stdout}');
+
+          final apps = (findResult.stdout as String).trim().split('\n').where((p) =>
+            p.endsWith('.app') && !p.contains('__MACOSX')).toList();
+
+          if (apps.isNotEmpty) {
+            newAppPath = apps.first;
+            debugPrint('[VersionService] Bulunan app: $newAppPath');
+          } else {
+            throw Exception('ZIP içinde .app bulunamadı');
+          }
+        }
+
+        // Eski uygulamayı sil
+        final oldApp = Directory(appPath);
+        if (await oldApp.exists()) {
+          debugPrint('[VersionService] Eski uygulama siliniyor: $appPath');
+          await oldApp.delete(recursive: true);
+        }
+
+        // Yeni uygulamayı kopyala
+        debugPrint('[VersionService] Yeni uygulama kopyalanıyor: $newAppPath -> $appPath');
+
+        // Source app var mı kontrol et
+        final sourceApp = Directory(newAppPath);
+        final sourceExists = await sourceApp.exists();
+        debugPrint('[VersionService] Source app exists: $sourceExists');
+
+        if (!sourceExists) {
+          throw Exception('Kaynak app bulunamadı: $newAppPath');
+        }
+
+        await _writeDebugLog('Kopyalama: $newAppPath -> $appPath');
+        final copyResult = await Process.run('cp', ['-R', newAppPath, appPath]);
+        await _writeDebugLog('Copy exit code: ${copyResult.exitCode}');
+        await _writeDebugLog('Copy stderr: ${copyResult.stderr}');
+        debugPrint('[VersionService] Copy exit code: ${copyResult.exitCode}');
+        debugPrint('[VersionService] Copy stderr: ${copyResult.stderr}');
+
+        if (copyResult.exitCode != 0) {
+          await _writeDebugLog('HATA: Kopyalama başarısız');
+          throw Exception('Kopyalama hatası: ${copyResult.stderr}');
+        }
+
+        // Kopyalama başarılı mı kontrol et
+        final targetApp = Directory(appPath);
+        final targetExists = await targetApp.exists();
+        await _writeDebugLog('Target app exists: $targetExists');
+        debugPrint('[VersionService] Target app exists: $targetExists');
+
+        if (!targetExists) {
+          await _writeDebugLog('HATA: Hedef app bulunamadı');
+          throw Exception('Kopyalama sonrası hedef app bulunamadı');
+        }
+
+        await _writeDebugLog('Güncelleme tamamlandı!');
+        _logService.logUpdate('Güncelleme tamamlandı, uygulama yeniden başlatılıyor...');
+
+        // Yeni uygulamayı başlat
+        await _writeDebugLog('Uygulama başlatılıyor: $appPath');
+        debugPrint('[VersionService] Uygulama başlatılıyor: $appPath');
+
+        // open komutu yerine detached process kullan
+        final openResult = await Process.start(
+          'open',
+          ['-n', '-a', appPath],  // -n: new instance, -a: application
           mode: ProcessStartMode.detached,
         );
-      } else {
-        // macOS / Linux
-        await Process.start(
-          'bash',
-          [updaterPath, updateFile.path, appDir.path],
-          mode: ProcessStartMode.detached,
-        );
+        await _writeDebugLog('Open process PID: ${openResult.pid}');
+        debugPrint('[VersionService] Open process started, PID: ${openResult.pid}');
+
+        // Biraz bekle
+        await Future.delayed(const Duration(seconds: 2));
+
+        // Log'ları gönder ve uygulamayı kapat
+        await _logService.flush();
+        await _writeDebugLog('Uygulama kapatılıyor...');
+        debugPrint('[VersionService] Uygulama kapatılıyor...');
+        exit(0);
+
+      } else if (_platform == 'windows') {
+        // Windows: ZIP'i çıkart ve güncelle
+        final appData = Platform.environment['LOCALAPPDATA'];
+        if (appData == null) {
+          throw Exception('LOCALAPPDATA bulunamadı');
+        }
+
+        final appDir = '$appData\\SyncResto POS';
+        final tempDir = await getTemporaryDirectory();
+        final extractDir = '${tempDir.path}\\SyncResto_Update';
+
+        // Uygulama dizini yoksa oluştur
+        final appDirObj = Directory(appDir);
+        if (!await appDirObj.exists()) {
+          await appDirObj.create(recursive: true);
+        }
+
+        // PowerShell ile ZIP çıkart
+        final extractResult = await Process.run('powershell', [
+          '-Command',
+          'Expand-Archive -Path "${updateFile.path}" -DestinationPath "$extractDir" -Force',
+        ]);
+
+        if (extractResult.exitCode != 0) {
+          throw Exception('ZIP çıkartma hatası: ${extractResult.stderr}');
+        }
+
+        // Batch script oluştur ve çalıştır
+        final batchContent = '''
+@echo off
+timeout /t 2 /nobreak > nul
+xcopy /E /Y "$extractDir\\*" "$appDir\\"
+start "" "$appDir\\SyncResto POS.exe"
+del "%~f0"
+''';
+
+        final batchFile = File('${tempDir.path}\\syncresto_updater.bat');
+        await batchFile.writeAsString(batchContent);
+
+        await Process.start('cmd', ['/c', batchFile.path], mode: ProcessStartMode.detached);
+
+        await _logService.flush();
+        exit(0);
       }
 
-      // Log'ları gönder ve uygulamayı kapat
-      await _logService.flush();
-      exit(0);
+      return false;
     } catch (e) {
+      await _writeDebugLog('EXCEPTION: $e');
       debugPrint('[VersionService] Güncelleme uygulama hatası: $e');
       _logService.error(LogType.update, 'Güncelleme uygulama hatası', error: e);
       return false;

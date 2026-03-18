@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'dart:async';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
@@ -57,6 +58,7 @@ class _TablesScreenState extends State<TablesScreen> {
 
   // Ayarlar
   bool _showProductImages = true;
+  String _appVersion = '';
 
   int? _safeInt(dynamic value) {
     if (value == null) return null;
@@ -68,12 +70,20 @@ class _TablesScreenState extends State<TablesScreen> {
   @override
   void initState() {
     super.initState();
+    _loadVersion();
     _loadSettings();
     _loadData();
     _startClock();
     _startAutoRefresh();
     _setupConnectivity();
     _startLicenseCheck();
+  }
+
+  Future<void> _loadVersion() async {
+    final packageInfo = await PackageInfo.fromPlatform();
+    if (mounted) {
+      setState(() => _appVersion = packageInfo.version);
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -284,7 +294,14 @@ class _TablesScreenState extends State<TablesScreen> {
   }
 
   List<dynamic> get _filteredTables {
-    return _tables.where((t) => t['section_id'] == _selectedSectionId).toList();
+    final filtered = _tables.where((t) => t['section_id'] == _selectedSectionId).toList();
+    // Masa numarasına göre sırala
+    filtered.sort((a, b) {
+      final numA = int.tryParse(a['table_number']?.toString() ?? '0') ?? 0;
+      final numB = int.tryParse(b['table_number']?.toString() ?? '0') ?? 0;
+      return numA.compareTo(numB);
+    });
+    return filtered;
   }
 
   int get _emptyCount => _filteredTables.where((t) => t['status'] != 'occupied' && t['current_ticket_id'] == null).length;
@@ -416,12 +433,34 @@ class _TablesScreenState extends State<TablesScreen> {
       ),
       child: Row(
         children: [
-          // Logo
-          Image.asset(
-            'assets/images/logo.png',
-            width: 140,
-            height: 45,
-            fit: BoxFit.contain,
+          // Logo + Version
+          Row(
+            children: [
+              Image.asset(
+                'assets/images/logo.png',
+                width: 140,
+                height: 45,
+                fit: BoxFit.contain,
+              ),
+              if (_appVersion.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[200],
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    'v$_appVersion',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey[600],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ],
           ),
 
           const Spacer(),

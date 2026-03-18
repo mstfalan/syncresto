@@ -79,33 +79,44 @@ class PrinterService {
         _serverPrinters = printers;
         print('[Printer] Sunucudan ${printers.length} yazici yuklendi');
 
-        // Sunucu yazıcılarını local cache'e de ekle (yazdırma için)
+        // Önce sunucudan gelen yazıcıları temizle (yeniden yükle)
+        _printers.removeWhere((key, value) => value['fromServer'] == true);
+
+        // Sunucu yazıcılarını local cache'e ekle - HER YAZICI AYRI KEY İLE
         for (final p in printers) {
-          final departments = p['departments'] as List? ?? [];
-          String type = 'printer_${p['id']}'; // Varsayılan: printer_1, printer_2...
-
-          // Departmana göre tür belirle
-          if (departments.contains('kitchen')) {
-            type = 'kitchen';
-          } else if (departments.contains('bar')) {
-            type = 'bar';
-          } else if (departments.contains('cashier')) {
-            type = 'cashier';
-          }
-
           // Sadece aktif yazıcıları ekle
-          if (p['is_active'] == true) {
-            _printers[type] = {
-              'id': p['id'],
-              'name': p['name'],
-              'ip': p['ip'],
-              'port': p['port'] ?? 9100,
-              'type': type,
-              'fromServer': true, // Sunucudan geldiğini işaretle
-            };
+          if (p['is_active'] != true && p['is_active'] != 1) continue;
+
+          final departments = p['departments'] as List? ?? [];
+          final printerId = p['id'];
+
+          // Her yazıcı kendi ID'siyle kaydedilir: printer_1, printer_2, ...
+          final key = 'printer_$printerId';
+
+          // Departman bilgisini de sakla
+          String department = 'other';
+          if (departments.contains('kitchen')) {
+            department = 'kitchen';
+          } else if (departments.contains('bar')) {
+            department = 'bar';
+          } else if (departments.contains('cashier')) {
+            department = 'cashier';
           }
+
+          _printers[key] = {
+            'id': printerId,
+            'name': p['name'],
+            'ip': p['ip_address'] ?? p['ip'],
+            'port': p['port'] ?? 9100,
+            'type': key,
+            'department': department,
+            'departments': departments,
+            'fromServer': true,
+          };
+          print('[Printer] Yazici eklendi: ${p['name']} (${p['ip_address'] ?? p['ip']}) -> $key');
         }
         await _savePrinters();
+        print('[Printer] Toplam ${_printers.length} yazici kayitli');
       }
     } catch (e) {
       print('[Printer] Sunucudan yazici yuklenemedi: $e');
@@ -277,26 +288,43 @@ class PrinterService {
   }
 
   /// Prints an order receipt (for kitchen/bar)
-  Future<bool> printOrderReceipt(Map<String, dynamic> order, String department, {String? printerType}) async {
-    // Departmana göre yazıcı türünü belirle
-    final type = printerType ?? _departmentToPrinterType(department);
-    final config = _getPrinterConfig(type);
+  /// targetPrinter: Sunucudan gelen hedef yazıcı bilgisi (online siparişler için)
+  Future<bool> printOrderReceipt(
+    Map<String, dynamic> order,
+    String department,
+    {String? printerType, Map<String, dynamic>? targetPrinter}
+  ) async {
+    String ip;
+    int port;
+    String type;
 
-    if (config == null || config['ip'] == null) {
-      onStatusChange?.call('${PrinterService.getPrinterTypeName(type)} yazicisi ayarlanmamis', true);
-      _logService.warning(LogType.action, 'Siparis fisi yazdirma basarisiz: yazici ayarlanmamis', details: {
-        'order_number': order['order_number'],
-        'department': department,
-        'printer_type': type,
-      });
-      return false;
+    // Hedef yazıcı belirtilmişse onu kullan (online sipariş)
+    if (targetPrinter != null && targetPrinter['ip_address'] != null) {
+      ip = targetPrinter['ip_address'] as String;
+      port = targetPrinter['port'] as int? ?? 9100;
+      type = targetPrinter['name'] ?? 'online';
+      print('[Printer] Hedef yazici kullaniliyor: $ip:$port (${targetPrinter['name']})');
+    } else {
+      // Eski davranış: departmana göre yazıcı türünü belirle
+      type = printerType ?? _departmentToPrinterType(department);
+      final config = _getPrinterConfig(type);
+
+      if (config == null || config['ip'] == null) {
+        onStatusChange?.call('${PrinterService.getPrinterTypeName(type)} yazicisi ayarlanmamis', true);
+        _logService.warning(LogType.action, 'Siparis fisi yazdirma basarisiz: yazici ayarlanmamis', details: {
+          'order_number': order['order_number'],
+          'department': department,
+          'printer_type': type,
+        });
+        return false;
+      }
+
+      ip = config['ip'] as String;
+      port = config['port'] as int? ?? 9100;
     }
 
     try {
       onStatusChange?.call('Siparis fisi yazdirilyor...', false);
-
-      final ip = config['ip'] as String;
-      final port = config['port'] as int? ?? 9100;
 
       // Generate order receipt bytes
       final bytes = await _generateOrderReceipt(order, department);
@@ -305,12 +333,14 @@ class PrinterService {
       final success = await _sendToPrinter(ip, port, bytes);
 
       if (success) {
-        onStatusChange?.call('Siparis fisi yazdirildi (${PrinterService.getPrinterTypeName(type)})', false);
+        final printerName = targetPrinter?['name'] ?? PrinterService.getPrinterTypeName(type);
+        onStatusChange?.call('Siparis fisi yazdirildi ($printerName)', false);
         _logService.logAction('Siparis fisi yazdirildi', details: {
           'order_number': order['order_number'],
           'department': department,
           'printer_ip': ip,
-          'printer_type': type,
+          'printer_name': printerName,
+          'is_online_order': targetPrinter != null,
         });
       } else {
         _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', details: {

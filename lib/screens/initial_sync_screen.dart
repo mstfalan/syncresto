@@ -262,8 +262,17 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
   }
 
   void _connectWebSocket() {
-    final apiUrl = widget.storageService.getApiUrl() ?? 'https://api.syncresto.com';
-    widget.webSocketService.connect(apiUrl);
+    // WebSocket için tenant backend URL'ini kullan (Socket.io orada çalışıyor)
+    final backendUrl = widget.storageService.getBackendUrl();
+    if (backendUrl != null && backendUrl.isNotEmpty) {
+      print('[InitialSync] WebSocket tenant backend\'e bağlanıyor: $backendUrl');
+      widget.webSocketService.connect(backendUrl);
+    } else {
+      // Fallback: API URL kullan (eski davranış)
+      final apiUrl = widget.storageService.getApiUrl() ?? 'https://api.syncresto.com';
+      print('[InitialSync] WebSocket API URL\'e bağlanıyor (fallback): $apiUrl');
+      widget.webSocketService.connect(apiUrl);
+    }
   }
 
   void _navigateToLogin() {

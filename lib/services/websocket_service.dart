@@ -102,8 +102,18 @@ class WebSocketService {
           if (data['settings'] != null) {
             order['_settings'] = Map<String, dynamic>.from(data['settings']);
           }
+          // Printer bilgisi varsa ekle (online sipariş yönlendirmesi için)
+          if (data['printer'] != null) {
+            order['_printer'] = Map<String, dynamic>.from(data['printer']);
+          }
+          // Print type ekle (kitchen_print veya cashier_print)
+          if (data['type'] != null) {
+            order['_print_type'] = data['type'];
+          }
           _logService.logAction('Yazdirma istegi alindi (websocket)', details: {
             'order_number': order['order_number'],
+            'print_type': data['type'],
+            'printer_name': data['printer']?['name'],
           });
           onPrintRequest?.call(order);
         }

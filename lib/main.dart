@@ -66,11 +66,20 @@ void main() async {
     print('[Main] WebSocket baglantisi: ${connected ? 'Bagli' : 'Bagli degil'}');
   };
 
-  // Web panelden yazdırma isteği gelince
+  // Web panelden yazdırma isteği gelince (dinamik yazıcı yönlendirmesi)
   webSocketService.onPrintRequest = (order) {
-    print('[Main] Yazdirma istegi alindi: ${order['order_number']}');
+    final printType = order['_print_type'] as String?;
+    final printer = order['_printer'] as Map<String, dynamic>?;
+
+    print('[Main] Yazdirma istegi alindi: ${order['order_number']} - Tip: $printType - Yazici: ${printer?['name']}');
     soundService.playNewOrderSound();
-    if (printerService.isConfigured) {
+
+    // Hedef yazıcı bilgisi varsa ona gönder
+    if (printer != null && printerService.isConfigured) {
+      final department = printType == 'cashier_print' ? 'KASA' : 'MUTFAK';
+      printerService.printOrderReceipt(order, department, targetPrinter: printer);
+    } else if (printerService.isConfigured) {
+      // Eski davranış: varsayılan yazıcıya gönder
       printerService.printOrderReceipt(order, 'WEB SIPARIS');
     }
   };

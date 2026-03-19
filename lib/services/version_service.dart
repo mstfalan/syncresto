@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -238,6 +239,15 @@ class VersionService {
         receiveTimeout: const Duration(minutes: 10),
         connectTimeout: const Duration(seconds: 30),
       ));
+
+      // Windows'ta SSL sertifika sorunlarını bypass et
+      if (Platform.isWindows) {
+        (downloadDio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
+          final client = HttpClient();
+          client.badCertificateCallback = (cert, host, port) => true;
+          return client;
+        };
+      }
 
       final response = await downloadDio.download(
         downloadUrl,

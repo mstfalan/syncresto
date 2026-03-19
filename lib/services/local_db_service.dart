@@ -34,7 +34,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 2, // v2: depends_on_sync_id, offline_permissions eklendi
+      version: 3, // v3: print_queue tablosu eklendi
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -174,12 +174,32 @@ class LocalDbService {
       )
     ''');
 
+    // Yazıcı kuyruğu (başarısız yazdırma işlemleri)
+    await db.execute('''
+      CREATE TABLE print_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        print_type TEXT NOT NULL,
+        printer_ip TEXT NOT NULL,
+        printer_port INTEGER DEFAULT 9100,
+        printer_name TEXT,
+        receipt_data TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        retry_count INTEGER DEFAULT 0,
+        max_retries INTEGER DEFAULT 5,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        last_attempt_at TEXT,
+        completed_at TEXT
+      )
+    ''');
+
     // İndeksler
     await db.execute('CREATE INDEX idx_products_category ON cached_products(category_id)');
     await db.execute('CREATE INDEX idx_tables_section ON cached_tables(section_id)');
     await db.execute('CREATE INDEX idx_tickets_synced ON local_tickets(synced)');
     await db.execute('CREATE INDEX idx_items_ticket ON local_ticket_items(local_ticket_id)');
     await db.execute('CREATE INDEX idx_sync_status ON sync_queue(status)');
+    await db.execute('CREATE INDEX idx_print_queue_status ON print_queue(status)');
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -214,6 +234,33 @@ class LocalDbService {
         print('[LocalDb] local_tickets.table_number eklendi');
       } catch (e) {
         print('[LocalDb] table_number zaten var: $e');
+      }
+    }
+
+    if (oldVersion < 3) {
+      // v3: print_queue tablosu ekle
+      try {
+        await db.execute('''
+          CREATE TABLE print_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            print_type TEXT NOT NULL,
+            printer_ip TEXT NOT NULL,
+            printer_port INTEGER DEFAULT 9100,
+            printer_name TEXT,
+            receipt_data TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            retry_count INTEGER DEFAULT 0,
+            max_retries INTEGER DEFAULT 5,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            last_attempt_at TEXT,
+            completed_at TEXT
+          )
+        ''');
+        await db.execute('CREATE INDEX idx_print_queue_status ON print_queue(status)');
+        print('[LocalDb] print_queue tablosu eklendi');
+      } catch (e) {
+        print('[LocalDb] print_queue zaten var: $e');
       }
     }
   }
@@ -1235,6 +1282,181 @@ class LocalDbService {
 
       return newTable;
     }).toList();
+  }
+
+  // ==================== YAZICI KUYRUĞU İŞLEMLERİ ====================
+
+  // Yazdırma işini kuyruğa ekle
+  Future<int> addToPrintQueue({
+    required String printType,
+    required String printerIp,
+    required int printerPort,
+    String? printerName,
+    required Map<String, dynamic> receiptData,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+
+    final id = await db.insert('print_queue', {
+      'print_type': printType,
+      'printer_ip': printerIp,
+      'printer_port': printerPort,
+      'printer_name': printerName,
+      'receipt_data': jsonEncode(receiptData),
+      'status': 'pending',
+      'retry_count': 0,
+      'max_retries': 5,
+      'created_at': now,
+      'last_attempt_at': now,
+    });
+
+    print('[LocalDb] Print job eklendi: $id (type: $printType, printer: $printerIp)');
+    return id;
+  }
+
+  // Bekleyen yazdırma işlerini getir
+  Future<List<Map<String, dynamic>>> getPendingPrintJobs() async {
+    final db = await database;
+    return await db.query(
+      'print_queue',
+      where: "status = 'pending' AND retry_count < max_retries",
+      orderBy: 'created_at ASC',
+    );
+  }
+
+  // Tek bir yazdırma işini getir
+  Future<Map<String, dynamic>?> getPrintJob(int id) async {
+    final db = await database;
+    final results = await db.query(
+      'print_queue',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    return results.isNotEmpty ? results.first : null;
+  }
+
+  // Tüm yazdırma işlerini getir (modal için)
+  Future<List<Map<String, dynamic>>> getAllPrintJobs() async {
+    final db = await database;
+    return await db.query(
+      'print_queue',
+      where: "status IN ('pending', 'failed')",
+      orderBy: 'created_at DESC',
+    );
+  }
+
+  // Yazdırma işini tamamlandı olarak işaretle
+  Future<void> markPrintCompleted(int id) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+
+    await db.update(
+      'print_queue',
+      {
+        'status': 'completed',
+        'completed_at': now,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+
+    print('[LocalDb] Print job tamamlandı: $id');
+  }
+
+  // Yazdırma işini başarısız olarak işaretle
+  Future<void> markPrintFailed(int id, String? errorMessage) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+
+    // Önce mevcut retry_count'u al
+    final job = await getPrintJob(id);
+    if (job == null) return;
+
+    final newRetryCount = (job['retry_count'] as int) + 1;
+    final maxRetries = job['max_retries'] as int;
+
+    await db.update(
+      'print_queue',
+      {
+        'retry_count': newRetryCount,
+        'error_message': errorMessage,
+        'last_attempt_at': now,
+        'status': newRetryCount >= maxRetries ? 'failed' : 'pending',
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+
+    print('[LocalDb] Print job başarısız: $id (retry: $newRetryCount/$maxRetries)');
+  }
+
+  // Yazdırma işini sıfırla (manuel retry için)
+  Future<void> resetPrintJob(int id) async {
+    final db = await database;
+
+    await db.update(
+      'print_queue',
+      {
+        'status': 'pending',
+        'retry_count': 0,
+        'error_message': null,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+
+    print('[LocalDb] Print job sıfırlandı: $id');
+  }
+
+  // Yazdırma işini sil
+  Future<void> deletePrintJob(int id) async {
+    final db = await database;
+    await db.delete('print_queue', where: 'id = ?', whereArgs: [id]);
+    print('[LocalDb] Print job silindi: $id');
+  }
+
+  // Başarısız tüm işleri sil
+  Future<void> clearFailedPrintJobs() async {
+    final db = await database;
+    final count = await db.delete('print_queue', where: "status = 'failed'");
+    print('[LocalDb] $count başarısız print job silindi');
+  }
+
+  // Tamamlanmış eski işleri temizle (1 saatten eski)
+  Future<void> cleanupCompletedPrintJobs() async {
+    final db = await database;
+    final oneHourAgo = DateTime.now().subtract(const Duration(hours: 1)).toIso8601String();
+
+    final count = await db.delete(
+      'print_queue',
+      where: "status = 'completed' AND completed_at < ?",
+      whereArgs: [oneHourAgo],
+    );
+
+    if (count > 0) {
+      print('[LocalDb] $count eski print job temizlendi');
+    }
+  }
+
+  // Yazdırma kuyruğu özeti
+  Future<Map<String, int>> getPrintQueueSummary() async {
+    final db = await database;
+
+    final pending = await db.rawQuery(
+      "SELECT COUNT(*) as count FROM print_queue WHERE status = 'pending'",
+    );
+    final failed = await db.rawQuery(
+      "SELECT COUNT(*) as count FROM print_queue WHERE status = 'failed'",
+    );
+    final completed = await db.rawQuery(
+      "SELECT COUNT(*) as count FROM print_queue WHERE status = 'completed'",
+    );
+
+    return {
+      'pending_count': pending.first['count'] as int,
+      'failed_count': failed.first['count'] as int,
+      'completed_count': completed.first['count'] as int,
+    };
   }
 
   // Veritabanını kapat

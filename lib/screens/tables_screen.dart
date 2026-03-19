@@ -10,6 +10,7 @@ import '../services/connectivity_service.dart';
 import '../services/log_service.dart';
 import '../services/license_service.dart';
 import '../services/sync_service.dart';
+import '../services/local_db_service.dart';
 import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 import 'initial_sync_screen.dart';
@@ -595,13 +596,27 @@ class _TablesScreenState extends State<TablesScreen> {
 
           const SizedBox(width: 16),
 
-          // Offline data button
-          FutureBuilder<Map<String, dynamic>>(
-            future: widget.apiService.getOfflineDataSummary(),
+          // Offline data button (Sync + Print Queue)
+          FutureBuilder<List<dynamic>>(
+            future: Future.wait([
+              widget.apiService.getOfflineDataSummary(),
+              LocalDbService().getPrintQueueSummary(),
+            ]),
             builder: (context, snapshot) {
-              final pendingCount = snapshot.data?['pending_count'] ?? 0;
-              final failedCount = snapshot.data?['failed_count'] ?? 0;
-              final hasData = pendingCount > 0 || failedCount > 0;
+              // Sync queue
+              final syncData = snapshot.data?[0] as Map<String, dynamic>? ?? {};
+              final syncPending = syncData['pending_count'] ?? 0;
+              final syncFailed = syncData['failed_count'] ?? 0;
+
+              // Print queue
+              final printData = snapshot.data?[1] as Map<String, int>? ?? {};
+              final printPending = printData['pending'] ?? 0;
+              final printFailed = printData['failed'] ?? 0;
+
+              // Toplam
+              final totalPending = syncPending + printPending;
+              final totalFailed = syncFailed + printFailed;
+              final hasData = totalPending > 0 || totalFailed > 0;
 
               return Stack(
                 children: [
@@ -609,7 +624,7 @@ class _TablesScreenState extends State<TablesScreen> {
                     onPressed: _openOfflineDataModal,
                     icon: Icon(
                       Icons.cloud_sync,
-                      color: failedCount > 0
+                      color: totalFailed > 0
                           ? Colors.red
                           : (hasData ? Colors.orange : Colors.grey[700]),
                     ),
@@ -622,11 +637,11 @@ class _TablesScreenState extends State<TablesScreen> {
                       child: Container(
                         padding: const EdgeInsets.all(4),
                         decoration: BoxDecoration(
-                          color: failedCount > 0 ? Colors.red : Colors.orange,
+                          color: totalFailed > 0 ? Colors.red : Colors.orange,
                           shape: BoxShape.circle,
                         ),
                         child: Text(
-                          '${pendingCount + failedCount}',
+                          '${totalPending + totalFailed}',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 10,

@@ -7,6 +7,7 @@ import 'services/api_service.dart';
 import 'services/printer_service.dart';
 import 'services/sound_service.dart';
 import 'services/websocket_service.dart';
+import 'services/print_queue_service.dart';
 import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
@@ -51,6 +52,10 @@ void main() async {
 
   // Yazici ayarlarini yukle
   await printerService.loadSettings();
+
+  // Yazici kuyrugu otomatik retry servisini baslat
+  final printQueueService = PrintQueueService();
+  printQueueService.startAutoRetry();
 
   // WebSocket event handler'larini ayarla
   webSocketService.onNewOrder = (order) {

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'log_service.dart';
+import 'local_db_service.dart';
 
 /// Yazıcı türleri
 enum PrinterType {
@@ -18,6 +19,7 @@ class PrinterService {
   PrinterService._internal();
 
   final LogService _logService = LogService();
+  final LocalDbService _localDb = LocalDbService();
 
   // Çoklu yazıcı desteği - her tür için ayrı ayar
   Map<String, Map<String, dynamic>> _printers = {};
@@ -254,6 +256,7 @@ class PrinterService {
 
       final ip = config['ip'] as String;
       final port = config['port'] as int? ?? 9100;
+      final printerName = config['name'] as String? ?? 'Yazici';
 
       // Generate receipt bytes
       final bytes = await _generateTicketReceipt(ticket);
@@ -269,8 +272,16 @@ class PrinterService {
           'printer_type': printerType ?? 'cashier',
         });
       } else {
-        onStatusChange?.call('Yazdirma hatasi', true);
-        _logService.error(LogType.error, 'Fis yazdirma hatasi', details: {
+        // Başarısız - kuyruğa ekle
+        await _localDb.addToPrintQueue(
+          printType: 'ticket',
+          printerIp: ip,
+          printerPort: port,
+          printerName: printerName,
+          receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
+        );
+        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+        _logService.warning(LogType.action, 'Fis kuyruga eklendi', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
         });
@@ -279,7 +290,22 @@ class PrinterService {
       return success;
     } catch (e) {
       print('[Printer] Ticket yazdirilirken hata: $e');
-      onStatusChange?.call('Hata: $e', true);
+
+      // Hata durumunda da kuyruğa ekle
+      final config = _getPrinterConfig(printerType ?? 'cashier');
+      if (config != null && config['ip'] != null) {
+        await _localDb.addToPrintQueue(
+          printType: 'ticket',
+          printerIp: config['ip'] as String,
+          printerPort: config['port'] as int? ?? 9100,
+          printerName: config['name'] as String? ?? 'Yazici',
+          receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
+        );
+        onStatusChange?.call('Hata, kuyruga eklendi', true);
+      } else {
+        onStatusChange?.call('Hata: $e', true);
+      }
+
       _logService.error(LogType.error, 'Fis yazdirma hatasi', error: e, details: {
         'ticket_number': ticket['ticket_number'],
       });
@@ -344,6 +370,16 @@ class PrinterService {
           'is_online_order': targetPrinter != null,
         });
       } else {
+        // Başarısız - kuyruğa ekle
+        final printerName = targetPrinter?['name'] ?? PrinterService.getPrinterTypeName(type);
+        await _localDb.addToPrintQueue(
+          printType: 'order',
+          printerIp: ip,
+          printerPort: port,
+          printerName: printerName,
+          receiptData: {'order': order, 'department': department},
+        );
+        onStatusChange?.call('Yazici hatasi, kuyruga eklendi', true);
         _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', details: {
           'order_number': order['order_number'],
           'department': department,
@@ -354,7 +390,16 @@ class PrinterService {
       return success;
     } catch (e) {
       print('[Printer] Order yazdirilirken hata: $e');
-      onStatusChange?.call('Hata: $e', true);
+      // Hata durumunda kuyruğa ekle
+      final printerName = targetPrinter?['name'] ?? PrinterService.getPrinterTypeName(type);
+      await _localDb.addToPrintQueue(
+        printType: 'order',
+        printerIp: ip,
+        printerPort: port,
+        printerName: printerName,
+        receiptData: {'order': order, 'department': department},
+      );
+      onStatusChange?.call('Hata, kuyruga eklendi', true);
       _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', error: e, details: {
         'order_number': order['order_number'],
         'department': department,
@@ -907,8 +952,21 @@ class PrinterService {
           'item_count': items.length,
         });
       } else {
-        onStatusChange?.call('Mutfak fisi yazdirilamadi', true);
-        _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi', details: {
+        // Başarısız - kuyruğa ekle
+        final printerName = config['name'] as String? ?? 'Mutfak Yazicisi';
+        await _localDb.addToPrintQueue(
+          printType: 'kitchen',
+          printerIp: ip,
+          printerPort: port,
+          printerName: printerName,
+          receiptData: {
+            'ticket': ticket,
+            'items': items,
+            'printerType': printerType,
+          },
+        );
+        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+        _logService.warning(LogType.action, 'Mutfak fisi kuyruga eklendi', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
           'item_count': items.length,
@@ -918,7 +976,26 @@ class PrinterService {
       return success;
     } catch (e) {
       print('[Printer] Mutfak fisi yazdirilirken hata: $e');
-      onStatusChange?.call('Hata: $e', true);
+
+      // Hata durumunda da kuyruğa ekle
+      final config = _getPrinterConfig(printerType);
+      if (config != null && config['ip'] != null) {
+        await _localDb.addToPrintQueue(
+          printType: 'kitchen',
+          printerIp: config['ip'] as String,
+          printerPort: config['port'] as int? ?? 9100,
+          printerName: config['name'] as String? ?? 'Mutfak Yazicisi',
+          receiptData: {
+            'ticket': ticket,
+            'items': items,
+            'printerType': printerType,
+          },
+        );
+        onStatusChange?.call('Hata, kuyruga eklendi', true);
+      } else {
+        onStatusChange?.call('Hata: $e', true);
+      }
+
       _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi', error: e, details: {
         'ticket_number': ticket['ticket_number'],
         'item_count': items.length,
@@ -1108,13 +1185,42 @@ class PrinterService {
           'printer_ip': targetIp,
         });
       } else {
-        onStatusChange?.call('Ozet fis yazdirilamadi', true);
+        // Başarısız - kuyruğa ekle
+        await _localDb.addToPrintQueue(
+          printType: 'closing',
+          printerIp: targetIp,
+          printerPort: targetPort,
+          printerName: 'Kasa Yazicisi',
+          receiptData: {
+            'ticket': ticket,
+            'table': table,
+            'waiterName': waiterName,
+            'paymentMethod': paymentMethod,
+            'brandName': brandName,
+          },
+        );
+        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
       }
 
       return success;
     } catch (e) {
       print('[Printer] Ozet fis yazdirilirken hata: $e');
-      onStatusChange?.call('Hata: $e', true);
+
+      // Hata durumunda da kuyruğa ekle
+      await _localDb.addToPrintQueue(
+        printType: 'closing',
+        printerIp: targetIp,
+        printerPort: targetPort,
+        printerName: 'Kasa Yazicisi',
+        receiptData: {
+          'ticket': ticket,
+          'table': table,
+          'waiterName': waiterName,
+          'paymentMethod': paymentMethod,
+          'brandName': brandName,
+        },
+      );
+      onStatusChange?.call('Hata, kuyruga eklendi', true);
       return false;
     }
   }
@@ -1269,5 +1375,120 @@ class PrinterService {
     bytes += generator.cut();
 
     return bytes;
+  }
+
+  // ==================== YAZICI KUYRUĞU İŞLEMLERİ ====================
+
+  /// Kuyruktan yazdırma işini tekrar dene
+  Future<bool> retryPrintJob(int queueId) async {
+    final job = await _localDb.getPrintJob(queueId);
+    if (job == null) {
+      print('[Printer] Print job bulunamadi: $queueId');
+      return false;
+    }
+
+    final printType = job['print_type'] as String;
+    final ip = job['printer_ip'] as String;
+    final port = job['printer_port'] as int;
+    final receiptDataJson = job['receipt_data'] as String;
+    final receiptData = jsonDecode(receiptDataJson) as Map<String, dynamic>;
+
+    print('[Printer] Retry print job: $queueId (type: $printType, ip: $ip)');
+
+    try {
+      // Fiş verilerini yeniden oluştur
+      final bytes = await _regenerateReceipt(printType, receiptData);
+
+      if (bytes.isEmpty) {
+        print('[Printer] Fis olusturulamadi: $printType');
+        await _localDb.markPrintFailed(queueId, 'Fis olusturulamadi');
+        return false;
+      }
+
+      // Yazıcıya gönder
+      final success = await _sendToPrinter(ip, port, bytes);
+
+      if (success) {
+        await _localDb.markPrintCompleted(queueId);
+        print('[Printer] Print job basarili: $queueId');
+        return true;
+      } else {
+        await _localDb.markPrintFailed(queueId, 'Yaziciya ulasilamadi');
+        print('[Printer] Print job basarisiz: $queueId');
+        return false;
+      }
+    } catch (e) {
+      print('[Printer] Retry hatasi: $e');
+      await _localDb.markPrintFailed(queueId, e.toString());
+      return false;
+    }
+  }
+
+  /// Fiş verilerinden ESC/POS baytlarını yeniden oluştur
+  Future<List<int>> _regenerateReceipt(String printType, Map<String, dynamic> data) async {
+    switch (printType) {
+      case 'ticket':
+        final ticket = data['ticket'] as Map<String, dynamic>;
+        return await _generateTicketReceipt(ticket);
+
+      case 'kitchen':
+        final ticket = data['ticket'] as Map<String, dynamic>;
+        final items = data['items'] as List<dynamic>;
+        return await _generateKitchenReceipt(ticket, items);
+
+      case 'order':
+        final order = data['order'] as Map<String, dynamic>;
+        final department = data['department'] as String? ?? 'WEB SIPARIS';
+        // Settings zaten order['_settings'] içinde saklanıyor
+        return await _generateOrderReceipt(order, department);
+
+      case 'closing':
+        final ticket = data['ticket'] as Map<String, dynamic>;
+        final table = data['table'] as Map<String, dynamic>;
+        final waiterName = data['waiterName'] as String;
+        final paymentMethod = data['paymentMethod'] as String;
+        final brandName = data['brandName'] as String?;
+        return await _generateClosingReceipt(
+          ticket: ticket,
+          table: table,
+          waiterName: waiterName,
+          paymentMethod: paymentMethod,
+          brandName: brandName,
+        );
+
+      default:
+        print('[Printer] Bilinmeyen print type: $printType');
+        return [];
+    }
+  }
+
+  /// Yazıcı kuyruğu özeti
+  Future<Map<String, int>> getPrintQueueSummary() async {
+    return await _localDb.getPrintQueueSummary();
+  }
+
+  /// Tüm bekleyen işleri getir
+  Future<List<Map<String, dynamic>>> getPendingPrintJobs() async {
+    return await _localDb.getPendingPrintJobs();
+  }
+
+  /// Tüm işleri getir (modal için)
+  Future<List<Map<String, dynamic>>> getAllPrintJobs() async {
+    return await _localDb.getAllPrintJobs();
+  }
+
+  /// Print job sil
+  Future<void> deletePrintJob(int id) async {
+    await _localDb.deletePrintJob(id);
+  }
+
+  /// Print job sıfırla (manuel retry için)
+  Future<void> resetPrintJob(int id) async {
+    await _localDb.resetPrintJob(id);
+  }
+
+  /// Başarısız tüm işleri sil
+  Future<void> clearFailedPrintJobs() async {
+    await _localDb.clearFailedPrintJobs();
   }
 }

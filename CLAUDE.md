@@ -552,8 +552,17 @@ git push origin main
 PGPASSWORD='ZNTo3ppGS0GfzdJUItiAox' psql -h babystorybook-db.postgres.database.azure.com -U babystorybookadmin -d postgres
 
 # GreenChef RDS (Restoran verileri)
-PGPASSWORD='GreenChef2026Secure' psql -h 63.178.229.236 -U greenchefadmin -d greenchef
+PGPASSWORD='GyZbQ0HKvPWr4Td73KSAbm9L' psql -h greenchef-db.c7g6a8ycwaij.eu-central-1.rds.amazonaws.com -U greenchef -d greenchef
 ```
+
+### GreenChef Database Bilgileri
+| Bilgi    | Değer                                                    |
+|----------|----------------------------------------------------------|
+| Host     | greenchef-db.c7g6a8ycwaij.eu-central-1.rds.amazonaws.com |
+| Port     | 5432                                                     |
+| User     | greenchef                                                |
+| Password | GyZbQ0HKvPWr4Td73KSAbm9L                                 |
+| Database | greenchef                                                |
 
 ---
 

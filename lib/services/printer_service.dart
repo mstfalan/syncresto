@@ -299,9 +299,10 @@ class PrinterService {
     String type;
 
     // Hedef yazıcı belirtilmişse onu kullan (online sipariş)
-    if (targetPrinter != null && targetPrinter['ip_address'] != null) {
-      ip = targetPrinter['ip_address'] as String;
-      port = targetPrinter['port'] as int? ?? 9100;
+    final printerIp = targetPrinter?['ip_address'] ?? targetPrinter?['ip'];
+    if (targetPrinter != null && printerIp != null) {
+      ip = printerIp as String;
+      port = (targetPrinter['port'] as num?)?.toInt() ?? 9100;
       type = targetPrinter['name'] ?? 'online';
       print('[Printer] Hedef yazici kullaniliyor: $ip:$port (${targetPrinter['name']})');
     } else {
@@ -703,20 +704,15 @@ class PrinterService {
     for (final item in items) {
       final name = _turkishToAscii(item['product_name'] ?? item['name'] ?? '');
       final qty = item['quantity'] ?? 1;
-      final price = ((item['price'] ?? item['unit_price'] ?? 0) as num).toDouble() * qty;
 
-      bytes += generator.row([
-        PosColumn(
-          text: '$qty x $name',
-          width: 8,
-          styles: const PosStyles(align: PosAlign.left),
+      // Ürün adı kalın ve büyük (fiyat yok)
+      bytes += generator.text(
+        '$qty x $name',
+        styles: const PosStyles(
+          bold: true,
+          height: PosTextSize.size2,
         ),
-        PosColumn(
-          text: '${price.toStringAsFixed(2)} TL',
-          width: 4,
-          styles: const PosStyles(align: PosAlign.right),
-        ),
-      ]);
+      );
 
       // Extras
       if (item['extras'] != null && (item['extras'] as List).isNotEmpty) {
@@ -727,74 +723,82 @@ class PrinterService {
 
       // Notes
       if (item['notes'] != null && item['notes'].toString().isNotEmpty) {
-        bytes += generator.text('  > ${_turkishToAscii(item['notes'])}');
+        bytes += generator.text(
+          '  >>> ${_turkishToAscii(item['notes'])} <<<',
+          styles: const PosStyles(bold: true),
+        );
       }
+
+      bytes += generator.text(''); // Boşluk
     }
     bytes += generator.hr();
 
-    // ===== TOTALS =====
-    final subtotal = ((order['subtotal'] ?? 0) as num).toDouble();
-    final deliveryFee = ((order['delivery_fee'] ?? 0) as num).toDouble();
-    final discountAmount = ((order['discount_amount'] ?? order['discount'] ?? 0) as num).toDouble();
-    final total = ((order['total'] ?? subtotal) as num).toDouble();
+    // ===== TOTALS (sadece KASA fişinde) =====
+    final isKasa = department.toUpperCase() == 'KASA';
+    if (isKasa) {
+      final subtotal = ((order['subtotal'] ?? 0) as num).toDouble();
+      final deliveryFee = ((order['delivery_fee'] ?? 0) as num).toDouble();
+      final discountAmount = ((order['discount_amount'] ?? order['discount'] ?? 0) as num).toDouble();
+      final total = ((order['total'] ?? subtotal) as num).toDouble();
 
-    bytes += generator.row([
-      PosColumn(text: 'Ara Toplam:', width: 8),
-      PosColumn(
-        text: '${subtotal.toStringAsFixed(2)} TL',
-        width: 4,
-        styles: const PosStyles(align: PosAlign.right),
-      ),
-    ]);
-
-    if (deliveryFee > 0) {
       bytes += generator.row([
-        PosColumn(text: 'Teslimat:', width: 8),
+        PosColumn(text: 'Ara Toplam:', width: 8),
         PosColumn(
-          text: '${deliveryFee.toStringAsFixed(2)} TL',
+          text: '${subtotal.toStringAsFixed(2)} TL',
           width: 4,
           styles: const PosStyles(align: PosAlign.right),
         ),
       ]);
-    }
 
-    if (discountAmount > 0) {
-      bytes += generator.row([
-        PosColumn(text: 'Indirim:', width: 8),
-        PosColumn(
-          text: '-${discountAmount.toStringAsFixed(2)} TL',
-          width: 4,
-          styles: const PosStyles(align: PosAlign.right),
-        ),
-      ]);
-    }
+      if (deliveryFee > 0) {
+        bytes += generator.row([
+          PosColumn(text: 'Teslimat:', width: 8),
+          PosColumn(
+            text: '${deliveryFee.toStringAsFixed(2)} TL',
+            width: 4,
+            styles: const PosStyles(align: PosAlign.right),
+          ),
+        ]);
+      }
 
-    bytes += generator.hr();
-    bytes += generator.row([
-      PosColumn(
-        text: 'TOPLAM:',
-        width: 6,
-        styles: const PosStyles(bold: true, height: PosTextSize.size2),
-      ),
-      PosColumn(
-        text: '${total.toStringAsFixed(2)} TL',
-        width: 6,
-        styles: const PosStyles(
-          align: PosAlign.right,
-          bold: true,
-          height: PosTextSize.size2,
-        ),
-      ),
-    ]);
+      if (discountAmount > 0) {
+        bytes += generator.row([
+          PosColumn(text: 'Indirim:', width: 8),
+          PosColumn(
+            text: '-${discountAmount.toStringAsFixed(2)} TL',
+            width: 4,
+            styles: const PosStyles(align: PosAlign.right),
+          ),
+        ]);
+      }
 
-    // ===== PAYMENT METHOD =====
-    final paymentMethod = order['payment_method'];
-    if (paymentMethod != null) {
       bytes += generator.hr();
-      bytes += generator.text(
-        'Odeme: ${_paymentMethodLabel(paymentMethod)}',
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      );
+      bytes += generator.row([
+        PosColumn(
+          text: 'TOPLAM:',
+          width: 6,
+          styles: const PosStyles(bold: true, height: PosTextSize.size2),
+        ),
+        PosColumn(
+          text: '${total.toStringAsFixed(2)} TL',
+          width: 6,
+          styles: const PosStyles(
+            align: PosAlign.right,
+            bold: true,
+            height: PosTextSize.size2,
+          ),
+        ),
+      ]);
+
+      // Ödeme yöntemi
+      final paymentMethod = order['payment_method'];
+      if (paymentMethod != null) {
+        bytes += generator.hr();
+        bytes += generator.text(
+          'Odeme: ${_paymentMethodLabel(paymentMethod)}',
+          styles: const PosStyles(align: PosAlign.center, bold: true),
+        );
+      }
     }
 
     // ===== FOOTER =====
@@ -976,13 +980,28 @@ class PrinterService {
     Map<String, dynamic> ticket,
     List<dynamic> items,
   ) async {
+    print('[Printer] ============================================');
+    print('[Printer] _generateKitchenReceipt CAGRILDI - V2');
+    print('[Printer] ticket: $ticket');
+    print('[Printer] items: ${items.length} adet');
+    print('[Printer] ============================================');
+
     final profile = await CapabilityProfile.load();
     final generator = Generator(PaperSize.mm80, profile);
     List<int> bytes = [];
 
-    // ===== HEADER =====
+    // ===== ÜST BOŞLUK (70px ~ 10 satır) =====
+    bytes += generator.feed(10);
+
+    // ===== MASA BİLGİSİ (EN BÜYÜK) =====
+    final ticketNumber = ticket['ticket_number'] ?? '';
+    final tableName = _turkishToAscii(ticket['table_number']?.toString() ?? 'Masa');
+    final sectionName = _turkishToAscii(ticket['section_name'] ?? '');
+    final waiterName = _turkishToAscii(ticket['waiter_name'] ?? '');
+
+    // Masa numarası çok büyük ve belirgin
     bytes += generator.text(
-      '*** MUTFAK ***',
+      'MASA: $tableName',
       styles: const PosStyles(
         align: PosAlign.center,
         bold: true,
@@ -990,21 +1009,24 @@ class PrinterService {
         width: PosTextSize.size2,
       ),
     );
+
+    // Salon adı (varsa)
+    if (sectionName.isNotEmpty) {
+      bytes += generator.text(
+        sectionName,
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+        ),
+      );
+    }
+
     bytes += generator.hr(ch: '=');
-
-    // ===== MASA & ADISYON BİLGİSİ =====
-    final ticketNumber = ticket['ticket_number'] ?? '';
-    final tableName = _turkishToAscii(ticket['table_number']?.toString() ?? 'Masa');
-    final sectionName = _turkishToAscii(ticket['section_name'] ?? '');
-    final waiterName = _turkishToAscii(ticket['waiter_name'] ?? '');
-
-    bytes += generator.text(
-      'MASA: ${sectionName.isNotEmpty ? "$sectionName - " : ""}$tableName',
-      styles: const PosStyles(bold: true, height: PosTextSize.size2),
-    );
-    bytes += generator.text('Adisyon: $ticketNumber');
+    // Adisyon, garson ve saat
+    bytes += generator.text('Adisyon: $ticketNumber', styles: const PosStyles(bold: true));
     if (waiterName.isNotEmpty) {
-      bytes += generator.text('Garson: $waiterName');
+      bytes += generator.text('Garson: $waiterName', styles: const PosStyles(bold: true));
     }
     bytes += generator.text('Saat: ${_formatTime(DateTime.now().toIso8601String())}');
     bytes += generator.hr(ch: '=');
@@ -1044,6 +1066,202 @@ class PrinterService {
     bytes += generator.hr(ch: '=');
     bytes += generator.text(
       'Toplam ${items.length} urun',
+      styles: const PosStyles(align: PosAlign.center),
+    );
+
+    bytes += generator.feed(3);
+    bytes += generator.cut();
+
+    return bytes;
+  }
+
+  /// Hesap kapama özet fişi yazdır (salon bazlı yazıcıya)
+  Future<bool> printClosingReceipt({
+    required Map<String, dynamic> ticket,
+    required Map<String, dynamic> table,
+    required String waiterName,
+    required String paymentMethod,
+    required String targetIp,
+    required int targetPort,
+    String? brandName,
+  }) async {
+    try {
+      onStatusChange?.call('Ozet fis yazdiriliyor...', false);
+
+      // Generate closing receipt bytes
+      final bytes = await _generateClosingReceipt(
+        ticket: ticket,
+        table: table,
+        waiterName: waiterName,
+        paymentMethod: paymentMethod,
+        brandName: brandName,
+      );
+
+      // Send to printer
+      final success = await _sendToPrinter(targetIp, targetPort, bytes);
+
+      if (success) {
+        onStatusChange?.call('Ozet fis yazdirildi', false);
+        _logService.logAction('Ozet fis yazdirildi', details: {
+          'ticket_number': ticket['ticket_number'],
+          'table': table['table_number'],
+          'printer_ip': targetIp,
+        });
+      } else {
+        onStatusChange?.call('Ozet fis yazdirilamadi', true);
+      }
+
+      return success;
+    } catch (e) {
+      print('[Printer] Ozet fis yazdirilirken hata: $e');
+      onStatusChange?.call('Hata: $e', true);
+      return false;
+    }
+  }
+
+  /// Sipariş özeti fişi oluştur (fiyatlı - paket/kasa için)
+  Future<List<int>> _generateClosingReceipt({
+    required Map<String, dynamic> ticket,
+    required Map<String, dynamic> table,
+    required String waiterName,
+    required String paymentMethod,
+    String? brandName,
+  }) async {
+    print('[Printer] _generateClosingReceipt cagrildi');
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm80, profile);
+    List<int> bytes = [];
+
+    bytes += generator.reset();
+
+    // Marka adı (dinamik)
+    final brand = _turkishToAscii(brandName ?? 'SyncResto');
+    bytes += generator.text(
+      brand.toUpperCase(),
+      styles: const PosStyles(
+        align: PosAlign.center,
+        bold: true,
+        height: PosTextSize.size2,
+        width: PosTextSize.size2,
+      ),
+    );
+    bytes += generator.hr(ch: '=');
+
+    // Başlık
+    bytes += generator.text(
+      'SIPARIS OZETI',
+      styles: const PosStyles(
+        align: PosAlign.center,
+        bold: true,
+      ),
+    );
+    bytes += generator.hr();
+
+    // Masa bilgisi
+    final sectionName = _turkishToAscii(table['section_name'] ?? '');
+    final tableNumber = table['table_number'] ?? '-';
+    bytes += generator.text(
+      'Masa: ${sectionName.isNotEmpty ? "$sectionName - " : ""}$tableNumber',
+      styles: const PosStyles(bold: true, height: PosTextSize.size2),
+    );
+
+    // Garson bilgisi
+    bytes += generator.text(
+      'Garson: ${_turkishToAscii(waiterName)}',
+      styles: const PosStyles(bold: true),
+    );
+
+    // Tarih ve saat
+    final now = DateTime.now();
+    bytes += generator.text(
+      'Tarih: ${now.day.toString().padLeft(2, '0')}.${now.month.toString().padLeft(2, '0')}.${now.year}',
+    );
+    bytes += generator.text(
+      'Saat: ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
+    );
+
+    bytes += generator.hr(ch: '=');
+
+    // Ürünler - fiyatlı
+    final items = ticket['items'] as List? ?? [];
+    double calculatedTotal = 0;
+
+    for (final item in items) {
+      final name = _turkishToAscii(item['product_name'] ?? item['name'] ?? '?');
+      final qty = (item['quantity'] ?? 1) as num;
+      final unitPrice = (item['unit_price'] ?? item['price'] ?? 0) as num;
+      final lineTotal = qty * unitPrice;
+      calculatedTotal += lineTotal;
+      final notes = item['notes'] as String? ?? '';
+
+      // Ürün adı ve miktarı büyük kalın fontla
+      bytes += generator.text(
+        '$qty x $name',
+        styles: const PosStyles(
+          bold: true,
+          height: PosTextSize.size2,
+        ),
+      );
+
+      // Fiyat
+      bytes += generator.text(
+        '${lineTotal.toStringAsFixed(2)} TL',
+        styles: const PosStyles(align: PosAlign.right),
+      );
+
+      // Ürün notu varsa ekle
+      if (notes.isNotEmpty) {
+        bytes += generator.text(
+          '   NOT: ${_turkishToAscii(notes)}',
+          styles: const PosStyles(fontType: PosFontType.fontB),
+        );
+      }
+    }
+
+    bytes += generator.hr();
+
+    // Ara toplam
+    final ticketSubtotal = (ticket['subtotal'] as num?)?.toDouble() ?? 0;
+    final subtotal = ticketSubtotal > 0 ? ticketSubtotal : calculatedTotal;
+
+    bytes += generator.row([
+      PosColumn(text: 'Ara Toplam:', width: 6, styles: const PosStyles(bold: true)),
+      PosColumn(text: '${subtotal.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
+    ]);
+
+    // İndirim varsa göster
+    final discount = (ticket['discount'] ?? ticket['discount_amount'] ?? 0) as num;
+    if (discount > 0) {
+      bytes += generator.row([
+        PosColumn(text: 'Indirim:', width: 6),
+        PosColumn(text: '-${discount.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right)),
+      ]);
+    }
+
+    bytes += generator.hr(ch: '=');
+
+    // Toplam
+    final ticketTotal = (ticket['total'] as num?)?.toDouble() ?? 0;
+    final total = ticketTotal > 0 ? ticketTotal : (calculatedTotal - discount.toDouble());
+
+    bytes += generator.row([
+      PosColumn(text: 'TOPLAM:', width: 6, styles: const PosStyles(bold: true, height: PosTextSize.size2)),
+      PosColumn(text: '${total.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true, height: PosTextSize.size2)),
+    ]);
+
+    bytes += generator.hr(ch: '=');
+
+    // Ödeme yöntemi
+    final paymentText = paymentMethod == 'cash' ? 'NAKIT' : 'KREDI KARTI';
+    bytes += generator.text(
+      'Odeme: $paymentText',
+      styles: const PosStyles(align: PosAlign.center, bold: true, height: PosTextSize.size2),
+    );
+
+    // SyncResto imzası
+    bytes += generator.feed(1);
+    bytes += generator.text(
+      'SyncResto POS',
       styles: const PosStyles(align: PosAlign.center),
     );
 

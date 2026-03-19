@@ -71,15 +71,22 @@ void main() async {
     final printType = order['_print_type'] as String?;
     final printer = order['_printer'] as Map<String, dynamic>?;
 
-    print('[Main] Yazdirma istegi alindi: ${order['order_number']} - Tip: $printType - Yazici: ${printer?['name']}');
+    print('[Main] ========== ONLINE SIPARIS YAZDIRMA ==========');
+    print('[Main] order_number: ${order['order_number']}');
+    print('[Main] printType: $printType');
+    print('[Main] printer: $printer');
+    print('[Main] ===============================================');
+
     soundService.playNewOrderSound();
 
     // Hedef yazıcı bilgisi varsa ona gönder
     if (printer != null && printerService.isConfigured) {
       final department = printType == 'cashier_print' ? 'KASA' : 'MUTFAK';
+      print('[Main] Department: $department, yaziciya gonderiliyor...');
       printerService.printOrderReceipt(order, department, targetPrinter: printer);
     } else if (printerService.isConfigured) {
       // Eski davranış: varsayılan yazıcıya gönder
+      print('[Main] Varsayilan yaziciya gonderiliyor (printer null veya bos)');
       printerService.printOrderReceipt(order, 'WEB SIPARIS');
     }
   };

@@ -336,6 +336,12 @@ class _TablesScreenState extends State<TablesScreen> {
     }
 
     // Show ticket modal
+    // Mevcut salonun bilgisini bul
+    final currentSection = _sections.firstWhere(
+      (s) => s['id'] == _selectedSectionId,
+      orElse: () => <String, dynamic>{},
+    );
+
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -345,6 +351,7 @@ class _TablesScreenState extends State<TablesScreen> {
         printerService: widget.printerService,
         waiter: widget.waiter,
         showProductImages: _showProductImages,
+        section: currentSection.isNotEmpty ? currentSection : null,
         onClose: () {
           Navigator.of(context).pop();
           _loadData(); // Refresh tables

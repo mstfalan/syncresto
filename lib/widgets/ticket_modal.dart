@@ -14,6 +14,7 @@ class TicketModal extends StatefulWidget {
   final Map<String, dynamic> waiter;
   final VoidCallback onClose;
   final bool showProductImages;
+  final Map<String, dynamic>? section;
 
   const TicketModal({
     super.key,
@@ -23,6 +24,7 @@ class TicketModal extends StatefulWidget {
     required this.waiter,
     required this.onClose,
     this.showProductImages = true,
+    this.section,
   });
 
   @override
@@ -164,10 +166,215 @@ class _TicketModalState extends State<TicketModal> {
         paymentMethod: paymentMethod,
         waiterId: _waiterId,
       );
+
+      // Salonun summary_printer_id'si varsa özet fiş yazdır
+      await _printSummaryReceipt(paymentMethod);
+
       _showSuccess('Hesap kapatildi');
       widget.onClose();
     } catch (e) {
       _showError('Hesap kapatilamadi: $e');
+    }
+  }
+
+  /// Yazdır ve Kapat - Mutfağa gönder + Özet fiş + Hesap kapat (tek butonla)
+  Future<void> _printAndCloseTicket(String paymentMethod) async {
+    if (_ticket == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Yazdir ve Kapat'),
+        content: Text(
+          '${paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti'} ile hesap kapatilacak.\n\n'
+          '• Mutfaga siparis gonderilecek\n'
+          '• Ozet fis yazdirilacak\n'
+          '• Hesap kapatilacak\n\n'
+          'Devam edilsin mi?'
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Iptal')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Yazdir ve Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      final isOffline = _ticket!['offline'] == true;
+      final ticketId = isOffline
+          ? _safeInt(_ticket!['local_id']) ?? _safeInt(_ticket!['id'])
+          : _safeInt(_ticket!['id']);
+      if (ticketId == null) throw Exception('Ticket ID is null');
+
+      print('[TicketModal] printAndClose: ticketId=$ticketId, isOffline=$isOffline');
+
+      // 1. Mutfağa gönder (yazdırılmamış ürünler varsa) - hata olsa da devam et
+      try {
+        await _sendToKitchenSilent();
+      } catch (e) {
+        print('[TicketModal] Mutfak gonderim hatasi (devam ediliyor): $e');
+      }
+
+      // 2. Özet fiş yazdır - hata olsa da devam et
+      try {
+        await _printSummaryReceipt(paymentMethod);
+      } catch (e) {
+        print('[TicketModal] Ozet fis hatasi (devam ediliyor): $e');
+      }
+
+      // 3. Hesabı kapat
+      await widget.apiService.closeTicket(
+        ticketId: ticketId,
+        paymentMethod: paymentMethod,
+        waiterId: _waiterId,
+      );
+
+      _showSuccess('Hesap kapatildi');
+      widget.onClose();
+    } catch (e) {
+      print('[TicketModal] printAndClose hatasi: $e');
+      _showError('Hesap kapatma hatasi: $e');
+    }
+  }
+
+  /// Mutfağa sessiz gönderim (dialog göstermeden)
+  Future<void> _sendToKitchenSilent() async {
+    if (_ticket == null) return;
+
+    try {
+      final ticketId = _safeInt(_ticket!['id']);
+      if (ticketId == null) {
+        print('[TicketModal] Ticket ID bulunamadi');
+        return;
+      }
+
+      // API'den yazdırılmamış ürünleri al ve printed=1 yap
+      final result = await widget.apiService.printKitchen(
+        ticketId: ticketId,
+        waiterId: _waiterId,
+      );
+
+      if (result['success'] != true) {
+        print('[TicketModal] Mutfak fisi alinamadi: ${result['error']}');
+        return;
+      }
+
+      final items = result['items'] as List? ?? [];
+      final printerGroups = result['printerGroups'] as List? ?? [];
+      final ticketInfo = result['ticket'] as Map<String, dynamic>? ?? {};
+
+      if (items.isEmpty) {
+        print('[TicketModal] Yazdirilacak yeni urun yok');
+        return;
+      }
+
+      // Ticket bilgilerini ekle
+      ticketInfo['table_number'] = widget.table['table_number'] ?? 'Masa ${widget.table['id']}';
+      ticketInfo['section_name'] = widget.table['section_name'] ?? '';
+      ticketInfo['waiter_name'] = widget.waiter['name'] ?? '';
+
+      // Her yazıcı grubuna ayrı fiş gönder (normal mutfak fişi formatında)
+      for (final group in printerGroups) {
+        final printerIp = group['printer_ip'] as String?;
+        final printerPort = group['printer_port'] as int? ?? 9100;
+        final groupItems = group['items'] as List? ?? [];
+        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+
+        if (groupItems.isEmpty || printerIp == null) continue;
+
+        // printKitchenReceiptToIp kullan (_generateKitchenReceipt formatı)
+        await widget.printerService.printKitchenReceiptToIp(
+          ticket: ticketInfo,
+          items: groupItems,
+          ip: printerIp,
+          port: printerPort,
+        );
+
+        print('[TicketModal] Silent: $printerName yazicisina ${groupItems.length} urun gonderildi');
+      }
+
+      print('[TicketModal] Mutfaga gonderildi: ${items.length} urun');
+    } catch (e) {
+      print('[TicketModal] Mutfaga gonderme hatasi: $e');
+      // Hata olsa da devam et
+    }
+  }
+
+  /// Salonun summary_printer_id'sine göre özet fiş yazdırır
+  Future<void> _printSummaryReceipt(String paymentMethod) async {
+    print('[TicketModal] ========== OZET FIS BASLADI ==========');
+    print('[TicketModal] section: ${widget.section}');
+    print('[TicketModal] ticket: $_ticket');
+
+    if (widget.section == null || widget.section!.isEmpty) {
+      print('[TicketModal] Section null veya bos, ozet fis atlanacak');
+      return;
+    }
+
+    final summaryPrinterId = widget.section!['summary_printer_id'];
+    print('[TicketModal] summary_printer_id: $summaryPrinterId (type: ${summaryPrinterId.runtimeType})');
+
+    if (summaryPrinterId == null) {
+      print('[TicketModal] Salon icin ozet fis yazicisi tanimli degil');
+      return;
+    }
+
+    try {
+      // Yazıcı bilgilerini al
+      print('[TicketModal] Yazicilar aliniyor...');
+      final printers = await widget.apiService.getPrinters();
+      print('[TicketModal] ${printers.length} yazici bulundu');
+
+      // ID karşılaştırması - int veya string olabilir
+      final targetId = summaryPrinterId is String ? int.tryParse(summaryPrinterId) : summaryPrinterId;
+      final printer = printers.firstWhere(
+        (p) {
+          final printerId = p['id'] is String ? int.tryParse(p['id']) : p['id'];
+          return printerId == targetId;
+        },
+        orElse: () => <String, dynamic>{},
+      );
+
+      if (printer.isEmpty) {
+        print('[TicketModal] Yazici bulunamadi: $summaryPrinterId (targetId: $targetId)');
+        print('[TicketModal] Mevcut yazicilar: ${printers.map((p) => '${p['id']}:${p['name']}').toList()}');
+        return;
+      }
+
+      // getPrinters() 'ip' key'i döndürüyor, 'ip_address' değil
+      final ip = (printer['ip'] ?? printer['ip_address']) as String?;
+      final port = (printer['port'] as num?)?.toInt() ?? 9100;
+      print('[TicketModal] Yazici bulundu: ${printer['name']} - $ip:$port');
+
+      if (ip == null || ip.isEmpty) {
+        print('[TicketModal] Yazici IP adresi bos');
+        return;
+      }
+
+      // Brand name'i ThemeProvider'dan al
+      final brandName = Provider.of<ThemeProvider>(context, listen: false).brandName;
+
+      // Özet fiş yazdır
+      print('[TicketModal] Ozet fis yazdiriliyor: $ip:$port, brand: $brandName');
+      final success = await widget.printerService.printClosingReceipt(
+        ticket: _ticket!,
+        table: widget.table,
+        waiterName: widget.waiter['name'] ?? 'Garson',
+        paymentMethod: paymentMethod,
+        targetIp: ip,
+        targetPort: port,
+        brandName: brandName,
+      );
+      print('[TicketModal] Ozet fis sonuc: $success');
+    } catch (e, stack) {
+      print('[TicketModal] Ozet fis yazdirma hatasi: $e');
+      print('[TicketModal] Stack: $stack');
+      // Hata olsa da hesap kapatmayı engelleme
     }
   }
 
@@ -949,6 +1156,32 @@ class _TicketModalState extends State<TicketModal> {
                 ),
                 const SizedBox(height: 8),
               ],
+
+              // Yazdır ve Kapat butonları için divider
+              if (_hasPermission('close_ticket') && _hasPermission('print_receipt'))
+                Divider(color: Colors.grey[300], height: 20),
+
+              // Yazdır ve Kapat (Nakit) - close_ticket + print_receipt yetkisi gerekli
+              if (_hasPermission('close_ticket') && _hasPermission('print_receipt')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.receipt_long,
+                  label: 'Yazdir+Nakit',
+                  color: const Color(0xFF059669),
+                  onPressed: () => _printAndCloseTicket('cash'),
+                ),
+                const SizedBox(height: 8),
+              ],
+              // Yazdır ve Kapat (Kart) - close_ticket + print_receipt yetkisi gerekli
+              if (_hasPermission('close_ticket') && _hasPermission('print_receipt')) ...[
+                _buildSmallActionButton(
+                  icon: Icons.receipt_long,
+                  label: 'Yazdir+Kart',
+                  color: const Color(0xFF2563EB),
+                  onPressed: () => _printAndCloseTicket('credit_card'),
+                ),
+                const SizedBox(height: 8),
+              ],
+
               // Adisyon İptal - void_ticket yetkisi gerekli
               if (_hasPermission('void_ticket'))
                 _buildSmallActionButton(

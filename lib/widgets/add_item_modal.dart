@@ -2,18 +2,22 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/api_service.dart';
+import '../services/printer_service.dart';
 import '../services/image_cache_service.dart';
 import '../providers/theme_provider.dart';
-import 'product_detail_modal.dart';
 
 class AddItemModal extends StatefulWidget {
   final ApiService apiService;
+  final PrinterService? printerService;
   final int ticketId;
   final int waiterId;
   final VoidCallback onItemAdded;
   final VoidCallback onClose;
   final bool showProductImages;
   final int tableId;
+  final Map<String, dynamic>? table;
+  final Map<String, dynamic>? waiter;
+  final Map<String, dynamic>? section;
 
   const AddItemModal({
     super.key,
@@ -24,6 +28,10 @@ class AddItemModal extends StatefulWidget {
     required this.onClose,
     this.showProductImages = true,
     this.tableId = 0,
+    this.printerService,
+    this.table,
+    this.waiter,
+    this.section,
   });
 
   @override
@@ -38,6 +46,7 @@ class _AddItemModalState extends State<AddItemModal> {
   bool _isLoading = true;
   int? _selectedCategoryId;
   String _searchQuery = '';
+  int? _selectedItemIndex;
   final TextEditingController _searchController = TextEditingController();
   final ImageCacheService _imageCache = ImageCacheService();
   bool _imageCacheReady = false;
@@ -54,6 +63,16 @@ class _AddItemModalState extends State<AddItemModal> {
     if (value is double) return value;
     if (value is num) return value.toDouble();
     return double.tryParse(value.toString()) ?? defaultValue;
+  }
+
+  bool _hasPermission(String permission) {
+    if (!widget.apiService.isOnline) {
+      const offlineAllowed = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket'];
+      return offlineAllowed.contains(permission);
+    }
+    final permissions = widget.waiter?['permissions'] as Map<String, dynamic>?;
+    if (permissions == null) return true;
+    return permissions[permission] == true;
   }
 
   @override
@@ -81,22 +100,18 @@ class _AddItemModalState extends State<AddItemModal> {
   Future<void> _loadData() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
-
     try {
       final categories = await widget.apiService.getCategories();
       final products = await widget.apiService.getProducts();
-
       if (!mounted) return;
       setState(() {
         _categories = categories;
         _products = products;
         _filteredProducts = products;
       });
-
-      // Ticket items'ı yükle
       await _loadTicketItems();
     } catch (e) {
-      if (mounted) _showError('Veri yuklenemedi: $e');
+      if (mounted) _showError('Veri yüklenemedi: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -124,8 +139,7 @@ class _AddItemModalState extends State<AddItemModal> {
     setState(() {
       _filteredProducts = _products.where((p) {
         if (_selectedCategoryId != null) {
-          final productCategoryId = _safeInt(p['category_id']);
-          if (productCategoryId != _selectedCategoryId) return false;
+          if (_safeInt(p['category_id']) != _selectedCategoryId) return false;
         }
         if (_searchQuery.isNotEmpty) {
           final name = (p['name'] ?? '').toString().toLowerCase();
@@ -149,33 +163,386 @@ class _AddItemModalState extends State<AddItemModal> {
     _filterProducts();
   }
 
-  Future<void> _selectProduct(Map<String, dynamic> product) async {
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => ProductDetailModal(
-        apiService: widget.apiService,
-        product: product,
+  /// Ürüne tıkla → direkt ekle (popup yok)
+  Future<void> _addProductDirectly(Map<String, dynamic> product) async {
+    try {
+      final productId = _safeInt(product['id']);
+      if (productId == null) return;
+
+      await widget.apiService.addTicketItem(
         ticketId: widget.ticketId,
+        productId: productId,
+        productName: product['name']?.toString() ?? '',
+        unitPrice: _safeDouble(product['price']),
+        quantity: 1,
         waiterId: widget.waiterId,
-        onItemAdded: () {
-          widget.onItemAdded();
-          _loadTicketItems();
-        },
-        onClose: () {
-          Navigator.pop(context);
-          widget.onClose();
-        },
-        onCloseAndReturn: () {
-          Navigator.pop(context);
-        },
+      );
+      widget.onItemAdded();
+      await _loadTicketItems();
+    } catch (e) {
+      _showError('Ürün eklenemedi: $e');
+    }
+  }
+
+  /// Seçili ürüne not ekle popup
+  Future<void> _openNoteDialog() async {
+    if (_selectedItemIndex == null) return;
+
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    if (_selectedItemIndex! >= activeItems.length) return;
+
+    final item = activeItems[_selectedItemIndex!];
+    final currentNote = item['notes']?.toString() ?? '';
+    final controller = TextEditingController(text: currentNote);
+
+    final note = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        final theme = Provider.of<ThemeProvider>(ctx, listen: false);
+        return AlertDialog(
+          title: Text('${item['product_name']} - Not'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLines: 3,
+            decoration: InputDecoration(
+              hintText: 'Ürün notu girin...',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: theme.primaryColor, width: 2),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('İptal')),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: Text('Kaydet', style: TextStyle(color: theme.primaryColor, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (note == null) return;
+
+    try {
+      final itemId = _safeInt(item['id']);
+      final ticketId = widget.ticketId;
+      if (itemId == null) return;
+
+      await widget.apiService.updateTicketItem(
+        ticketId: ticketId,
+        itemId: itemId,
+        notes: note,
+      );
+      await _loadTicketItems();
+      widget.onItemAdded();
+    } catch (e) {
+      _showError('Not eklenemedi: $e');
+    }
+  }
+
+  /// Ürün iptal
+  Future<void> _cancelSelectedItem() async {
+    if (_selectedItemIndex == null) return;
+
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    if (_selectedItemIndex! >= activeItems.length) return;
+
+    final item = activeItems[_selectedItemIndex!];
+    final itemId = _safeInt(item['id']);
+    if (itemId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ürün İptal'),
+        content: Text('${item['product_name']} iptal edilecek. Emin misiniz?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgec')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('İptal Et', style: TextStyle(color: Colors.red)),
+          ),
+        ],
       ),
     );
+
+    if (confirmed != true) return;
+
+    try {
+      await widget.apiService.deleteTicketItem(
+        ticketId: widget.ticketId,
+        itemId: itemId,
+        waiterId: widget.waiterId,
+      );
+      setState(() => _selectedItemIndex = null);
+      await _loadTicketItems();
+      widget.onItemAdded();
+      _showSuccess('Ürün iptal edildi');
+    } catch (e) {
+      _showError('Ürün iptal edilemedi: $e');
+    }
+  }
+
+  /// Mutfağa gönder
+  Future<void> _sendToKitchen() async {
+    if (widget.printerService == null) return;
+    try {
+      final result = await widget.apiService.printKitchen(
+        ticketId: widget.ticketId,
+        waiterId: widget.waiterId,
+      );
+      if (result['success'] != true) {
+        _showError(result['error'] ?? 'Mutfak fişi alınamadı');
+        return;
+      }
+      final items = result['items'] as List? ?? [];
+      final printerGroups = result['printerGroups'] as List? ?? [];
+      final ticketInfo = result['ticket'] as Map<String, dynamic>? ?? {};
+
+      ticketInfo['table_number'] = widget.table?['table_number'] ?? 'Masa ${widget.table?['id'] ?? ''}';
+      ticketInfo['section_name'] = widget.table?['section_name'] ?? '';
+      ticketInfo['waiter_name'] = widget.waiter?['name'] ?? '';
+
+      if (items.isEmpty) {
+        _showSuccess('Yazdırılacak yeni ürün yok');
+        return;
+      }
+
+      int successCount = 0;
+      for (final group in printerGroups) {
+        final printerIp = group['printer_ip'] as String?;
+        final printerPort = group['printer_port'] as int? ?? 9100;
+        final groupItems = group['items'] as List? ?? [];
+        if (groupItems.isEmpty) continue;
+
+        bool success = false;
+        if (printerIp != null && printerIp.isNotEmpty) {
+          success = await widget.printerService!.printKitchenReceiptToIp(
+            ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+          );
+        } else {
+          success = await widget.printerService!.printKitchenReceipt(
+            ticket: ticketInfo, items: groupItems,
+          );
+        }
+        if (success) successCount += groupItems.length;
+      }
+
+      _showSuccess('Mutfağa gönderildi ($successCount ürün)');
+      await _loadTicketItems();
+      widget.onItemAdded();
+    } catch (e) {
+      _showError('Mutfağa gönderilemedi: $e');
+    }
+  }
+
+  /// Yazdır
+  Future<void> _printTicket() async {
+    if (widget.printerService == null) return;
+    try {
+      final ticketData = await widget.apiService.getTableTicket(widget.tableId);
+      if (ticketData == null) return;
+      final ticket = ticketData['ticket'] as Map<String, dynamic>?;
+      if (ticket == null) return;
+
+      final ticketToPrint = Map<String, dynamic>.from(ticket);
+      final sectionName = widget.table?['section_name'] ?? '';
+      final tableNumber = widget.table?['table_number'] ?? 'Masa ${widget.table?['id'] ?? ''}';
+      ticketToPrint['table_name'] = '$sectionName - $tableNumber';
+      ticketToPrint['waiter_name'] = widget.waiter?['name'] ?? '';
+
+      final success = await widget.printerService!.printTicket(ticketToPrint);
+      if (success) {
+        _showSuccess('Fiş yazdırıldı');
+      } else {
+        _showError('Yazıcı hatası');
+      }
+    } catch (e) {
+      _showError('Yazdır hatası: $e');
+    }
+  }
+
+  /// Hesap kapat
+  Future<void> _closeTicket(String paymentMethod) async {
+    final label = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hesap Kapat'),
+        content: Text('$label ile hesap kapatılacak. Emin misiniz?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await widget.apiService.closeTicket(
+        ticketId: widget.ticketId,
+        paymentMethod: paymentMethod,
+        waiterId: widget.waiterId,
+      );
+
+      // Özet fiş yazdır
+      if (widget.printerService != null) {
+        try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
+      }
+
+      _showSuccess('Hesap kapatıldı');
+      widget.onItemAdded();
+      widget.onClose();
+    } catch (e) {
+      _showError('Hesap kapatılamadı: $e');
+    }
+  }
+
+  /// Yazdır + kapat
+  Future<void> _printAndCloseTicket(String paymentMethod) async {
+    final label = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Yazdir ve Kapat'),
+        content: Text('$label ile hesap kapatılacak ve fiş yazdırılacak. Devam edilsin mi?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Yazdır ve Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      // Mutfağa gönder (sessiz)
+      if (widget.printerService != null) {
+        try { await _sendToKitchenSilent(); } catch (_) {}
+        try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
+      }
+
+      await widget.apiService.closeTicket(
+        ticketId: widget.ticketId,
+        paymentMethod: paymentMethod,
+        waiterId: widget.waiterId,
+      );
+
+      _showSuccess('Hesap kapatıldı');
+      widget.onItemAdded();
+      widget.onClose();
+    } catch (e) {
+      _showError('Hesap kapatılamadı: $e');
+    }
+  }
+
+  Future<void> _sendToKitchenSilent() async {
+    if (widget.printerService == null) return;
+    try {
+      final result = await widget.apiService.printKitchen(ticketId: widget.ticketId, waiterId: widget.waiterId);
+      if (result['success'] != true) return;
+      final printerGroups = result['printerGroups'] as List? ?? [];
+      final ticketInfo = result['ticket'] as Map<String, dynamic>? ?? {};
+      ticketInfo['table_number'] = widget.table?['table_number'] ?? '';
+      ticketInfo['section_name'] = widget.table?['section_name'] ?? '';
+      ticketInfo['waiter_name'] = widget.waiter?['name'] ?? '';
+      for (final group in printerGroups) {
+        final printerIp = group['printer_ip'] as String?;
+        final printerPort = group['printer_port'] as int? ?? 9100;
+        final groupItems = group['items'] as List? ?? [];
+        if (groupItems.isEmpty || printerIp == null) continue;
+        await widget.printerService!.printKitchenReceiptToIp(
+          ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _printSummaryReceipt(String paymentMethod) async {
+    if (widget.printerService == null || widget.section == null) return;
+    final summaryPrinterId = widget.section!['summary_printer_id'];
+    if (summaryPrinterId == null) return;
+    try {
+      final printers = await widget.apiService.getPrinters();
+      final targetId = summaryPrinterId is String ? int.tryParse(summaryPrinterId) : summaryPrinterId;
+      final printer = printers.firstWhere(
+        (p) {
+          final pid = p['id'] is String ? int.tryParse(p['id']) : p['id'];
+          return pid == targetId;
+        },
+        orElse: () => <String, dynamic>{},
+      );
+      if (printer.isEmpty) return;
+      final ip = (printer['ip'] ?? printer['ip_address']) as String?;
+      final port = (printer['port'] as num?)?.toInt() ?? 9100;
+      if (ip == null || ip.isEmpty) return;
+      final brandName = Provider.of<ThemeProvider>(context, listen: false).brandName;
+
+      // Ticket bilgisini çek
+      final ticketData = await widget.apiService.getTableTicket(widget.tableId);
+      if (ticketData == null) return;
+      final ticket = ticketData['ticket'] as Map<String, dynamic>?;
+      if (ticket == null) return;
+
+      await widget.printerService!.printClosingReceipt(
+        ticket: ticket,
+        table: widget.table ?? {},
+        waiterName: widget.waiter?['name'] ?? '',
+        paymentMethod: paymentMethod,
+        targetIp: ip,
+        targetPort: port,
+        brandName: brandName,
+      );
+    } catch (_) {}
+  }
+
+  /// Adisyon iptal
+  Future<void> _voidTicket() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Adisyon İptal'),
+        content: const Text('Adisyon iptal edilecek. Bu işlem geri alınamaz. Emin misiniz?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgec')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('İptal Et', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.apiService.voidTicket(ticketId: widget.ticketId, waiterId: widget.waiterId);
+      _showSuccess('Adisyon iptal edildi');
+      widget.onItemAdded();
+      widget.onClose();
+    } catch (e) {
+      _showError('Adisyon iptal edilemedi: $e');
+    }
   }
 
   void _showError(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.red),
+    );
+  }
+
+  void _showSuccess(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.green),
     );
   }
 
@@ -207,14 +574,11 @@ class _AddItemModalState extends State<AddItemModal> {
                   ? Center(child: CircularProgressIndicator(color: theme.primaryColor))
                   : Row(
                       children: [
-                        // SOL: Kategoriler
+                        // SOL: Kategoriler (2 sütun)
                         _buildCategoriesPanel(theme),
                         // ORTA: Ürünler
-                        Expanded(
-                          flex: 3,
-                          child: _buildProductsPanel(theme),
-                        ),
-                        // SAĞ: Eklenen ürünler
+                        Expanded(flex: 3, child: _buildProductsPanel(theme)),
+                        // SAĞ: Adisyon + aksiyon butonları
                         _buildTicketPanel(theme),
                       ],
                     ),
@@ -226,31 +590,28 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildHeader(ThemeProvider theme) {
+    final sectionName = widget.table?['section_name'] ?? '';
+    final tableNumber = widget.table?['table_number'] ?? 'Masa ${widget.table?['id'] ?? ''}';
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       decoration: BoxDecoration(
         color: theme.primaryColor,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))],
       ),
       child: Row(
         children: [
-          const Icon(Icons.add_circle, color: Colors.white, size: 24),
-          const SizedBox(width: 10),
-          const Text(
-            'Urun Ekle',
-            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+          const Icon(Icons.receipt_long, color: Colors.white, size: 22),
+          const SizedBox(width: 8),
+          Text(
+            '$sectionName - $tableNumber',
+            style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(width: 16),
           // Arama
           Expanded(
             child: Container(
-              height: 40,
+              height: 38,
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(8),
@@ -260,7 +621,7 @@ class _AddItemModalState extends State<AddItemModal> {
                 onChanged: _onSearch,
                 style: const TextStyle(color: Colors.white, fontSize: 14),
                 decoration: InputDecoration(
-                  hintText: 'Urun ara...',
+                  hintText: 'Ürün ara...',
                   hintStyle: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 14),
                   prefixIcon: Icon(Icons.search, color: Colors.white.withOpacity(0.7), size: 20),
                   border: InputBorder.none,
@@ -279,7 +640,7 @@ class _AddItemModalState extends State<AddItemModal> {
                 color: Colors.white.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Icon(Icons.close, color: Colors.white, size: 24),
+              child: const Icon(Icons.close, color: Colors.white, size: 22),
             ),
           ),
         ],
@@ -287,31 +648,39 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
-  // SOL PANEL: Kategoriler - dikey dikdörtgen butonlar
+  // SOL: Kategoriler - 2 sütun
   Widget _buildCategoriesPanel(ThemeProvider theme) {
     return Container(
-      width: 140,
+      width: 200,
       decoration: BoxDecoration(
         color: Colors.grey[100],
         border: Border(right: BorderSide(color: Colors.grey[300]!)),
       ),
       child: Column(
         children: [
-          // "Tümü" butonu
-          _buildCategoryButton(theme, null, 'Tumu', Icons.apps),
+          // "Tümü" butonu - tam genişlik
+          Padding(
+            padding: const EdgeInsets.fromLTRB(6, 6, 6, 0),
+            child: _buildCategoryButton(theme, null, 'Tümü', Icons.apps),
+          ),
           Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.only(bottom: 8),
+            child: GridView.builder(
+              padding: const EdgeInsets.all(6),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                childAspectRatio: 1.3,
+                crossAxisSpacing: 6,
+                mainAxisSpacing: 6,
+              ),
               itemCount: _categories.length,
               itemBuilder: (context, index) {
                 final cat = _categories[index];
-                final icon = cat['icon']?.toString() ?? '';
                 return _buildCategoryButton(
                   theme,
                   _safeInt(cat['id']),
                   cat['name']?.toString() ?? '',
                   null,
-                  emoji: icon,
+                  emoji: cat['icon']?.toString() ?? '',
                 );
               },
             ),
@@ -328,12 +697,9 @@ class _AddItemModalState extends State<AddItemModal> {
       behavior: HitTestBehavior.opaque,
       onTap: () => _selectCategory(categoryId),
       child: Container(
-        width: double.infinity,
-        margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
         decoration: BoxDecoration(
           color: isSelected ? theme.primaryColor : Colors.white,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: isSelected ? theme.primaryColor : Colors.grey[300]!,
             width: isSelected ? 2 : 1,
@@ -343,22 +709,25 @@ class _AddItemModalState extends State<AddItemModal> {
               : [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 2, offset: const Offset(0, 1))],
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             if (emoji.isNotEmpty)
-              Text(emoji, style: const TextStyle(fontSize: 22))
+              Text(emoji, style: const TextStyle(fontSize: 20))
             else if (icon != null)
-              Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 22),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: isSelected ? Colors.white : Colors.grey[800],
-                fontSize: 12,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+              Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 20),
+            const SizedBox(height: 2),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : Colors.grey[800],
+                  fontSize: 11,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                ),
               ),
             ),
           ],
@@ -367,7 +736,7 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
-  // ORTA PANEL: Ürünler grid
+  // ORTA: Ürünler grid
   Widget _buildProductsPanel(ThemeProvider theme) {
     if (_filteredProducts.isEmpty) {
       return Center(
@@ -376,7 +745,7 @@ class _AddItemModalState extends State<AddItemModal> {
           children: [
             Icon(Icons.search_off, size: 64, color: Colors.grey[300]),
             const SizedBox(height: 16),
-            Text('Urun bulunamadi', style: TextStyle(color: Colors.grey[500], fontSize: 18)),
+            Text('Ürün bulunamadı', style: TextStyle(color: Colors.grey[500], fontSize: 18)),
           ],
         ),
       );
@@ -384,22 +753,17 @@ class _AddItemModalState extends State<AddItemModal> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Ekran genişliğine göre sütun sayısını hesapla
-        final crossAxisCount = (constraints.maxWidth / 140).floor().clamp(2, 6);
-
+        final crossAxisCount = (constraints.maxWidth / 130).floor().clamp(2, 6);
         return GridView.builder(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(10),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: crossAxisCount,
             childAspectRatio: widget.showProductImages ? 0.85 : 1.8,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
+            crossAxisSpacing: 8,
+            mainAxisSpacing: 8,
           ),
           itemCount: _filteredProducts.length,
-          itemBuilder: (context, index) {
-            final product = _filteredProducts[index];
-            return _buildProductCard(product, theme);
-          },
+          itemBuilder: (context, index) => _buildProductCard(_filteredProducts[index], theme),
         );
       },
     );
@@ -413,19 +777,13 @@ class _AddItemModalState extends State<AddItemModal> {
       opacity: isOutOfStock ? 0.5 : 1.0,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: isOutOfStock ? null : () => _selectProduct(product),
+        onTap: isOutOfStock ? null : () => _addProductDirectly(product),
         child: Container(
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: Colors.grey[200]!),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.05),
-                blurRadius: 4,
-                offset: const Offset(0, 2),
-              ),
-            ],
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 4, offset: const Offset(0, 2))],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -434,17 +792,14 @@ class _AddItemModalState extends State<AddItemModal> {
                 Expanded(
                   flex: 3,
                   child: ClipRRect(
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(10),
-                      topRight: Radius.circular(10),
-                    ),
+                    borderRadius: const BorderRadius.only(topLeft: Radius.circular(10), topRight: Radius.circular(10)),
                     child: hasImage ? _buildProductImage(product) : _buildPlaceholder(product),
                   ),
                 ),
               Expanded(
                 flex: widget.showProductImages ? 2 : 1,
                 child: Padding(
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(6),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: widget.showProductImages ? MainAxisAlignment.start : MainAxisAlignment.center,
@@ -453,21 +808,13 @@ class _AddItemModalState extends State<AddItemModal> {
                         product['name']?.toString() ?? '',
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12,
-                          color: const Color(0xFF1f2937),
-                        ),
+                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11, color: Color(0xFF1f2937)),
                       ),
                       if (widget.showProductImages) const Spacer(),
-                      if (!widget.showProductImages) const SizedBox(height: 4),
+                      if (!widget.showProductImages) const SizedBox(height: 2),
                       Text(
                         '${product['price'] ?? 0} TL',
-                        style: TextStyle(
-                          color: theme.primaryColor,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
+                        style: TextStyle(color: theme.primaryColor, fontWeight: FontWeight.bold, fontSize: 13),
                       ),
                     ],
                   ),
@@ -478,10 +825,7 @@ class _AddItemModalState extends State<AddItemModal> {
                   padding: const EdgeInsets.symmetric(vertical: 3),
                   decoration: const BoxDecoration(
                     color: Colors.red,
-                    borderRadius: BorderRadius.only(
-                      bottomLeft: Radius.circular(10),
-                      bottomRight: Radius.circular(10),
-                    ),
+                    borderRadius: BorderRadius.only(bottomLeft: Radius.circular(10), bottomRight: Radius.circular(10)),
                   ),
                   child: const Center(
                     child: Text('Tukendi', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
@@ -494,44 +838,32 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
-  // SAĞ PANEL: Eklenen ürünler listesi
+  // SAĞ: Adisyon paneli + aksiyon butonları
   Widget _buildTicketPanel(ThemeProvider theme) {
-    final activeItems = _ticketItems.where((item) => item['status'] != 'cancelled').toList();
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    final hasItems = activeItems.isNotEmpty;
 
     return Container(
-      width: 260,
+      width: 280,
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border(left: BorderSide(color: Colors.grey[300]!)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 8,
-            offset: const Offset(-2, 0),
-          ),
-        ],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 8, offset: const Offset(-2, 0))],
       ),
       child: Column(
         children: [
           // Başlık
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
               color: Colors.grey[50],
               border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
             ),
             child: Row(
               children: [
-                Icon(Icons.receipt_long, size: 18, color: theme.primaryColor),
-                const SizedBox(width: 8),
-                Text(
-                  'Adisyon',
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey[800],
-                  ),
-                ),
+                Icon(Icons.receipt_long, size: 16, color: theme.primaryColor),
+                const SizedBox(width: 6),
+                Text('Adisyon', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey[800])),
                 const Spacer(),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -539,14 +871,7 @@ class _AddItemModalState extends State<AddItemModal> {
                     color: theme.primaryColor.withOpacity(0.1),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Text(
-                    '${activeItems.length}',
-                    style: TextStyle(
-                      color: theme.primaryColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
-                    ),
-                  ),
+                  child: Text('${activeItems.length}', style: TextStyle(color: theme.primaryColor, fontWeight: FontWeight.bold, fontSize: 12)),
                 ),
               ],
             ),
@@ -559,28 +884,26 @@ class _AddItemModalState extends State<AddItemModal> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.restaurant_menu, size: 40, color: Colors.grey[300]),
+                        Icon(Icons.restaurant_menu, size: 36, color: Colors.grey[300]),
                         const SizedBox(height: 8),
-                        Text(
-                          'Henuz urun eklenmedi',
-                          style: TextStyle(color: Colors.grey[400], fontSize: 13),
-                        ),
+                        Text('Henüz ürün eklenmedi', style: TextStyle(color: Colors.grey[400], fontSize: 12)),
                       ],
                     ),
                   )
                 : ListView.builder(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    padding: const EdgeInsets.symmetric(vertical: 2),
                     itemCount: activeItems.length,
                     itemBuilder: (context, index) {
                       final item = activeItems[index];
-                      return _buildTicketItemRow(item, theme);
+                      final isSelected = _selectedItemIndex == index;
+                      return _buildTicketItemRow(item, theme, index, isSelected);
                     },
                   ),
           ),
 
           // Toplam
           Container(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
               color: Colors.grey[50],
               border: Border(top: BorderSide(color: Colors.grey[200]!)),
@@ -588,86 +911,222 @@ class _AddItemModalState extends State<AddItemModal> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'TOPLAM',
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey[800],
-                  ),
-                ),
-                Text(
-                  '${_ticketTotal.toStringAsFixed(2)} TL',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: theme.primaryColor,
-                  ),
-                ),
+                Text('TOPLAM', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey[800])),
+                Text('${_ticketTotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: theme.primaryColor)),
               ],
             ),
           ),
+
+          // Aksiyon butonları
+          _buildActionButtons(theme, hasItems),
         ],
       ),
     );
   }
 
-  Widget _buildTicketItemRow(Map<String, dynamic> item, ThemeProvider theme) {
+  Widget _buildTicketItemRow(Map<String, dynamic> item, ThemeProvider theme, int index, bool isSelected) {
     final quantity = _safeInt(item['quantity']) ?? 1;
     final unitPrice = _safeDouble(item['unit_price']);
     final total = unitPrice * quantity;
     final notes = item['notes'] as String?;
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: Colors.grey[100]!)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Miktar
-          Container(
-            width: 26,
-            height: 26,
-            decoration: BoxDecoration(
-              color: theme.primaryColor,
-              borderRadius: BorderRadius.circular(6),
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _selectedItemIndex = isSelected ? null : index),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: isSelected ? theme.primaryColor.withOpacity(0.08) : Colors.transparent,
+          border: Border(
+            bottom: BorderSide(color: Colors.grey[100]!),
+            left: isSelected ? BorderSide(color: theme.primaryColor, width: 3) : BorderSide.none,
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 24,
+              height: 24,
+              decoration: BoxDecoration(color: theme.primaryColor, borderRadius: BorderRadius.circular(5)),
+              child: Center(child: Text('$quantity', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))),
             ),
-            child: Center(
-              child: Text(
-                '$quantity',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item['product_name']?.toString() ?? '',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF1F2937)),
+                  ),
+                  if (notes != null && notes.isNotEmpty)
+                    Text(notes, style: TextStyle(fontSize: 10, color: Colors.grey[500], fontStyle: FontStyle.italic)),
+                ],
               ),
             ),
-          ),
-          const SizedBox(width: 8),
-          // Ürün adı
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item['product_name']?.toString() ?? '',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: Color(0xFF1F2937)),
+            const SizedBox(width: 4),
+            Text('${total.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionButtons(ThemeProvider theme, bool hasItems) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        border: Border(top: BorderSide(color: Colors.grey[200]!)),
+      ),
+      child: Column(
+        children: [
+          // İlk satır: Not Ekle + Urun Iptal
+          Row(
+            children: [
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.edit_note,
+                  label: 'Not Ekle',
+                  color: Colors.blueGrey,
+                  onTap: hasItems && _selectedItemIndex != null ? _openNoteDialog : null,
                 ),
-                if (notes != null && notes.isNotEmpty)
-                  Text(
-                    notes,
-                    style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-                  ),
-              ],
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.close,
+                  label: 'Ürün İptal',
+                  color: Colors.red[400]!,
+                  onTap: hasItems && _selectedItemIndex != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // İkinci satır: Mutfağa Gönder + Yazdır
+          Row(
+            children: [
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.restaurant,
+                  label: 'Mutfak',
+                  color: const Color(0xFFF59E0B),
+                  onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.print,
+                  label: 'Yazdır',
+                  color: Colors.blueGrey,
+                  onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // Üçüncü satır: Nakit + Kredi Kartı
+          Row(
+            children: [
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.payments,
+                  label: 'Nakit',
+                  color: theme.primaryColor,
+                  onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.credit_card,
+                  label: 'Kredi Kartı',
+                  color: const Color(0xFF3B82F6),
+                  onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // Dördüncü satır: Yazdır+Nakit + Yazdır+Kart
+          Row(
+            children: [
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.receipt_long,
+                  label: 'Yaz+Nakit',
+                  color: const Color(0xFF059669),
+                  onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt')
+                      ? () => _printAndCloseTicket('cash')
+                      : null,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.receipt_long,
+                  label: 'Yaz+Kart',
+                  color: const Color(0xFF2563EB),
+                  onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt')
+                      ? () => _printAndCloseTicket('credit_card')
+                      : null,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // Son satır: Adisyon İptal
+          if (_hasPermission('void_ticket'))
+            SizedBox(
+              width: double.infinity,
+              child: _buildActionBtn(
+                icon: Icons.delete_outline,
+                label: 'Adisyon İptal',
+                color: const Color(0xFFDC2626),
+                onTap: hasItems ? _voidTicket : null,
+              ),
             ),
-          ),
-          const SizedBox(width: 4),
-          // Fiyat
-          Text(
-            '${total.toStringAsFixed(2)}',
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF1F2937)),
-          ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildActionBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+  }) {
+    final isDisabled = onTap == null;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: isDisabled ? Colors.grey[200] : color,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 16),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: isDisabled ? Colors.grey[400] : Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -675,7 +1134,6 @@ class _AddItemModalState extends State<AddItemModal> {
   Widget _buildProductImage(Map<String, dynamic> product) {
     final imagePath = product['image']?.toString() ?? '';
     if (imagePath.isEmpty) return _buildPlaceholder(product);
-
     final imageUrl = widget.apiService.getImageUrl(imagePath);
 
     if (_imageCacheReady) {
@@ -687,9 +1145,7 @@ class _AddItemModalState extends State<AddItemModal> {
             return Image.file(cacheFile, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _buildPlaceholder(product));
           }
         }
-      } catch (e) {
-        // Cache hatası
-      }
+      } catch (_) {}
     }
 
     return FutureBuilder<String?>(
@@ -698,12 +1154,7 @@ class _AddItemModalState extends State<AddItemModal> {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Container(
             color: Colors.grey[200],
-            child: Center(
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
-              ),
-            ),
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: Provider.of<ThemeProvider>(context, listen: false).primaryColor)),
           );
         }
         if (snapshot.hasData && snapshot.data != null) {
@@ -721,7 +1172,7 @@ class _AddItemModalState extends State<AddItemModal> {
     final emoji = product['category_icon'] ?? '🍽️';
     return Container(
       color: Colors.grey[100],
-      child: Center(child: Text(emoji, style: const TextStyle(fontSize: 36))),
+      child: Center(child: Text(emoji, style: const TextStyle(fontSize: 32))),
     );
   }
 }

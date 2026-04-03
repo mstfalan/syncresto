@@ -84,26 +84,28 @@ class _TicketModalState extends State<TicketModal> {
     return permissions[permission] == true;
   }
 
-  Future<void> _loadTicket() async {
+  Future<void> _loadTicket({bool autoOpenAddItem = false}) async {
     setState(() => _isLoading = true);
     try {
       final response = await widget.apiService.getTableTicket(_tableId);
       print('[TicketModal] _loadTicket response: $response');
       setState(() {
-        // Online API returns {ticket: {...}} or {ticket: null}
-        // Offline returns directly {...}
         if (response != null && response['ticket'] != null) {
-          // Online response with ticket
           _ticket = response['ticket'];
         } else if (response != null && !response.containsKey('ticket') && response['id'] != null) {
-          // Offline response (direct ticket object)
           _ticket = response;
         } else {
-          // No ticket
           _ticket = null;
         }
         print('[TicketModal] _ticket set: $_ticket');
       });
+
+      // Adisyon açıldıktan sonra otomatik ürün ekle ekranını aç
+      if (autoOpenAddItem && _ticket != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _openAddItemScreen();
+        });
+      }
     } catch (e) {
       print('[TicketModal] _loadTicket error: $e');
       setState(() => _ticket = null);
@@ -122,8 +124,8 @@ class _TicketModalState extends State<TicketModal> {
 
       if (result['success'] == true) {
         _showSuccess('Adisyon acildi');
-        // Ticket detaylarini yeniden yukle
-        await _loadTicket();
+        // Ticket detaylarini yeniden yukle ve otomatik ürün ekle ekranını aç
+        await _loadTicket(autoOpenAddItem: true);
       } else {
         _showError(result['error'] ?? 'Adisyon acilamadi');
       }
@@ -451,38 +453,43 @@ class _TicketModalState extends State<TicketModal> {
     }
   }
 
-  Future<void> _openAddItemModal() async {
-    print('[TicketModal] _openAddItemModal çağrıldı');
+  /// Ürün ekle ekranını aç (full-screen)
+  Future<void> _openAddItemScreen() async {
     if (_ticket == null) {
-      print('[TicketModal] _ticket null, lütfen önce adisyon açın');
       _showError('Lütfen önce adisyon açın');
       return;
     }
 
-    print('[TicketModal] _ticket keys: ${_ticket!.keys.toList()}');
-    print('[TicketModal] _ticket: $_ticket');
-    // Try id first, then local_id
     final ticketId = _safeInt(_ticket!['id']) ?? _safeInt(_ticket!['local_id']);
-    print('[TicketModal] ticketId: $ticketId');
     if (ticketId == null) {
       _showError('Ticket ID bulunamadi');
       return;
     }
-    print('[TicketModal] AddItemModal açılıyor...');
+
     await showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => AddItemModal(
         apiService: widget.apiService,
+        printerService: widget.printerService,
         ticketId: ticketId,
         waiterId: _waiterId,
         onItemAdded: () => _loadTicket(),
-        onClose: () => Navigator.pop(context),
+        onClose: () {
+          Navigator.pop(context);
+          _loadTicket();
+        },
         showProductImages: widget.showProductImages,
         tableId: _tableId,
+        table: widget.table,
+        waiter: widget.waiter,
+        section: widget.section,
       ),
     );
   }
+
+  // Eski uyumluluk
+  Future<void> _openAddItemModal() async => _openAddItemScreen();
 
   /// Mutfağa gönder - sadece yazdırılmamış ürünleri yazıcıya gönderir
   /// Ürünler yazıcılara göre gruplanır ve her yazıcıya ayrı fiş gönderilir
@@ -833,7 +840,7 @@ class _TicketModalState extends State<TicketModal> {
                   ? Center(child: CircularProgressIndicator(color: Provider.of<ThemeProvider>(context, listen: false).primaryColor))
                   : _ticket == null
                       ? _buildEmptyTicket()
-                      : _buildTicketContent(),
+                      : _buildTicketHasContent(),
             ),
           ],
         ),
@@ -1044,178 +1051,56 @@ class _TicketModalState extends State<TicketModal> {
     );
   }
 
-  Widget _buildTicketContent() {
+  /// Adisyon var — büyük "Ürün Ekle" butonu göster, tıklayınca AddItemModal açılır
+  Widget _buildTicketHasContent() {
+    final theme = Provider.of<ThemeProvider>(context, listen: false);
     final items = (_ticket!['items'] as List?) ?? [];
+    final activeItems = items.where((i) => i['status'] != 'cancelled').toList();
 
-    return Row(
-      children: [
-        // Left panel - Items and summary
-        Expanded(
-          flex: 2,
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Ticket info
-                _buildTicketInfo(),
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Ticket bilgisi
+          _buildTicketInfo(),
+          const SizedBox(height: 24),
 
-                const SizedBox(height: 16),
+          // Ürün sayısı ve toplam
+          if (activeItems.isNotEmpty) ...[
+            Text(
+              '${activeItems.length} urun - ${_calculatedTotal.toStringAsFixed(2)} TL',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.grey[700]),
+            ),
+            const SizedBox(height: 24),
+          ],
 
-                // Items list
-                Expanded(
-                  child: items.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.restaurant_menu, size: 48, color: Colors.grey[300]),
-                              const SizedBox(height: 12),
-                              Text(
-                                'Henuz urun eklenmedi',
-                                style: TextStyle(color: Colors.grey[500]),
-                              ),
-                            ],
-                          ),
-                        )
-                      : ListView.builder(
-                          itemCount: items.length,
-                          itemBuilder: (context, index) => _buildItemRow(items[index]),
-                        ),
-                ),
-
-                // Summary
-                _buildSummary(),
-              ],
+          // Büyük "Ürün Ekle / Adisyon Yönet" butonu
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _openAddItemScreen,
+            child: Container(
+              width: 400,
+              height: 80,
+              decoration: BoxDecoration(
+                color: theme.primaryColor,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [BoxShadow(color: theme.primaryColor.withOpacity(0.3), blurRadius: 12, offset: const Offset(0, 4))],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(activeItems.isEmpty ? Icons.add_circle : Icons.restaurant_menu, color: Colors.white, size: 32),
+                  const SizedBox(width: 12),
+                  Text(
+                    activeItems.isEmpty ? 'Urun Ekle' : 'Adisyon Yonet',
+                    style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
-
-        // Right panel - Action buttons (scrollable)
-        Container(
-          width: 180,
-          decoration: BoxDecoration(
-            color: Colors.grey[100],
-            borderRadius: const BorderRadius.only(
-              bottomRight: Radius.circular(16),
-            ),
-          ),
-          child: ListView(
-            padding: const EdgeInsets.all(12),
-            children: [
-              // Ürün Ekle - add_item yetkisi gerekli
-              if (_hasPermission('add_item')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.add,
-                  label: 'Urun Ekle',
-                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
-                  onPressed: _openAddItemModal,
-                ),
-                const SizedBox(height: 8),
-              ],
-              // Mutfağa Gönder - print_receipt yetkisi gerekli
-              if (_hasPermission('print_receipt')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.restaurant,
-                  label: 'Mutfaga Gonder',
-                  color: const Color(0xFFF59E0B),
-                  onPressed: _sendToKitchen,
-                ),
-                const SizedBox(height: 8),
-              ],
-              // Yazdır - print_receipt yetkisi gerekli
-              if (_hasPermission('print_receipt')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.print,
-                  label: 'Yazdir',
-                  color: Colors.blueGrey,
-                  onPressed: _printTicket,
-                ),
-                const SizedBox(height: 8),
-              ],
-              // Masa Değiştir - transfer_table yetkisi gerekli
-              if (_hasPermission('transfer_table')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.swap_horiz,
-                  label: 'Masa Degistir',
-                  color: Colors.blueGrey,
-                  onPressed: _openTransferTableModal,
-                ),
-                const SizedBox(height: 8),
-              ],
-              // İndirim - apply_discount yetkisi gerekli
-              if (_hasPermission('apply_discount')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.percent,
-                  label: _localDiscount > 0 ? 'Indirim (%${_localDiscount.toStringAsFixed(0)})' : 'Indirim',
-                  color: _localDiscount > 0 ? const Color(0xFFF59E0B) : Colors.blueGrey,
-                  onPressed: _openDiscountModal,
-                ),
-                const SizedBox(height: 8),
-              ],
-
-              // Ödeme butonları için divider (en az biri varsa göster)
-              if (_hasPermission('close_ticket') || _hasPermission('void_ticket'))
-                Divider(color: Colors.grey[300], height: 20),
-
-              // Nakit - close_ticket yetkisi gerekli
-              if (_hasPermission('close_ticket')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.payments,
-                  label: 'Nakit',
-                  color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
-                  onPressed: () => _closeTicket('cash'),
-                ),
-                const SizedBox(height: 8),
-              ],
-              // Kredi Kartı - close_ticket yetkisi gerekli
-              if (_hasPermission('close_ticket')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.credit_card,
-                  label: 'Kredi Karti',
-                  color: const Color(0xFF3B82F6),
-                  onPressed: () => _closeTicket('credit_card'),
-                ),
-                const SizedBox(height: 8),
-              ],
-
-              // Yazdır ve Kapat butonları için divider
-              if (_hasPermission('close_ticket') && _hasPermission('print_receipt'))
-                Divider(color: Colors.grey[300], height: 20),
-
-              // Yazdır ve Kapat (Nakit) - close_ticket + print_receipt yetkisi gerekli
-              if (_hasPermission('close_ticket') && _hasPermission('print_receipt')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.receipt_long,
-                  label: 'Yazdir+Nakit',
-                  color: const Color(0xFF059669),
-                  onPressed: () => _printAndCloseTicket('cash'),
-                ),
-                const SizedBox(height: 8),
-              ],
-              // Yazdır ve Kapat (Kart) - close_ticket + print_receipt yetkisi gerekli
-              if (_hasPermission('close_ticket') && _hasPermission('print_receipt')) ...[
-                _buildSmallActionButton(
-                  icon: Icons.receipt_long,
-                  label: 'Yazdir+Kart',
-                  color: const Color(0xFF2563EB),
-                  onPressed: () => _printAndCloseTicket('credit_card'),
-                ),
-                const SizedBox(height: 8),
-              ],
-
-              // Adisyon İptal - void_ticket yetkisi gerekli
-              if (_hasPermission('void_ticket'))
-                _buildSmallActionButton(
-                  icon: Icons.delete_outline,
-                  label: 'Adisyon Iptal',
-                  color: const Color(0xFFDC2626),
-                  onPressed: _voidTicket,
-                ),
-            ],
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 

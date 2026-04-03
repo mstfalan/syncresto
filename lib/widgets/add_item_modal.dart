@@ -246,13 +246,16 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Ürün iptal
   Future<void> _cancelSelectedItem() async {
+    print('[AddItemModal] _cancelSelectedItem called, _selectedItemIndex=$_selectedItemIndex');
     if (_selectedItemIndex == null) return;
 
     final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    print('[AddItemModal] activeItems.length=${activeItems.length}');
     if (_selectedItemIndex! >= activeItems.length) return;
 
     final item = activeItems[_selectedItemIndex!];
     final itemId = _safeInt(item['id']);
+    print('[AddItemModal] item=${item['product_name']}, itemId=$itemId');
     if (itemId == null) return;
 
     final confirmed = await showDialog<bool>(
@@ -534,16 +537,49 @@ class _AddItemModalState extends State<AddItemModal> {
 
   void _showError(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.red),
-    );
+    print('[AddItemModal] ERROR: $message');
+    try {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: Colors.red),
+      );
+    } catch (_) {
+      // Dialog içinde Scaffold yoksa overlay ile göster
+      _showOverlayMessage(message, Colors.red);
+    }
   }
 
   void _showSuccess(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: Colors.green),
+    print('[AddItemModal] SUCCESS: $message');
+    try {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: Colors.green),
+      );
+    } catch (_) {
+      _showOverlayMessage(message, Colors.green);
+    }
+  }
+
+  void _showOverlayMessage(String message, Color color) {
+    final overlay = Overlay.of(context);
+    final entry = OverlayEntry(
+      builder: (context) => Positioned(
+        bottom: 50,
+        left: 50,
+        right: 50,
+        child: Material(
+          elevation: 8,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(8)),
+            child: Text(message, style: const TextStyle(color: Colors.white, fontSize: 14), textAlign: TextAlign.center),
+          ),
+        ),
+      ),
     );
+    overlay.insert(entry);
+    Future.delayed(const Duration(seconds: 3), () => entry.remove());
   }
 
   double get _ticketTotal {
@@ -562,7 +598,8 @@ class _AddItemModalState extends State<AddItemModal> {
     return Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: EdgeInsets.zero,
-      child: Container(
+      child: Scaffold(
+        body: Container(
         width: MediaQuery.of(context).size.width,
         height: MediaQuery.of(context).size.height,
         color: Colors.white,
@@ -585,6 +622,7 @@ class _AddItemModalState extends State<AddItemModal> {
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -976,6 +1014,7 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildActionButtons(ThemeProvider theme, bool hasItems) {
+    print('[AddItemModal] _buildActionButtons: hasItems=$hasItems, _selectedItemIndex=$_selectedItemIndex, cancel_perm=${_hasPermission("cancel_item")}');
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
@@ -1001,7 +1040,27 @@ class _AddItemModalState extends State<AddItemModal> {
                   icon: Icons.close,
                   label: 'Ürün İptal',
                   color: Colors.red[400]!,
-                  onTap: hasItems && _selectedItemIndex != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null,
+                  onTap: hasItems && _selectedItemIndex != null
+                      ? () async {
+                          print('[AddItemModal] Ürün İptal butonuna tıklandı! selectedIndex=$_selectedItemIndex');
+                          if (!_hasPermission('cancel_item')) {
+                            print('[AddItemModal] cancel_item yetkisi YOK');
+                            await showDialog(
+                              context: context,
+                              builder: (ctx) => AlertDialog(
+                                title: const Text('Yetki Hatası'),
+                                content: const Text('Ürün iptal yetkiniz bulunmamaktadır'),
+                                actions: [
+                                  TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Tamam')),
+                                ],
+                              ),
+                            );
+                            return;
+                          }
+                          print('[AddItemModal] cancel_item yetkisi VAR, _cancelSelectedItem çağrılıyor');
+                          _cancelSelectedItem();
+                        }
+                      : null,
                 ),
               ),
             ],

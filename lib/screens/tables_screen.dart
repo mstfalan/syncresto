@@ -16,6 +16,7 @@ import 'pin_login_screen.dart';
 import 'initial_sync_screen.dart';
 import 'printer_settings_screen.dart';
 import '../widgets/ticket_modal.dart';
+import '../widgets/add_item_modal.dart';
 import '../widgets/offline_data_modal.dart';
 
 class TablesScreen extends StatefulWidget {
@@ -314,17 +315,13 @@ class _TablesScreenState extends State<TablesScreen> {
     // Online ise önce server'dan güncel masa durumunu al
     if (widget.apiService.isOnline) {
       try {
-        // Server'dan bu masa için ticket var mı kontrol et
         final ticketData = await widget.apiService.getTableTicket(tableId);
 
-        // Eğer server'da ticket yoksa ama local'de dolu görünüyorsa, table'ı güncelle
         if (ticketData == null && (table['status'] == 'occupied' || table['current_ticket_id'] != null)) {
           print('[Tables] Server\'da ticket yok, masa durumu güncelleniyor...');
           table['status'] = 'empty';
           table['current_ticket_id'] = null;
-          // Tabloyu yeniden yükle
           await _loadData();
-          // Güncellenmiş tabloyu bul
           final updatedTable = _tables.firstWhere(
             (t) => t['id'] == tableId,
             orElse: () => table,
@@ -336,29 +333,64 @@ class _TablesScreenState extends State<TablesScreen> {
       }
     }
 
-    // Show ticket modal
-    // Mevcut salonun bilgisini bul
     final currentSection = _sections.firstWhere(
       (s) => s['id'] == _selectedSectionId,
       orElse: () => <String, dynamic>{},
     );
 
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => TicketModal(
-        table: table,
-        apiService: widget.apiService,
-        printerService: widget.printerService,
-        waiter: widget.waiter,
-        showProductImages: _showProductImages,
-        section: currentSection.isNotEmpty ? currentSection : null,
-        onClose: () {
-          Navigator.of(context).pop();
-          _loadData(); // Refresh tables
-        },
-      ),
-    );
+    // Ticket var mı kontrol et
+    final ticketData = await widget.apiService.getTableTicket(tableId);
+    Map<String, dynamic>? ticket;
+    if (ticketData != null && ticketData['ticket'] != null) {
+      ticket = ticketData['ticket'] as Map<String, dynamic>?;
+    } else if (ticketData != null && !ticketData.containsKey('ticket') && ticketData['id'] != null) {
+      ticket = ticketData;
+    }
+
+    if (ticket != null) {
+      // Adisyon var → direkt ürün ekle ekranını aç
+      final ticketId = (ticket['id'] as num?)?.toInt() ?? (ticket['local_id'] as num?)?.toInt();
+      if (ticketId == null) return;
+
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AddItemModal(
+          apiService: widget.apiService,
+          printerService: widget.printerService,
+          ticketId: ticketId,
+          waiterId: (widget.waiter['id'] as num).toInt(),
+          tableId: tableId,
+          table: table,
+          waiter: widget.waiter,
+          section: currentSection.isNotEmpty ? currentSection : null,
+          showProductImages: _showProductImages,
+          onItemAdded: () {},
+          onClose: () {
+            Navigator.of(context).pop();
+            _loadData();
+          },
+        ),
+      );
+    } else {
+      // Adisyon yok → adisyon aç popup'ı göster
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => TicketModal(
+          table: table,
+          apiService: widget.apiService,
+          printerService: widget.printerService,
+          waiter: widget.waiter,
+          showProductImages: _showProductImages,
+          section: currentSection.isNotEmpty ? currentSection : null,
+          onClose: () {
+            Navigator.of(context).pop();
+            _loadData();
+          },
+        ),
+      );
+    }
   }
 
   void _logout() {

@@ -476,8 +476,8 @@ class _TicketModalState extends State<TicketModal> {
         waiterId: _waiterId,
         onItemAdded: () => _loadTicket(),
         onClose: () {
-          Navigator.pop(context);
-          _loadTicket();
+          Navigator.pop(context); // AddItemModal'ı kapat
+          widget.onClose(); // TicketModal'ı da kapat
         },
         showProductImages: widget.showProductImages,
         tableId: _tableId,

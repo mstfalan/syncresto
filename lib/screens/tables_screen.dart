@@ -373,7 +373,57 @@ class _TablesScreenState extends State<TablesScreen> {
         ),
       );
     } else {
-      // Adisyon yok → adisyon aç popup'ı göster
+      // Adisyon yok
+      final skipCount = table['skip_customer_count'] == true || table['skip_customer_count'] == 1;
+
+      if (skipCount) {
+        // Kişi sayısı sorma → direkt adisyon aç + ürün ekle
+        try {
+          final result = await widget.apiService.openTicket(
+            tableId: tableId,
+            waiterId: (widget.waiter['id'] as num).toInt(),
+            customerCount: 1,
+          );
+          if (result['success'] == true) {
+            // Yeni açılan ticket'ı al
+            final newTicketData = await widget.apiService.getTableTicket(tableId);
+            Map<String, dynamic>? newTicket;
+            if (newTicketData != null && newTicketData['ticket'] != null) {
+              newTicket = newTicketData['ticket'] as Map<String, dynamic>?;
+            }
+            if (newTicket != null) {
+              final newTicketId = (newTicket['id'] as num?)?.toInt() ?? (newTicket['local_id'] as num?)?.toInt();
+              if (newTicketId != null) {
+                await showDialog(
+                  context: context,
+                  barrierDismissible: false,
+                  builder: (context) => AddItemModal(
+                    apiService: widget.apiService,
+                    printerService: widget.printerService,
+                    ticketId: newTicketId,
+                    waiterId: (widget.waiter['id'] as num).toInt(),
+                    tableId: tableId,
+                    table: table,
+                    waiter: widget.waiter,
+                    section: currentSection.isNotEmpty ? currentSection : null,
+                    showProductImages: _showProductImages,
+                    onItemAdded: () {},
+                    onClose: () {
+                      Navigator.of(context).pop();
+                      _loadData();
+                    },
+                  ),
+                );
+                return;
+              }
+            }
+          }
+        } catch (e) {
+          print('[Tables] Otomatik adisyon açma hatası: $e');
+        }
+      }
+
+      // Normal akış → kişi sayısı seç + adisyon aç popup'ı
       await showDialog(
         context: context,
         barrierDismissible: false,

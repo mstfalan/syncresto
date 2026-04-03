@@ -1147,7 +1147,7 @@ class _AddItemModalState extends State<AddItemModal> {
                 icon: Icons.delete_outline,
                 label: 'Adisyon İptal',
                 color: const Color(0xFFDC2626),
-                onTap: hasItems ? _voidTicket : null,
+                onTap: _voidTicket,
               ),
             ),
         ],

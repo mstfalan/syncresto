@@ -479,6 +479,7 @@ class _TicketModalState extends State<TicketModal> {
         onItemAdded: () => _loadTicket(),
         onClose: () => Navigator.pop(context),
         showProductImages: widget.showProductImages,
+        tableId: _tableId,
       ),
     );
   }
@@ -841,7 +842,8 @@ class _TicketModalState extends State<TicketModal> {
   }
 
   Widget _buildEmptyTicket() {
-    return Padding(
+    final theme = Provider.of<ThemeProvider>(context, listen: false);
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(32),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -890,23 +892,23 @@ class _TicketModalState extends State<TicketModal> {
                     final isSelected = _customerCount == count;
                     return Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: InkWell(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
                         onTap: () => setState(() => _customerCount = count),
-                        borderRadius: BorderRadius.circular(12),
                         child: Container(
-                          width: 56,
-                          height: 56,
+                          width: 64,
+                          height: 64,
                           decoration: BoxDecoration(
-                            color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.white,
+                            color: isSelected ? theme.primaryColor : Colors.white,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.grey[300]!,
+                              color: isSelected ? theme.primaryColor : Colors.grey[300]!,
                               width: 2,
                             ),
                             boxShadow: isSelected
                                 ? [
                                     BoxShadow(
-                                      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor.withOpacity(0.3),
+                                      color: theme.primaryColor.withOpacity(0.3),
                                       blurRadius: 8,
                                       offset: const Offset(0, 2),
                                     )
@@ -937,23 +939,23 @@ class _TicketModalState extends State<TicketModal> {
                     final isSelected = _customerCount == count;
                     return Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: InkWell(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
                         onTap: () => setState(() => _customerCount = count),
-                        borderRadius: BorderRadius.circular(12),
                         child: Container(
-                          width: 56,
-                          height: 56,
+                          width: 64,
+                          height: 64,
                           decoration: BoxDecoration(
-                            color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.white,
+                            color: isSelected ? theme.primaryColor : Colors.white,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: isSelected ? Provider.of<ThemeProvider>(context, listen: false).primaryColor : Colors.grey[300]!,
+                              color: isSelected ? theme.primaryColor : Colors.grey[300]!,
                               width: 2,
                             ),
                             boxShadow: isSelected
                                 ? [
                                     BoxShadow(
-                                      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor.withOpacity(0.3),
+                                      color: theme.primaryColor.withOpacity(0.3),
                                       blurRadius: 8,
                                       offset: const Offset(0, 2),
                                     )
@@ -983,17 +985,37 @@ class _TicketModalState extends State<TicketModal> {
 
           // Open ticket button - open_ticket yetkisi gerekli
           if (_hasPermission('open_ticket'))
-            SizedBox(
-              width: 300,
-              height: 56,
-              child: ElevatedButton.icon(
-                onPressed: _openTicket,
-                icon: const Icon(Icons.receipt_long),
-                label: const Text('Adisyon Ac', style: TextStyle(fontSize: 18)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _openTicket,
+              child: Container(
+                width: 360,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: theme.primaryColor,
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: theme.primaryColor.withOpacity(0.3),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.receipt_long, color: Colors.white, size: 28),
+                    SizedBox(width: 12),
+                    Text(
+                      'Adisyon Ac',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             )

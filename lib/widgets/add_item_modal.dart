@@ -406,16 +406,16 @@ class _AddItemModalState extends State<AddItemModal> {
     if (confirmed != true) return;
 
     try {
+      // Önce fiş yazdır (hesap kapanmadan önce ticket bilgisi lazım)
+      if (widget.printerService != null) {
+        try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
+      }
+
       await widget.apiService.closeTicket(
         ticketId: widget.ticketId,
         paymentMethod: paymentMethod,
         waiterId: widget.waiterId,
       );
-
-      // Özet fiş yazdır
-      if (widget.printerService != null) {
-        try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
-      }
 
       _showSuccess('Hesap kapatıldı');
       widget.onItemAdded();

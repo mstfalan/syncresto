@@ -875,9 +875,9 @@ class PrinterService {
   }
 
   String _formatDate(String? isoDate) {
-    if (isoDate == null) return '';
+    if (isoDate == null || isoDate.isEmpty) return '';
     try {
-      final dt = DateTime.parse(isoDate);
+      final dt = DateTime.parse(isoDate).toLocal();
       return '${dt.day.toString().padLeft(2, '0')}.${dt.month.toString().padLeft(2, '0')}.${dt.year} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
     } catch (e) {
       return isoDate;
@@ -885,9 +885,9 @@ class PrinterService {
   }
 
   String _formatTime(String? isoDate) {
-    if (isoDate == null) return '';
+    if (isoDate == null || isoDate.isEmpty) return '';
     try {
-      final dt = DateTime.parse(isoDate);
+      final dt = DateTime.parse(isoDate).toLocal();
       return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
     } catch (e) {
       return isoDate;
@@ -1105,7 +1105,8 @@ class PrinterService {
     if (waiterName.isNotEmpty) {
       bytes += generator.text('Garson: $waiterName', styles: const PosStyles(bold: true));
     }
-    bytes += generator.text('Saat: ${_formatTime(DateTime.now().toIso8601String())}');
+    final openedAt = ticket['opened_at'] ?? ticket['created_at'] ?? DateTime.now().toIso8601String();
+    bytes += generator.text('Saat: ${_formatTime(openedAt.toString())}');
     bytes += generator.hr(ch: '=');
 
     // ===== ÜRÜNLER =====
@@ -1277,14 +1278,9 @@ class PrinterService {
       styles: const PosStyles(bold: true),
     );
 
-    // Tarih ve saat
-    final now = DateTime.now();
-    bytes += generator.text(
-      'Tarih: ${now.day.toString().padLeft(2, '0')}.${now.month.toString().padLeft(2, '0')}.${now.year}',
-    );
-    bytes += generator.text(
-      'Saat: ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
-    );
+    // Tarih ve saat - siparişin girildiği saat
+    final ticketOpenedAt = ticket['opened_at'] ?? ticket['created_at'] ?? '';
+    bytes += generator.text('Tarih: ${_formatDate(ticketOpenedAt.toString())}');
 
     bytes += generator.hr(ch: '=');
 

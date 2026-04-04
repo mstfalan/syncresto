@@ -120,15 +120,32 @@ class _AddItemModalState extends State<AddItemModal> {
   Future<void> _loadTicketItems() async {
     try {
       if (widget.tableId > 0) {
+        print('[AddItemModal] _loadTicketItems: tableId=${widget.tableId}');
         final ticketData = await widget.apiService.getTableTicket(widget.tableId);
+        print('[AddItemModal] ticketData: $ticketData');
         if (ticketData != null && mounted) {
           final ticket = ticketData['ticket'] as Map<String, dynamic>?;
           if (ticket != null) {
+            final items = (ticket['items'] as List?) ?? [];
+            print('[AddItemModal] items loaded: ${items.length}');
             setState(() {
-              _ticketItems = (ticket['items'] as List?) ?? [];
+              _ticketItems = items;
             });
+          } else {
+            // ticket null ama ticketData var — belki doğrudan ticket objesi
+            if (ticketData['items'] != null) {
+              final items = (ticketData['items'] as List?) ?? [];
+              print('[AddItemModal] items from direct ticketData: ${items.length}');
+              setState(() {
+                _ticketItems = items;
+              });
+            } else {
+              print('[AddItemModal] ticket is null, no items found');
+            }
           }
         }
+      } else {
+        print('[AddItemModal] tableId is 0, skipping _loadTicketItems');
       }
     } catch (e) {
       print('[AddItemModal] Ticket items yüklenemedi: $e');
@@ -731,9 +748,9 @@ class _AddItemModalState extends State<AddItemModal> {
   Widget _buildCategoryButton(ThemeProvider theme, int? categoryId, String label, IconData? icon, {String emoji = ''}) {
     final isSelected = _selectedCategoryId == categoryId;
 
-    return GestureDetector(
+    return Listener(
       behavior: HitTestBehavior.opaque,
-      onTap: () => _selectCategory(categoryId),
+      onPointerUp: (_) => _selectCategory(categoryId),
       child: Container(
         decoration: BoxDecoration(
           color: isSelected ? theme.primaryColor : Colors.white,
@@ -813,9 +830,9 @@ class _AddItemModalState extends State<AddItemModal> {
 
     return Opacity(
       opacity: isOutOfStock ? 0.5 : 1.0,
-      child: GestureDetector(
+      child: Listener(
         behavior: HitTestBehavior.opaque,
-        onTap: isOutOfStock ? null : () => _addProductDirectly(product),
+        onPointerUp: isOutOfStock ? null : (_) => _addProductDirectly(product),
         child: Container(
           decoration: BoxDecoration(
             color: Colors.white,
@@ -968,9 +985,9 @@ class _AddItemModalState extends State<AddItemModal> {
     final total = unitPrice * quantity;
     final notes = item['notes'] as String?;
 
-    return GestureDetector(
+    return Listener(
       behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _selectedItemIndex = isSelected ? null : index),
+      onPointerUp: (_) => setState(() => _selectedItemIndex = isSelected ? null : index),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
@@ -1162,11 +1179,11 @@ class _AddItemModalState extends State<AddItemModal> {
     VoidCallback? onTap,
   }) {
     final isDisabled = onTap == null;
-    return GestureDetector(
+    return Listener(
       behavior: HitTestBehavior.opaque,
-      onTap: onTap,
+      onPointerUp: isDisabled ? null : (_) => onTap(),
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10),
+        padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
           color: isDisabled ? Colors.grey[200] : color,
           borderRadius: BorderRadius.circular(8),

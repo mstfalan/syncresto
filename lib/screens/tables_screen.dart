@@ -924,12 +924,10 @@ class _TablesScreenState extends State<TablesScreen> {
     final total = table['current_total'];
     final openedAt = table['ticket_opened_at'];
 
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: () => _openTable(table),
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerUp: (_) => _openTable(table),
+      child: Container(
           decoration: BoxDecoration(
             gradient: isOccupied ? theme.backgroundGradient : null,
             color: isOccupied ? null : Colors.white,
@@ -981,10 +979,10 @@ class _TablesScreenState extends State<TablesScreen> {
               ),
 
               // Total (if occupied)
-              if (isOccupied && total != null) ...[
+              if (isOccupied) ...[
                 const SizedBox(height: 8),
                 Text(
-                  '${total.toStringAsFixed(2)} TL',
+                  '${(total is num ? total.toDouble() : 0.0).toStringAsFixed(2)} TL',
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 16,
@@ -1007,9 +1005,9 @@ class _TablesScreenState extends State<TablesScreen> {
             ],
           ),
         ),
-      ),
     );
   }
+
 
   Widget _buildStatusLegend(ThemeProvider theme) {
     return Container(

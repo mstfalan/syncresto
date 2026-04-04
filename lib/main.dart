@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -139,6 +140,16 @@ class SyncRestoPosApp extends StatelessWidget {
         return MaterialApp(
           title: theme.brandName,
           debugShowCheckedModeBanner: false,
+          // Dokunmatik ekran desteği: tüm pointer türlerini scroll için etkinleştir
+          scrollBehavior: const MaterialScrollBehavior().copyWith(
+            dragDevices: {
+              PointerDeviceKind.touch,
+              PointerDeviceKind.mouse,
+              PointerDeviceKind.stylus,
+              PointerDeviceKind.trackpad,
+              PointerDeviceKind.unknown,
+            },
+          ),
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
               seedColor: theme.primaryColor,
@@ -146,6 +157,10 @@ class SyncRestoPosApp extends StatelessWidget {
             ),
             useMaterial3: true,
             fontFamily: 'Roboto',
+            // Dokunmatik ekran: splash/ripple efektlerini hızlandır
+            splashFactory: NoSplash.splashFactory,
+            // Minimum tap target boyutu
+            materialTapTargetSize: MaterialTapTargetSize.padded,
           ),
           home: hasApiKey
               ? InitialSyncScreen(

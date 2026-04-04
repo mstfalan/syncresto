@@ -919,7 +919,7 @@ class _TablesScreenState extends State<TablesScreen> {
   }
 
   Widget _buildTableCard(Map<String, dynamic> table, ThemeProvider theme) {
-    final isOccupied = table['status'] == 'occupied' || table['current_ticket_id'] != null;
+    final isOccupied = table['status'] == 'occupied' || table['current_ticket_id'] != null || table['active_ticket_id'] != null;
     final tableNumber = (table['table_number'] ?? 'M${table['id']}').toString().replaceAll('Masa ', '');
     final total = table['current_total'];
     final openedAt = table['ticket_opened_at'];

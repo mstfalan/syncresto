@@ -406,11 +406,6 @@ class _AddItemModalState extends State<AddItemModal> {
     if (confirmed != true) return;
 
     try {
-      // Önce fiş yazdır (hesap kapanmadan önce ticket bilgisi lazım)
-      if (widget.printerService != null) {
-        try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
-      }
-
       await widget.apiService.closeTicket(
         ticketId: widget.ticketId,
         paymentMethod: paymentMethod,
@@ -445,10 +440,14 @@ class _AddItemModalState extends State<AddItemModal> {
     if (confirmed != true) return;
 
     try {
-      // Mutfağa gönder (sessiz)
+      // 1. Mutfağa gönder (yazdırılmamış ürünler varsa)
       if (widget.printerService != null) {
         try { await _sendToKitchenSilent(); } catch (_) {}
-        try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
+      }
+
+      // 2. Adisyon fişi yazdır (hesap kapanmadan önce)
+      if (widget.printerService != null) {
+        try { await _printTicket(); } catch (_) {}
       }
 
       await widget.apiService.closeTicket(

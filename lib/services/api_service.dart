@@ -228,10 +228,8 @@ class ApiService {
         // Cache'e kaydet
         await _localDb.cacheTables(serverTables);
 
-        // Offline'da yapılan değişiklikleri birleştir
-        // (örn: offline kapatılan masa sunucuda hala açık görünüyor olabilir)
-        final mergedTables = await _localDb.mergeTablesWithOfflineChanges(serverTables);
-        return mergedTables;
+        // Online modda server verisi doğrudur, offline merge yapma
+        return serverTables;
       } on DioException catch (e) {
         print('[API] Online tables basarisiz: ${e.message}');
       }

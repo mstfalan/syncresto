@@ -352,6 +352,9 @@ class _AddItemModalState extends State<AddItemModal> {
         if (success) successCount += groupItems.length;
       }
 
+      // Salon özet fişi (salon yazıcısı tanımlıysa tüm ürünlerle)
+      try { await _printSummaryReceipt(''); } catch (_) {}
+
       _showSuccess('Mutfağa gönderildi ($successCount ürün)');
       await _loadTicketItems();
       widget.onItemAdded();
@@ -362,11 +365,14 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Yazdır
   Future<void> _printTicket() async {
+    print('[AddItemModal] _printTicket: printerService=${widget.printerService != null}, tableId=${widget.tableId}');
     if (widget.printerService == null) return;
     try {
       final ticketData = await widget.apiService.getTableTicket(widget.tableId);
+      print('[AddItemModal] _printTicket ticketData: ${ticketData != null}');
       if (ticketData == null) return;
       final ticket = ticketData['ticket'] as Map<String, dynamic>?;
+      print('[AddItemModal] _printTicket ticket: ${ticket != null}, items: ${ticket?['items']?.length}');
       if (ticket == null) return;
 
       final ticketToPrint = Map<String, dynamic>.from(ticket);
@@ -486,9 +492,17 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Future<void> _printSummaryReceipt(String paymentMethod) async {
-    if (widget.printerService == null || widget.section == null) return;
+    print('[AddItemModal] _printSummaryReceipt: printerService=${widget.printerService != null}, section=${widget.section}');
+    if (widget.printerService == null || widget.section == null) {
+      print('[AddItemModal] SKIP: printerService veya section null');
+      return;
+    }
     final summaryPrinterId = widget.section!['summary_printer_id'];
-    if (summaryPrinterId == null) return;
+    print('[AddItemModal] summaryPrinterId=$summaryPrinterId');
+    if (summaryPrinterId == null) {
+      print('[AddItemModal] SKIP: summaryPrinterId null');
+      return;
+    }
     try {
       final printers = await widget.apiService.getPrinters();
       final targetId = summaryPrinterId is String ? int.tryParse(summaryPrinterId) : summaryPrinterId;

@@ -682,6 +682,7 @@ class ApiService {
     required int ticketId,
     required List<int> itemIds,
     required String paymentMethod,
+    int? waiterId,
   }) async {
     if (!_connectivity.isOnline) {
       return {'success': false, 'error': 'Parçalı ödeme için internet gerekli'};
@@ -690,6 +691,7 @@ class ApiService {
       final response = await _dio.post('/api/pos/tickets/$ticketId/pay-items', data: {
         'item_ids': itemIds,
         'payment_method': paymentMethod,
+        if (waiterId != null) 'waiter_id': waiterId,
       });
       return response.data;
     } on DioException catch (e) {

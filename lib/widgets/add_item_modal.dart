@@ -1775,29 +1775,6 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 8),
-                                const Divider(),
-                                const SizedBox(height: 8),
-                                // Tümünü kapat
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: _buildPayBtn(
-                                    icon: Icons.payments,
-                                    label: 'Adisyon Kapat Nakit',
-                                    color: const Color(0xFF059669),
-                                    onTap: !_isProcessing ? () => _closeAll('cash') : null,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: _buildPayBtn(
-                                    icon: Icons.credit_card,
-                                    label: 'Adisyon Kapat Kart',
-                                    color: const Color(0xFF2563EB),
-                                    onTap: !_isProcessing ? () => _closeAll('card') : null,
-                                  ),
-                                ),
                               ],
                             ),
                           ),

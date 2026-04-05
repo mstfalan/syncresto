@@ -201,7 +201,7 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Seçili ürüne not ekle popup
+  /// Seçili ürüne not ekle popup — hazır notlar + serbest yazı
   Future<void> _openNoteDialog() async {
     if (_selectedItemIndex == null) return;
 
@@ -212,57 +212,126 @@ class _AddItemModalState extends State<AddItemModal> {
     final currentNote = item['notes']?.toString() ?? '';
     final controller = TextEditingController(text: currentNote);
 
+    // Hazır notları API'den çek
+    final predefinedNotes = await widget.apiService.getProductNotes();
+
+    if (!mounted) return;
+
     final note = await showDialog<String>(
       context: context,
       builder: (ctx) {
         final theme = Provider.of<ThemeProvider>(ctx, listen: false);
-        return Material(
-          type: MaterialType.transparency,
-          child: Center(
-            child: Container(
-              width: 400,
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20)],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('${item['product_name']} - Not', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: controller,
-                    autofocus: true,
-                    maxLines: 3,
-                    decoration: InputDecoration(
-                      hintText: 'Ürün notu girin...',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide(color: theme.primaryColor, width: 2),
-                      ),
-                    ),
+        final Set<String> selectedNotes = {};
+        // Mevcut notlardan seçili olanları bul
+        if (currentNote.isNotEmpty) {
+          for (var n in predefinedNotes) {
+            final noteText = n['note']?.toString() ?? '';
+            if (currentNote.contains(noteText)) {
+              selectedNotes.add(noteText);
+            }
+          }
+        }
+
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return Material(
+              type: MaterialType.transparency,
+              child: Center(
+                child: Container(
+                  width: 550,
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.8),
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20)],
                   ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('İptal')),
-                      const SizedBox(width: 8),
-                      ElevatedButton(
-                        onPressed: () => Navigator.pop(ctx, controller.text),
-                        style: ElevatedButton.styleFrom(backgroundColor: theme.primaryColor, foregroundColor: Colors.white),
-                        child: const Text('Kaydet'),
+                      Text('${item['product_name']} - Not', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
+                      // Serbest not alanı
+                      TextField(
+                        controller: controller,
+                        maxLines: 2,
+                        decoration: InputDecoration(
+                          hintText: 'Ürün notu girin...',
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: BorderSide(color: theme.primaryColor, width: 2),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text('Hazır Notlar', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[700])),
+                      const SizedBox(height: 8),
+                      // Hazır notlar — çoklu seçim
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: predefinedNotes.map<Widget>((n) {
+                              final noteText = n['note']?.toString() ?? '';
+                              final isSelected = selectedNotes.contains(noteText);
+                              return Listener(
+                                behavior: HitTestBehavior.opaque,
+                                onPointerUp: (_) {
+                                  setDialogState(() {
+                                    if (isSelected) {
+                                      selectedNotes.remove(noteText);
+                                    } else {
+                                      selectedNotes.add(noteText);
+                                    }
+                                    // Controller'ı güncelle — serbest not + seçili notlar
+                                    final freeText = controller.text.split(',').where((t) {
+                                      final trimmed = t.trim();
+                                      return trimmed.isNotEmpty && !predefinedNotes.any((p) => p['note'] == trimmed);
+                                    }).join(', ');
+                                    final parts = <String>[];
+                                    if (freeText.isNotEmpty) parts.add(freeText);
+                                    parts.addAll(selectedNotes);
+                                    controller.text = parts.join(', ');
+                                    controller.selection = TextSelection.fromPosition(TextPosition(offset: controller.text.length));
+                                  });
+                                },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? theme.primaryColor : Colors.grey[100],
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: isSelected ? theme.primaryColor : Colors.grey[300]!),
+                                  ),
+                                  child: Text(noteText, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontSize: 12, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('İptal')),
+                          const SizedBox(width: 8),
+                          ElevatedButton(
+                            onPressed: () => Navigator.pop(ctx, controller.text),
+                            style: ElevatedButton.styleFrom(backgroundColor: theme.primaryColor, foregroundColor: Colors.white),
+                            child: const Text('Kaydet'),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                ],
+                ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );
@@ -286,47 +355,122 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Ürün iptal
+  /// Ürün iptal — sebep seçimi zorunlu
   Future<void> _cancelSelectedItem() async {
-    print('[AddItemModal] _cancelSelectedItem called, _selectedItemIndex=$_selectedItemIndex');
     if (_selectedItemIndex == null) return;
-
     final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
-    print('[AddItemModal] activeItems.length=${activeItems.length}');
     if (_selectedItemIndex! >= activeItems.length) return;
-
     final item = activeItems[_selectedItemIndex!];
     final itemId = _safeInt(item['id']);
-    print('[AddItemModal] item=${item['product_name']}, itemId=$itemId');
     if (itemId == null) return;
 
-    final confirmed = await showDialog<bool>(
+    // İptal sebeplerini API'den çek
+    final reasons = await widget.apiService.getCancelReasons();
+
+    if (!mounted) return;
+
+    final selectedReason = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Ürün İptal'),
-        content: Text('${item['product_name']} iptal edilecek. Emin misiniz?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgec')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('İptal Et', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+      barrierDismissible: false,
+      builder: (ctx) {
+        final theme = Provider.of<ThemeProvider>(ctx, listen: false);
+        String? picked;
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return Material(
+              type: MaterialType.transparency,
+              child: Center(
+                child: Container(
+                  width: 450,
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20)],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.cancel, color: Colors.red, size: 24),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text('${item['product_name']} - İptal Sebebi', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text('Lütfen iptal sebebini seçin', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                      const SizedBox(height: 16),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: reasons.map<Widget>((r) {
+                              final reason = r['reason']?.toString() ?? '';
+                              final isSelected = picked == reason;
+                              return Listener(
+                                behavior: HitTestBehavior.opaque,
+                                onPointerUp: (_) => setDialogState(() => picked = reason),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? Colors.red : Colors.grey[100],
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: isSelected ? Colors.red : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                  ),
+                                  child: Text(reason, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Vazgeç')),
+                          const SizedBox(width: 8),
+                          Listener(
+                            behavior: HitTestBehavior.opaque,
+                            onPointerUp: picked != null ? (_) => Navigator.pop(ctx, picked) : null,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: picked != null ? Colors.red : Colors.grey[300],
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text('İptal Et', style: TextStyle(color: picked != null ? Colors.white : Colors.grey[500], fontWeight: FontWeight.bold)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
 
-    if (confirmed != true) return;
+    if (selectedReason == null) return;
 
     try {
       await widget.apiService.deleteTicketItem(
         ticketId: widget.ticketId,
         itemId: itemId,
+        cancelReason: selectedReason,
         waiterId: widget.waiterId,
       );
       setState(() => _selectedItemIndex = null);
       await _loadTicketItems();
       widget.onItemAdded();
-      _showSuccess('Ürün iptal edildi');
+      _showSuccess('Ürün iptal edildi: $selectedReason');
     } catch (e) {
       _showError('Ürün iptal edilemedi: $e');
     }

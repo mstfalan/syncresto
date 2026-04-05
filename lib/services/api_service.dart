@@ -677,6 +677,30 @@ class ApiService {
     return {'success': false, 'error': 'Offline ve server ticket'};
   }
 
+  /// İptal sebeplerini getir
+  Future<List<dynamic>> getCancelReasons() async {
+    if (!_connectivity.isOnline) return [];
+    try {
+      final response = await _dio.get('/api/pos/cancel-reasons');
+      return response.data as List? ?? [];
+    } catch (e) {
+      print('[API] getCancelReasons hatası: $e');
+      return [];
+    }
+  }
+
+  /// Ürün notlarını getir
+  Future<List<dynamic>> getProductNotes() async {
+    if (!_connectivity.isOnline) return [];
+    try {
+      final response = await _dio.get('/api/pos/product-notes');
+      return response.data as List? ?? [];
+    } catch (e) {
+      print('[API] getProductNotes hatası: $e');
+      return [];
+    }
+  }
+
   /// Parçalı ödeme - seçili ürünleri öde
   Future<Map<String, dynamic>> payItems({
     required int ticketId,

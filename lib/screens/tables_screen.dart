@@ -923,6 +923,9 @@ class _TablesScreenState extends State<TablesScreen> {
     final tableNumber = (table['table_number'] ?? 'M${table['id']}').toString().replaceAll('Masa ', '');
     final total = table['current_total'];
     final openedAt = table['ticket_opened_at'];
+    final paidTotal = table['paid_total'] is num ? (table['paid_total'] as num).toDouble() : 0.0;
+    final unpaidTotal = table['unpaid_total'] is num ? (table['unpaid_total'] as num).toDouble() : 0.0;
+    final hasPartialPayment = paidTotal > 0 && unpaidTotal > 0;
 
     return Listener(
       behavior: HitTestBehavior.opaque,
@@ -980,7 +983,7 @@ class _TablesScreenState extends State<TablesScreen> {
 
               // Total (if occupied)
               if (isOccupied) ...[
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
                 Text(
                   '${(total is num ? total.toDouble() : 0.0).toStringAsFixed(2)} TL',
                   style: const TextStyle(
@@ -989,16 +992,48 @@ class _TablesScreenState extends State<TablesScreen> {
                     fontWeight: FontWeight.bold,
                   ),
                 ),
+                // Parçalı ödeme varsa ödenen/kalan göster
+                if (hasPartialPayment) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withOpacity(0.8),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          '${paidTotal.toStringAsFixed(0)}',
+                          style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withOpacity(0.8),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          '${unpaidTotal.toStringAsFixed(0)}',
+                          style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
 
               // Duration (if occupied)
               if (isOccupied && openedAt != null) ...[
-                const SizedBox(height: 4),
+                const SizedBox(height: 3),
                 Text(
                   _formatDuration(openedAt),
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.8),
-                    fontSize: 11,
+                    fontSize: 10,
                   ),
                 ),
               ],

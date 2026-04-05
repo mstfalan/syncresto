@@ -613,14 +613,8 @@ class _AddItemModalState extends State<AddItemModal> {
         apiService: widget.apiService,
         onPaymentComplete: (allPaid) {
           Navigator.pop(ctx);
-          if (allPaid) {
-            // Tüm ürünler ödendi, adisyon kapandı
-            widget.onItemAdded();
-            widget.onClose();
-          } else {
-            // Kısmi ödeme yapıldı, items'ı yenile
-            _loadTicketItems();
-          }
+          widget.onItemAdded();
+          widget.onClose();
         },
         onClose: () => Navigator.pop(ctx),
       ),

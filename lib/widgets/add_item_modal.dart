@@ -1548,11 +1548,7 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
 
         // Tüm ürünler ödendi mi?
         final allPaid = _items.every((i) => i['payment_status'] == 'paid');
-        if (allPaid) {
-          widget.onPaymentComplete(true);
-        } else {
-          setState(() {});
-        }
+        widget.onPaymentComplete(allPaid);
       } else {
         _showError(result['error'] ?? 'Ödeme başarısız');
       }

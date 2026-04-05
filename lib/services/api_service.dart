@@ -688,7 +688,18 @@ class ApiService {
       return {'success': false, 'error': 'Parçalı ödeme için internet gerekli'};
     }
     try {
-      final response = await _dio.post('/api/pos/tickets/$ticketId/pay-items', data: {
+      // Proxy pay-items route çalışmadığı için direkt backend'e istek at
+      final backendUrl = _backendUrl ?? '';
+      final url = backendUrl.isNotEmpty
+          ? '$backendUrl/api/pos/tickets/$ticketId/pay-items/pos'
+          : '/api/pos/tickets/$ticketId/pay-items';
+      print('[API] payItems URL: $url');
+      final dio = backendUrl.isNotEmpty ? Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 15),
+        headers: {'Content-Type': 'application/json'},
+      )) : _dio;
+      final response = await dio.post(url, data: {
         'item_ids': itemIds,
         'payment_method': paymentMethod,
         if (waiterId != null) 'waiter_id': waiterId,

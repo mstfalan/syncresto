@@ -677,6 +677,27 @@ class ApiService {
     return {'success': false, 'error': 'Offline ve server ticket'};
   }
 
+  /// Parçalı ödeme - seçili ürünleri öde
+  Future<Map<String, dynamic>> payItems({
+    required int ticketId,
+    required List<int> itemIds,
+    required String paymentMethod,
+  }) async {
+    if (!_connectivity.isOnline) {
+      return {'success': false, 'error': 'Parçalı ödeme için internet gerekli'};
+    }
+    try {
+      final response = await _dio.post('/api/pos/tickets/$ticketId/pay-items', data: {
+        'item_ids': itemIds,
+        'payment_method': paymentMethod,
+      });
+      return response.data;
+    } on DioException catch (e) {
+      print('[API] payItems hatası: ${e.message}');
+      return {'success': false, 'error': e.message};
+    }
+  }
+
   Future<Map<String, dynamic>> transferTable({
     required int ticketId,
     required int newTableId,

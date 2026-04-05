@@ -216,28 +216,53 @@ class _AddItemModalState extends State<AddItemModal> {
       context: context,
       builder: (ctx) {
         final theme = Provider.of<ThemeProvider>(ctx, listen: false);
-        return AlertDialog(
-          title: Text('${item['product_name']} - Not'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            maxLines: 3,
-            decoration: InputDecoration(
-              hintText: 'Ürün notu girin...',
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: theme.primaryColor, width: 2),
+        return Material(
+          type: MaterialType.transparency,
+          child: Center(
+            child: Container(
+              width: 400,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20)],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${item['product_name']} - Not', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    maxLines: 3,
+                    decoration: InputDecoration(
+                      hintText: 'Ürün notu girin...',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: theme.primaryColor, width: 2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('İptal')),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () => Navigator.pop(ctx, controller.text),
+                        style: ElevatedButton.styleFrom(backgroundColor: theme.primaryColor, foregroundColor: Colors.white),
+                        child: const Text('Kaydet'),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('İptal')),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, controller.text),
-              child: Text('Kaydet', style: TextStyle(color: theme.primaryColor, fontWeight: FontWeight.bold)),
-            ),
-          ],
         );
       },
     );
@@ -535,6 +560,38 @@ class _AddItemModalState extends State<AddItemModal> {
         brandName: brandName,
       );
     } catch (_) {}
+  }
+
+  /// Parçalı ödeme popup
+  Future<void> _openPartialPayment() async {
+    // Ticket items'ı yenile
+    await _loadTicketItems();
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    if (activeItems.isEmpty) return;
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _PartialPaymentDialog(
+        items: activeItems,
+        ticketId: widget.ticketId,
+        apiService: widget.apiService,
+        onPaymentComplete: (allPaid) {
+          Navigator.pop(ctx);
+          if (allPaid) {
+            // Tüm ürünler ödendi, adisyon kapandı
+            widget.onItemAdded();
+            widget.onClose();
+          } else {
+            // Kısmi ödeme yapıldı, items'ı yenile
+            _loadTicketItems();
+          }
+        },
+        onClose: () => Navigator.pop(ctx),
+      ),
+    );
   }
 
   /// Adisyon iptal
@@ -1118,6 +1175,17 @@ class _AddItemModalState extends State<AddItemModal> {
             ],
           ),
           const SizedBox(height: 6),
+          // Parçalı Ödeme (tam genişlik)
+          SizedBox(
+            width: double.infinity,
+            child: _buildActionBtn(
+              icon: Icons.splitscreen,
+              label: 'Parçalı Ödeme',
+              color: const Color(0xFF7C3AED),
+              onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null,
+            ),
+          ),
+          const SizedBox(height: 6),
           // Üçüncü satır: Nakit + Kredi Kartı
           Row(
             children: [
@@ -1261,6 +1329,475 @@ class _AddItemModalState extends State<AddItemModal> {
     return Container(
       color: Colors.grey[100],
       child: Center(child: Text(emoji, style: const TextStyle(fontSize: 32))),
+    );
+  }
+}
+
+/// Parçalı Ödeme Dialog
+class _PartialPaymentDialog extends StatefulWidget {
+  final List<dynamic> items;
+  final int ticketId;
+  final ApiService apiService;
+  final Function(bool allPaid) onPaymentComplete;
+  final VoidCallback onClose;
+
+  const _PartialPaymentDialog({
+    required this.items,
+    required this.ticketId,
+    required this.apiService,
+    required this.onPaymentComplete,
+    required this.onClose,
+  });
+
+  @override
+  State<_PartialPaymentDialog> createState() => _PartialPaymentDialogState();
+}
+
+class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
+  late List<Map<String, dynamic>> _items;
+  final Set<int> _selectedIds = {};
+  bool _isProcessing = false;
+
+  double _safeDouble(dynamic value, [double defaultValue = 0]) {
+    if (value == null) return defaultValue;
+    if (value is double) return value;
+    if (value is num) return value.toDouble();
+    return double.tryParse(value.toString()) ?? defaultValue;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _items = widget.items.map((i) => Map<String, dynamic>.from(i)).toList();
+  }
+
+  double get _selectedTotal {
+    double total = 0;
+    for (var item in _items) {
+      final itemId = item['id'] as int?;
+      if (itemId != null && _selectedIds.contains(itemId)) {
+        total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+      }
+    }
+    return total;
+  }
+
+  double get _totalAmount {
+    double total = 0;
+    for (var item in _items) {
+      if (item['payment_status'] != 'paid') {
+        total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+      }
+    }
+    return total;
+  }
+
+  void _toggleItem(int itemId) {
+    setState(() {
+      if (_selectedIds.contains(itemId)) {
+        _selectedIds.remove(itemId);
+      } else {
+        _selectedIds.add(itemId);
+      }
+    });
+  }
+
+  void _selectAll() {
+    setState(() {
+      for (var item in _items) {
+        if (item['payment_status'] != 'paid') {
+          final id = item['id'] as int?;
+          if (id != null) _selectedIds.add(id);
+        }
+      }
+    });
+  }
+
+  void _clearSelection() {
+    setState(() => _selectedIds.clear());
+  }
+
+  Future<void> _paySelected(String paymentMethod) async {
+    if (_selectedIds.isEmpty || _isProcessing) return;
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final result = await widget.apiService.payItems(
+        ticketId: widget.ticketId,
+        itemIds: _selectedIds.toList(),
+        paymentMethod: paymentMethod,
+      );
+
+      if (result['success'] == true) {
+        // Ödenen ürünleri güncelle
+        for (var item in _items) {
+          if (_selectedIds.contains(item['id'])) {
+            item['payment_status'] = 'paid';
+            item['payment_method'] = paymentMethod;
+          }
+        }
+        _selectedIds.clear();
+
+        // Tüm ürünler ödendi mi?
+        final allPaid = _items.every((i) => i['payment_status'] == 'paid');
+        if (allPaid) {
+          widget.onPaymentComplete(true);
+        } else {
+          setState(() {});
+        }
+      } else {
+        _showError(result['error'] ?? 'Ödeme başarısız');
+      }
+    } catch (e) {
+      _showError('Ödeme hatası: $e');
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
+  Future<void> _closeAll(String paymentMethod) async {
+    if (_isProcessing) return;
+    setState(() => _isProcessing = true);
+
+    try {
+      // Ödenmemiş tüm ürünleri seç ve öde
+      final unpaidIds = _items
+          .where((i) => i['payment_status'] != 'paid')
+          .map((i) => i['id'] as int)
+          .toList();
+
+      if (unpaidIds.isEmpty) return;
+
+      final result = await widget.apiService.payItems(
+        ticketId: widget.ticketId,
+        itemIds: unpaidIds,
+        paymentMethod: paymentMethod,
+      );
+
+      if (result['success'] == true) {
+        widget.onPaymentComplete(true);
+      } else {
+        _showError(result['error'] ?? 'Ödeme başarısız');
+      }
+    } catch (e) {
+      _showError('Ödeme hatası: $e');
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: Colors.red),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Provider.of<ThemeProvider>(context, listen: false);
+    final unpaidItems = _items.where((i) => i['payment_status'] != 'paid').toList();
+    final paidItems = _items.where((i) => i['payment_status'] == 'paid').toList();
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.all(40),
+      child: Scaffold(
+        body: Container(
+          width: MediaQuery.of(context).size.width * 0.7,
+          height: MediaQuery.of(context).size.height * 0.8,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Column(
+            children: [
+              // Header
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF7C3AED),
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    topRight: Radius.circular(16),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.splitscreen, color: Colors.white, size: 22),
+                    const SizedBox(width: 10),
+                    const Text('Parçalı Ödeme', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    // Tümünü Seç / Seçimi Kaldır
+                    Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerUp: (_) => _selectedIds.length == unpaidItems.length ? _clearSelection() : _selectAll(),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          _selectedIds.length == unpaidItems.length ? 'Seçimi Kaldır' : 'Tümünü Seç',
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerUp: (_) => widget.onClose(),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(Icons.close, color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Ürün listesi
+              Expanded(
+                child: Row(
+                  children: [
+                    // Sol: Ürünler
+                    Expanded(
+                      flex: 3,
+                      child: ListView(
+                        padding: const EdgeInsets.all(12),
+                        children: [
+                          if (unpaidItems.isNotEmpty) ...[
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text('Ödenmemiş Ürünler', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[700])),
+                            ),
+                            ...unpaidItems.map((item) => _buildPaymentItem(item, theme, false)),
+                          ],
+                          if (paidItems.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text('Ödenen Ürünler', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green[700])),
+                            ),
+                            ...paidItems.map((item) => _buildPaymentItem(item, theme, true)),
+                          ],
+                        ],
+                      ),
+                    ),
+
+                    // Sağ: Özet + butonlar
+                    Container(
+                      width: 240,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[50],
+                        border: Border(left: BorderSide(color: Colors.grey[200]!)),
+                      ),
+                      child: Column(
+                        children: [
+                          // Seçili ürünler özeti
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text('Seçili: ${_selectedIds.length} ürün', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    '${_selectedTotal.toStringAsFixed(2)} TL',
+                                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: theme.primaryColor),
+                                  ),
+                                  const Divider(),
+                                  Text('Kalan: ${_totalAmount.toStringAsFixed(2)} TL', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                                ],
+                              ),
+                            ),
+                          ),
+
+                          // Ödeme butonları
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              children: [
+                                // Seçilenleri öde
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: _buildPayBtn(
+                                        icon: Icons.payments,
+                                        label: 'Nakit',
+                                        color: theme.primaryColor,
+                                        onTap: _selectedIds.isNotEmpty && !_isProcessing ? () => _paySelected('cash') : null,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: _buildPayBtn(
+                                        icon: Icons.credit_card,
+                                        label: 'Kart',
+                                        color: const Color(0xFF3B82F6),
+                                        onTap: _selectedIds.isNotEmpty && !_isProcessing ? () => _paySelected('card') : null,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                const Divider(),
+                                const SizedBox(height: 8),
+                                // Tümünü kapat
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: _buildPayBtn(
+                                    icon: Icons.payments,
+                                    label: 'Adisyon Kapat Nakit',
+                                    color: const Color(0xFF059669),
+                                    onTap: !_isProcessing ? () => _closeAll('cash') : null,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: _buildPayBtn(
+                                    icon: Icons.credit_card,
+                                    label: 'Adisyon Kapat Kart',
+                                    color: const Color(0xFF2563EB),
+                                    onTap: !_isProcessing ? () => _closeAll('card') : null,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Loading bar
+              if (_isProcessing)
+                LinearProgressIndicator(color: const Color(0xFF7C3AED)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPaymentItem(Map<String, dynamic> item, ThemeProvider theme, bool isPaid) {
+    final itemId = item['id'] as int?;
+    final isSelected = itemId != null && _selectedIds.contains(itemId);
+    final qty = item['quantity'] ?? 1;
+    final price = _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+    final paymentMethod = item['payment_method']?.toString().toUpperCase() ?? '';
+
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerUp: isPaid ? null : (_) { if (itemId != null) _toggleItem(itemId); },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isPaid ? Colors.green[50] : (isSelected ? const Color(0xFF7C3AED).withOpacity(0.08) : Colors.white),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isPaid ? Colors.green[300]! : (isSelected ? const Color(0xFF7C3AED) : Colors.grey[200]!),
+            width: isSelected ? 2 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            // Checkbox
+            if (!isPaid)
+              Container(
+                width: 24, height: 24,
+                margin: const EdgeInsets.only(right: 10),
+                decoration: BoxDecoration(
+                  color: isSelected ? const Color(0xFF7C3AED) : Colors.white,
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: isSelected ? const Color(0xFF7C3AED) : Colors.grey[300]!, width: 2),
+                ),
+                child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 16) : null,
+              ),
+            // Miktar
+            Container(
+              width: 28, height: 28,
+              decoration: BoxDecoration(
+                color: isPaid ? Colors.green : theme.primaryColor,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Center(child: Text('$qty', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))),
+            ),
+            const SizedBox(width: 10),
+            // Ürün adı
+            Expanded(
+              child: Text(
+                item['product_name']?.toString() ?? '',
+                style: TextStyle(
+                  fontWeight: FontWeight.w500,
+                  color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+                ),
+              ),
+            ),
+            // Badge (ödenmişse)
+            if (isPaid)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                margin: const EdgeInsets.only(right: 8),
+                decoration: BoxDecoration(
+                  color: paymentMethod == 'CASH' ? Colors.green : Colors.blue,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  paymentMethod == 'CASH' ? 'NAKİT' : 'KART',
+                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                ),
+              ),
+            // Fiyat
+            Text(
+              '${price.toStringAsFixed(2)} TL',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPayBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+  }) {
+    final isDisabled = onTap == null;
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerUp: isDisabled ? null : (_) => onTap(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          color: isDisabled ? Colors.grey[200] : color,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 16),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: isDisabled ? Colors.grey[400] : Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -417,19 +417,47 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Hesap kapat
+  /// Hesap kapat — tüm ürünleri ödeyerek kapat
   Future<void> _closeTicket(String paymentMethod) async {
-    final label = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti';
+    // Ödenmemiş ürünleri bul
+    await _loadTicketItems();
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    final unpaidItems = activeItems.where((i) => i['payment_status'] != 'paid').toList();
+    final unpaidIds = unpaidItems.map((i) => (i['id'] as num).toInt()).toList();
+
+    if (unpaidIds.isEmpty) {
+      // Tüm ürünler zaten ödendi, direkt kapat
+      try {
+        await widget.apiService.closeTicket(
+          ticketId: widget.ticketId,
+          paymentMethod: paymentMethod,
+          waiterId: widget.waiterId,
+        );
+        _showSuccess('Hesap kapatıldı');
+        widget.onItemAdded();
+        widget.onClose();
+      } catch (e) {
+        _showError('Hesap kapatılamadı: $e');
+      }
+      return;
+    }
+
+    final label = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı';
+    double unpaidTotal = 0;
+    for (var item in unpaidItems) {
+      unpaidTotal += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+    }
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Hesap Kapat'),
-        content: Text('$label ile hesap kapatılacak. Emin misiniz?'),
+        content: Text('${unpaidIds.length} ürün ${unpaidTotal.toStringAsFixed(2)} TL $label ile ödenecek ve hesap kapatılacak.\n\nDevam edilsin mi?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: Text('Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue)),
+            child: Text('Öde ve Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -437,15 +465,20 @@ class _AddItemModalState extends State<AddItemModal> {
     if (confirmed != true) return;
 
     try {
-      await widget.apiService.closeTicket(
+      final result = await widget.apiService.payItems(
         ticketId: widget.ticketId,
+        itemIds: unpaidIds,
         paymentMethod: paymentMethod,
         waiterId: widget.waiterId,
       );
 
-      _showSuccess('Hesap kapatıldı');
-      widget.onItemAdded();
-      widget.onClose();
+      if (result['success'] == true) {
+        _showSuccess('Hesap kapatıldı');
+        widget.onItemAdded();
+        widget.onClose();
+      } else {
+        _showError(result['error'] ?? 'Ödeme başarısız');
+      }
     } catch (e) {
       _showError('Hesap kapatılamadı: $e');
     }
@@ -1458,17 +1491,42 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
 
   Future<void> _closeAll(String paymentMethod) async {
     if (_isProcessing) return;
+
+    final unpaidIds = _items
+        .where((i) => i['payment_status'] != 'paid')
+        .map((i) => i['id'] as int)
+        .toList();
+
+    if (unpaidIds.isEmpty) return;
+
+    // Toplam tutarı hesapla
+    double unpaidTotal = 0;
+    for (var item in _items) {
+      if (item['payment_status'] != 'paid') {
+        unpaidTotal += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+      }
+    }
+
+    final label = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Adisyon Kapat'),
+        content: Text('${unpaidIds.length} ürün ${unpaidTotal.toStringAsFixed(2)} TL $label ile ödenecek ve adisyon kapatılacak.\n\nDevam edilsin mi?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('Öde ve Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
     setState(() => _isProcessing = true);
 
     try {
-      // Ödenmemiş tüm ürünleri seç ve öde
-      final unpaidIds = _items
-          .where((i) => i['payment_status'] != 'paid')
-          .map((i) => i['id'] as int)
-          .toList();
-
-      if (unpaidIds.isEmpty) return;
-
       final result = await widget.apiService.payItems(
         ticketId: widget.ticketId,
         itemIds: unpaidIds,

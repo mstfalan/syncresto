@@ -479,6 +479,9 @@ class _AddItemModalState extends State<AddItemModal> {
   /// Mutfağa gönder
   Future<void> _sendToKitchen() async {
     if (widget.printerService == null) return;
+
+    final hasSummaryPrinter = widget.section?['summary_printer_id'] != null;
+
     try {
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
@@ -489,7 +492,6 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
       final items = result['items'] as List? ?? [];
-      final printerGroups = result['printerGroups'] as List? ?? [];
       final ticketInfo = result['ticket'] as Map<String, dynamic>? ?? {};
 
       ticketInfo['table_number'] = widget.table?['table_number'] ?? 'Masa ${widget.table?['id'] ?? ''}';
@@ -501,30 +503,35 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
-      int successCount = 0;
-      for (final group in printerGroups) {
-        final printerIp = group['printer_ip'] as String?;
-        final printerPort = group['printer_port'] as int? ?? 9100;
-        final groupItems = group['items'] as List? ?? [];
-        if (groupItems.isEmpty) continue;
+      if (hasSummaryPrinter) {
+        // Salon özet yazıcısı var → sadece özet fiş, kategori fişleri yok
+        try { await _printSummaryReceipt(''); } catch (_) {}
+        _showSuccess('Özet fiş gönderildi (${items.length} ürün)');
+      } else {
+        // Salon özet yazıcısı yok → kategori bazlı mutfak fişleri
+        final printerGroups = result['printerGroups'] as List? ?? [];
+        int successCount = 0;
+        for (final group in printerGroups) {
+          final printerIp = group['printer_ip'] as String?;
+          final printerPort = group['printer_port'] as int? ?? 9100;
+          final groupItems = group['items'] as List? ?? [];
+          if (groupItems.isEmpty) continue;
 
-        bool success = false;
-        if (printerIp != null && printerIp.isNotEmpty) {
-          success = await widget.printerService!.printKitchenReceiptToIp(
-            ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
-          );
-        } else {
-          success = await widget.printerService!.printKitchenReceipt(
-            ticket: ticketInfo, items: groupItems,
-          );
+          bool success = false;
+          if (printerIp != null && printerIp.isNotEmpty) {
+            success = await widget.printerService!.printKitchenReceiptToIp(
+              ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+            );
+          } else {
+            success = await widget.printerService!.printKitchenReceipt(
+              ticket: ticketInfo, items: groupItems,
+            );
+          }
+          if (success) successCount += groupItems.length;
         }
-        if (success) successCount += groupItems.length;
+        _showSuccess('Mutfağa gönderildi ($successCount ürün)');
       }
 
-      // Salon özet fişi (salon yazıcısı tanımlıysa tüm ürünlerle)
-      try { await _printSummaryReceipt(''); } catch (_) {}
-
-      _showSuccess('Mutfağa gönderildi ($successCount ürün)');
       await _loadTicketItems();
       widget.onItemAdded();
     } catch (e) {

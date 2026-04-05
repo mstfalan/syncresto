@@ -701,6 +701,28 @@ class _AddItemModalState extends State<AddItemModal> {
     Future.delayed(const Duration(seconds: 3), () => entry.remove());
   }
 
+  double get _paidTotal {
+    double total = 0;
+    for (var item in _ticketItems) {
+      if (item['status'] == 'cancelled') continue;
+      if (item['payment_status'] == 'paid') {
+        total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+      }
+    }
+    return total;
+  }
+
+  double get _unpaidTotal {
+    double total = 0;
+    for (var item in _ticketItems) {
+      if (item['status'] == 'cancelled') continue;
+      if (item['payment_status'] != 'paid') {
+        total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+      }
+    }
+    return total;
+  }
+
   double get _ticketTotal {
     double total = 0;
     for (var item in _ticketItems) {
@@ -1058,18 +1080,39 @@ class _AddItemModalState extends State<AddItemModal> {
                   ),
           ),
 
-          // Toplam
+          // Toplam + ödeme durumu
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: Colors.grey[50],
               border: Border(top: BorderSide(color: Colors.grey[200]!)),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            child: Column(
               children: [
-                Text('TOPLAM', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey[800])),
-                Text('${_ticketTotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: theme.primaryColor)),
+                if (_paidTotal > 0) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Ödenen', style: TextStyle(fontSize: 11, color: Colors.green[700])),
+                      Text('${_paidTotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.green[700])),
+                    ],
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Kalan', style: TextStyle(fontSize: 11, color: Colors.orange[700])),
+                      Text('${_unpaidTotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.orange[700])),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                ],
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('TOPLAM', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey[800])),
+                    Text('${_ticketTotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: theme.primaryColor)),
+                  ],
+                ),
               ],
             ),
           ),
@@ -1086,6 +1129,8 @@ class _AddItemModalState extends State<AddItemModal> {
     final unitPrice = _safeDouble(item['unit_price']);
     final total = unitPrice * quantity;
     final notes = item['notes'] as String?;
+    final isPaid = item['payment_status'] == 'paid';
+    final payMethod = item['payment_method']?.toString().toUpperCase() ?? '';
 
     return Listener(
       behavior: HitTestBehavior.opaque,
@@ -1093,7 +1138,9 @@ class _AddItemModalState extends State<AddItemModal> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
-          color: isSelected ? theme.primaryColor.withOpacity(0.08) : Colors.transparent,
+          color: isPaid
+              ? Colors.green[50]
+              : (isSelected ? theme.primaryColor.withOpacity(0.08) : Colors.transparent),
           border: Border(
             bottom: BorderSide(color: Colors.grey[100]!),
             left: isSelected ? BorderSide(color: theme.primaryColor, width: 3) : BorderSide.none,
@@ -1105,7 +1152,10 @@ class _AddItemModalState extends State<AddItemModal> {
             Container(
               width: 24,
               height: 24,
-              decoration: BoxDecoration(color: theme.primaryColor, borderRadius: BorderRadius.circular(5)),
+              decoration: BoxDecoration(
+                color: isPaid ? Colors.green : theme.primaryColor,
+                borderRadius: BorderRadius.circular(5),
+              ),
               child: Center(child: Text('$quantity', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))),
             ),
             const SizedBox(width: 6),
@@ -1117,15 +1167,39 @@ class _AddItemModalState extends State<AddItemModal> {
                     item['product_name']?.toString() ?? '',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Color(0xFF1F2937)),
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+                    ),
                   ),
                   if (notes != null && notes.isNotEmpty)
                     Text(notes, style: TextStyle(fontSize: 10, color: Colors.grey[500], fontStyle: FontStyle.italic)),
+                  if (isPaid)
+                    Container(
+                      margin: const EdgeInsets.only(top: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: payMethod == 'CASH' ? Colors.green : Colors.blue,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: Text(
+                        payMethod == 'CASH' ? 'NAKİT' : 'KART',
+                        style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold),
+                      ),
+                    ),
                 ],
               ),
             ),
             const SizedBox(width: 4),
-            Text('${total.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+            Text(
+              '${total.toStringAsFixed(2)}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+              ),
+            ),
           ],
         ),
       ),
@@ -1560,11 +1634,11 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
 
     return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.all(40),
+      insetPadding: const EdgeInsets.all(16),
       child: Scaffold(
         body: Container(
-          width: MediaQuery.of(context).size.width * 0.7,
-          height: MediaQuery.of(context).size.height * 0.8,
+          width: MediaQuery.of(context).size.width * 0.9,
+          height: MediaQuery.of(context).size.height * 0.9,
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(16),
@@ -1651,7 +1725,7 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
 
                     // Sağ: Özet + butonlar
                     Container(
-                      width: 240,
+                      width: 220,
                       decoration: BoxDecoration(
                         color: Colors.grey[50],
                         border: Border(left: BorderSide(color: Colors.grey[200]!)),

@@ -995,33 +995,13 @@ class _TablesScreenState extends State<TablesScreen> {
                 // Parçalı ödeme varsa ödenen/kalan göster
                 if (hasPartialPayment) ...[
                   const SizedBox(height: 4),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.green.withOpacity(0.8),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          '${paidTotal.toStringAsFixed(0)}',
-                          style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.8),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          '${unpaidTotal.toStringAsFixed(0)}',
-                          style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
+                  Text(
+                    'Ödenen: ${paidTotal.toStringAsFixed(2)} TL',
+                    style: TextStyle(color: Colors.green[200], fontSize: 10, fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    'Kalan: ${unpaidTotal.toStringAsFixed(2)} TL',
+                    style: TextStyle(color: Colors.orange[200], fontSize: 10, fontWeight: FontWeight.w600),
                   ),
                 ],
               ],

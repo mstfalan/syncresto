@@ -155,7 +155,7 @@ class _PosScreenState extends State<PosScreen> {
         ticketId: _currentTicket!['id'],
         productId: product['id'],
         productName: product['name'],
-        unitPrice: (product['price'] as num).toDouble(),
+        unitPrice: ((product['restaurant_price'] != null && product['restaurant_price'] != 0 ? product['restaurant_price'] : product['price']) as num).toDouble(),
         waiterId: widget.waiter['id'],
       );
 
@@ -593,8 +593,8 @@ class _PosScreenState extends State<PosScreen> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '${product['price']} TL',
-                                style: const TextStyle(
+                                '${(product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']} TL',
+                                style: TextStyle(
                                   color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
                                   fontWeight: FontWeight.bold,
                                   fontSize: 14,

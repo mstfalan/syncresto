@@ -74,8 +74,8 @@ class SyncService {
       }
     });
 
-    // Periyodik cache güncelleme (her 5 dakika)
-    Timer.periodic(const Duration(minutes: 5), (_) {
+    // Periyodik cache güncelleme (her 30 saniye - fiyat degisikliklerini hizli yakala)
+    Timer.periodic(const Duration(seconds: 30), (_) {
       if (_connectivity.isOnline) {
         backgroundCacheUpdate();
       }
@@ -369,7 +369,7 @@ class SyncService {
   /// İki ürün arasında değişiklik var mı kontrol et
   bool _isProductChanged(Map<String, dynamic> cached, Map<String, dynamic> newProduct) {
     // Önemli alanları karşılaştır
-    final fieldsToCheck = ['name', 'price', 'description', 'image', 'is_active', 'is_out_of_stock', 'category_id'];
+    final fieldsToCheck = ['name', 'price', 'restaurant_price', 'description', 'image', 'is_active', 'is_out_of_stock', 'category_id'];
 
     for (final field in fieldsToCheck) {
       if (cached[field]?.toString() != newProduct[field]?.toString()) {

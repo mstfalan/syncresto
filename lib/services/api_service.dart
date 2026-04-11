@@ -496,6 +496,7 @@ class ApiService {
     int? quantity,
     String? notes,
     int? waiterId,
+    double? unitPrice,
   }) async {
     if (_connectivity.isOnline) {
       try {
@@ -503,6 +504,7 @@ class ApiService {
           if (quantity != null) 'quantity': quantity,
           if (notes != null) 'notes': notes,
           if (waiterId != null) 'waiter_id': waiterId,
+          if (unitPrice != null) 'unit_price': unitPrice,
         });
         if (response.data['success'] == true) {
           _logService.logAction('Urun guncellendi', details: {
@@ -701,6 +703,34 @@ class ApiService {
     }
   }
 
+  Future<List<dynamic>> getGlobalVariants({int? categoryId}) async {
+    if (!_connectivity.isOnline) return [];
+    try {
+      final url = categoryId != null
+          ? '/api/pos/global/variants/active?category_id=$categoryId'
+          : '/api/pos/global/variants/active';
+      final response = await _dio.get(url);
+      return response.data as List? ?? [];
+    } catch (e) {
+      print('[API] getGlobalVariants error: $e');
+      return [];
+    }
+  }
+
+  Future<List<dynamic>> getGlobalExtras({int? categoryId}) async {
+    if (!_connectivity.isOnline) return [];
+    try {
+      final url = categoryId != null
+          ? '/api/pos/global/extras/active?category_id=$categoryId'
+          : '/api/pos/global/extras/active';
+      final response = await _dio.get(url);
+      return response.data as List? ?? [];
+    } catch (e) {
+      print('[API] getGlobalExtras error: $e');
+      return [];
+    }
+  }
+
   /// Parçalı ödeme - seçili ürünleri öde
   Future<Map<String, dynamic>> payItems({
     required int ticketId,
@@ -753,6 +783,25 @@ class ApiService {
     } catch (e) {
       print('[API] transferTable error: $e');
       _logService.error(LogType.error, 'Masa degistirme hatasi', error: e, details: {'ticket_id': ticketId, 'new_table_id': newTableId});
+      return {'success': false, 'error': e.toString()};
+    }
+  }
+
+  Future<Map<String, dynamic>> applyDiscount({
+    required int ticketId,
+    required String discountType,
+    required double discountValue,
+    required int waiterId,
+  }) async {
+    try {
+      final response = await _dio.post('/api/pos/tickets/$ticketId/discount', data: {
+        'discount_type': discountType,
+        'discount_value': discountValue,
+        'waiter_id': waiterId,
+      });
+      return Map<String, dynamic>.from(response.data);
+    } catch (e) {
+      print('[API] applyDiscount error: $e');
       return {'success': false, 'error': e.toString()};
     }
   }

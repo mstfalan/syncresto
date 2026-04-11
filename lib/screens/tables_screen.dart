@@ -927,9 +927,8 @@ class _TablesScreenState extends State<TablesScreen> {
     final unpaidTotal = table['unpaid_total'] is num ? (table['unpaid_total'] as num).toDouble() : 0.0;
     final hasPartialPayment = paidTotal > 0 && unpaidTotal > 0;
 
-    return Listener(
-      behavior: HitTestBehavior.opaque,
-      onPointerUp: (_) => _openTable(table),
+    return GestureDetector(
+      onTap: () => _openTable(table),
       child: Container(
           decoration: BoxDecoration(
             gradient: isOccupied ? theme.backgroundGradient : null,

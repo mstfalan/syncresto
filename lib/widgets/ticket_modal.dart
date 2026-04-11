@@ -139,15 +139,15 @@ class _TicketModalState extends State<TicketModal> {
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Hesap Kapat'),
-        content: Text('${paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti'} ile hesap kapatilacak. Emin misiniz?'),
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hesap Kapat', style: TextStyle(fontSize: 22)),
+        content: Text('${paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti'} ile hesap kapatilacak. Emin misiniz?', style: const TextStyle(fontSize: 16)),
+        actionsAlignment: MainAxisAlignment.spaceEvenly,
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Iptal')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text('Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue)),
-          ),
+          SizedBox(width: 150, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, false), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87), child: const Text('İptal', style: TextStyle(fontSize: 18)))),
+          SizedBox(width: 200, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, true), style: ElevatedButton.styleFrom(backgroundColor: paymentMethod == 'cash' ? Colors.green : Colors.blue, foregroundColor: Colors.white), child: const Text('Kapat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)))),
         ],
       ),
     );
@@ -185,21 +185,22 @@ class _TicketModalState extends State<TicketModal> {
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Yazdir ve Kapat'),
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Yazdir ve Kapat', style: TextStyle(fontSize: 22)),
         content: Text(
           '${paymentMethod == 'cash' ? 'Nakit' : 'Kredi Karti'} ile hesap kapatilacak.\n\n'
           '• Mutfaga siparis gonderilecek\n'
           '• Ozet fis yazdirilacak\n'
           '• Hesap kapatilacak\n\n'
-          'Devam edilsin mi?'
+          'Devam edilsin mi?',
+          style: const TextStyle(fontSize: 16),
         ),
+        actionsAlignment: MainAxisAlignment.spaceEvenly,
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Iptal')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text('Yazdir ve Kapat', style: TextStyle(color: paymentMethod == 'cash' ? Colors.green : Colors.blue)),
-          ),
+          SizedBox(width: 150, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, false), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87), child: const Text('İptal', style: TextStyle(fontSize: 18)))),
+          SizedBox(width: 200, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, true), style: ElevatedButton.styleFrom(backgroundColor: paymentMethod == 'cash' ? Colors.green : Colors.blue, foregroundColor: Colors.white), child: const Text('Yazdır ve Kapat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)))),
         ],
       ),
     );
@@ -385,15 +386,15 @@ class _TicketModalState extends State<TicketModal> {
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Adisyon Iptal'),
-        content: const Text('Adisyon iptal edilecek. Bu islem geri alinamaz. Emin misiniz?'),
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Adisyon İptal', style: TextStyle(fontSize: 22, color: Colors.red)),
+        content: const Text('Adisyon iptal edilecek. Bu işlem geri alınamaz. Emin misiniz?', style: TextStyle(fontSize: 16)),
+        actionsAlignment: MainAxisAlignment.spaceEvenly,
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgec')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Iptal Et', style: TextStyle(color: Colors.red)),
-          ),
+          SizedBox(width: 150, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, false), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87), child: const Text('Vazgeç', style: TextStyle(fontSize: 18)))),
+          SizedBox(width: 200, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, true), style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white), child: const Text('İptal Et', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)))),
         ],
       ),
     );
@@ -423,15 +424,15 @@ class _TicketModalState extends State<TicketModal> {
   Future<void> _cancelItem(int itemId) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Urun Iptal'),
-        content: const Text('Bu urun iptal edilecek. Emin misiniz?'),
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ürün İptal', style: TextStyle(fontSize: 22, color: Colors.red)),
+        content: const Text('Bu ürün iptal edilecek. Emin misiniz?', style: TextStyle(fontSize: 16)),
+        actionsAlignment: MainAxisAlignment.spaceEvenly,
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgec')),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Iptal Et', style: TextStyle(color: Colors.red)),
-          ),
+          SizedBox(width: 150, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, false), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87), child: const Text('Vazgeç', style: TextStyle(fontSize: 18)))),
+          SizedBox(width: 200, height: 56, child: ElevatedButton(onPressed: () => Navigator.pop(ctx, true), style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white), child: const Text('İptal Et', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)))),
         ],
       ),
     );
@@ -850,202 +851,64 @@ class _TicketModalState extends State<TicketModal> {
 
   Widget _buildEmptyTicket() {
     final theme = Provider.of<ThemeProvider>(context, listen: false);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(32),
+
+    Widget buildCountButton(int count) {
+      return Expanded(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            setState(() => _customerCount = count);
+            if (_hasPermission('open_ticket')) _openTicket();
+          },
+          child: Container(
+            height: 80,
+            margin: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.grey[300]!, width: 2),
+            ),
+            child: Center(
+              child: Text('$count', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.receipt_long, size: 80, color: Colors.grey[300]),
+          Icon(Icons.receipt_long, size: 64, color: Colors.grey[300]),
+          const SizedBox(height: 16),
+          Text('Masa Boş', style: TextStyle(color: Colors.grey[800], fontSize: 22, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          Text('Kişi sayısına dokunarak adisyon açın', style: TextStyle(color: Colors.grey[500], fontSize: 14)),
           const SizedBox(height: 24),
-          Text(
-            'Masa bos',
-            style: TextStyle(
-              color: Colors.grey[800],
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Adisyon acmak icin butona tiklayin',
-            style: TextStyle(color: Colors.grey[600]),
-          ),
-
-          const SizedBox(height: 32),
-
-          // Customer count - 1-10 arası butonlar
           Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.grey[100],
-              borderRadius: BorderRadius.circular(12),
-            ),
+            width: 420,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(color: Colors.grey[50], borderRadius: BorderRadius.circular(16)),
             child: Column(
               children: [
-                Text(
-                  'Kisi Sayisi',
-                  style: TextStyle(
-                    color: Colors.grey[700],
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                // İlk satır: 1-5
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(5, (index) {
-                    final count = index + 1;
-                    final isSelected = _customerCount == count;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => setState(() => _customerCount = count),
-                        child: Container(
-                          width: 64,
-                          height: 64,
-                          decoration: BoxDecoration(
-                            color: isSelected ? theme.primaryColor : Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: isSelected ? theme.primaryColor : Colors.grey[300]!,
-                              width: 2,
-                            ),
-                            boxShadow: isSelected
-                                ? [
-                                    BoxShadow(
-                                      color: theme.primaryColor.withOpacity(0.3),
-                                      blurRadius: 8,
-                                      offset: const Offset(0, 2),
-                                    )
-                                  ]
-                                : null,
-                          ),
-                          child: Center(
-                            child: Text(
-                              '$count',
-                              style: TextStyle(
-                                color: isSelected ? Colors.white : const Color(0xFF1F2937),
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
-                const SizedBox(height: 8),
-                // İkinci satır: 6-10
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(5, (index) {
-                    final count = index + 6;
-                    final isSelected = _customerCount == count;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => setState(() => _customerCount = count),
-                        child: Container(
-                          width: 64,
-                          height: 64,
-                          decoration: BoxDecoration(
-                            color: isSelected ? theme.primaryColor : Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: isSelected ? theme.primaryColor : Colors.grey[300]!,
-                              width: 2,
-                            ),
-                            boxShadow: isSelected
-                                ? [
-                                    BoxShadow(
-                                      color: theme.primaryColor.withOpacity(0.3),
-                                      blurRadius: 8,
-                                      offset: const Offset(0, 2),
-                                    )
-                                  ]
-                                : null,
-                          ),
-                          child: Center(
-                            child: Text(
-                              '$count',
-                              style: TextStyle(
-                                color: isSelected ? Colors.white : const Color(0xFF1F2937),
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  }),
-                ),
+                Row(children: List.generate(5, (i) => buildCountButton(i + 1))),
+                Row(children: List.generate(5, (i) => buildCountButton(i + 6))),
               ],
             ),
           ),
-
-          const SizedBox(height: 32),
-
-          // Open ticket button - open_ticket yetkisi gerekli
-          if (_hasPermission('open_ticket'))
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _openTicket,
-              child: Container(
-                width: 360,
-                height: 72,
-                decoration: BoxDecoration(
-                  color: theme.primaryColor,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: theme.primaryColor.withOpacity(0.3),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.receipt_long, color: Colors.white, size: 28),
-                    SizedBox(width: 12),
-                    Text(
-                      'Adisyon Ac',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          else
+          if (!_hasPermission('open_ticket')) ...[
+            const SizedBox(height: 16),
             Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.orange[50],
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.orange[200]!),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.warning_amber, color: Colors.orange[700], size: 20),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Adisyon acma yetkiniz yok',
-                    style: TextStyle(color: Colors.orange[700], fontWeight: FontWeight.w500),
-                  ),
-                ],
-              ),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.orange[50], borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.orange[200]!)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.warning_amber, color: Colors.orange[700], size: 20),
+                const SizedBox(width: 8),
+                Text('Adisyon açma yetkiniz yok', style: TextStyle(color: Colors.orange[700], fontWeight: FontWeight.w500)),
+              ]),
             ),
+          ],
         ],
       ),
     );

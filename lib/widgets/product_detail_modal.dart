@@ -67,7 +67,10 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
     super.dispose();
   }
 
-  double get _basePrice => _safeDouble(widget.product['price']);
+  double get _basePrice {
+    final rp = widget.product['restaurant_price'];
+    return _safeDouble((rp != null && rp != 0 && rp != 0.0) ? rp : widget.product['price']);
+  }
 
   double get _extrasTotal {
     double total = 0;

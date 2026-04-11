@@ -529,15 +529,19 @@ class PrinterService {
       );
 
       socket.add(bytes);
-      await socket.flush();
-      await socket.close();
+      await socket.flush().timeout(const Duration(seconds: 5), onTimeout: () {
+        print('[Printer] flush timeout - $ip:$port');
+      });
+      await socket.close().timeout(const Duration(seconds: 3), onTimeout: () {
+        print('[Printer] close timeout - $ip:$port');
+      });
 
       return true;
     } catch (e) {
-      print('[Printer] TCP gonderim hatasi: $e');
+      print('[Printer] TCP gonderim hatasi ($ip:$port): $e');
       return false;
     } finally {
-      socket?.destroy();
+      try { socket?.destroy(); } catch (_) {}
     }
   }
 

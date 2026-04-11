@@ -34,7 +34,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 3, // v3: print_queue tablosu eklendi
+      version: 4, // v4: restaurant_price eklendi
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -61,6 +61,7 @@ class LocalDbService {
         name TEXT NOT NULL,
         description TEXT,
         price REAL NOT NULL,
+        restaurant_price REAL,
         image TEXT,
         is_active INTEGER DEFAULT 1,
         is_out_of_stock INTEGER DEFAULT 0,
@@ -239,6 +240,7 @@ class LocalDbService {
 
     if (oldVersion < 3) {
       // v3: print_queue tablosu ekle
+
       try {
         await db.execute('''
           CREATE TABLE print_queue (
@@ -261,6 +263,16 @@ class LocalDbService {
         print('[LocalDb] print_queue tablosu eklendi');
       } catch (e) {
         print('[LocalDb] print_queue zaten var: $e');
+      }
+    }
+
+    if (oldVersion < 4) {
+      // v4: cached_products'a restaurant_price ekle
+      try {
+        await db.execute('ALTER TABLE cached_products ADD COLUMN restaurant_price REAL');
+        print('[LocalDb] cached_products.restaurant_price eklendi');
+      } catch (e) {
+        print('[LocalDb] restaurant_price zaten var: $e');
       }
     }
   }
@@ -307,6 +319,7 @@ class LocalDbService {
           'name': prod['name'],
           'description': prod['description'],
           'price': prod['price'],
+          'restaurant_price': prod['restaurant_price'],
           'image': prod['image'],
           'is_active': prod['is_active'] ?? 1,
           'is_out_of_stock': prod['is_out_of_stock'] ?? 0,

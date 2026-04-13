@@ -571,17 +571,12 @@ class _TicketModalState extends State<TicketModal> {
         }
       }
 
-      // Sonucu göster
-      if (failCount == 0) {
-        _showSuccess('Mutfaga gonderildi ($successCount urun)');
-      } else if (successCount > 0) {
-        _showError('$successCount urun gonderildi, $failCount urun gonderilemedi');
-      } else {
-        _showError('Yazici hatasi - hicbir urun gonderilemedi');
+      // API başarılı = ürünler mutfağa gönderildi, masalar ekranına dön
+      // Yazıcı hatası olsa bile DB'de printed=1 olarak işaretlendi
+      if (failCount > 0) {
+        print('[TicketModal] Yazici hatasi: $failCount urun yazdirilamadi');
       }
-
-      // Ticket'ı yenile
-      await _loadTicket();
+      widget.onClose();
     } catch (e) {
       print('[TicketModal] Mutfaga gonderme hatasi: $e');
       _showError('Hata: $e');

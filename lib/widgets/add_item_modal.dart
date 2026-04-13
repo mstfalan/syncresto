@@ -631,37 +631,27 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
-      if (hasSummaryPrinter) {
-        // Salon özet yazıcısı var → sadece özet fiş, kategori fişleri yok
-        try { await _printSummaryReceipt(''); } catch (_) {}
-        _showSuccess('Özet fiş gönderildi (${items.length} ürün)');
-      } else {
-        // Salon özet yazıcısı yok → kategori bazlı mutfak fişleri
-        final printerGroups = result['printerGroups'] as List? ?? [];
-        int successCount = 0;
-        for (final group in printerGroups) {
-          final printerIp = group['printer_ip'] as String?;
-          final printerPort = group['printer_port'] as int? ?? 9100;
-          final groupItems = group['items'] as List? ?? [];
-          if (groupItems.isEmpty) continue;
+      // printerGroups ile tüm yazıcılara gönder (özet yazıcı dahil)
+      final printerGroups = result['printerGroups'] as List? ?? [];
+      for (final group in printerGroups) {
+        final printerIp = group['printer_ip'] as String?;
+        final printerPort = group['printer_port'] as int? ?? 9100;
+        final groupItems = group['items'] as List? ?? [];
+        if (groupItems.isEmpty) continue;
 
-          bool success = false;
-          if (printerIp != null && printerIp.isNotEmpty) {
-            success = await widget.printerService!.printKitchenReceiptToIp(
-              ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
-            );
-          } else {
-            success = await widget.printerService!.printKitchenReceipt(
-              ticket: ticketInfo, items: groupItems,
-            );
-          }
-          if (success) successCount += groupItems.length;
+        if (printerIp != null && printerIp.isNotEmpty) {
+          await widget.printerService!.printKitchenReceiptToIp(
+            ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+          );
+        } else {
+          await widget.printerService!.printKitchenReceipt(
+            ticket: ticketInfo, items: groupItems,
+          );
         }
-        _showSuccess('Mutfağa gönderildi ($successCount ürün)');
       }
 
-      await _loadTicketItems();
-      widget.onItemAdded();
+      // Masalar ekranına dön
+      if (mounted) Navigator.of(context).pop();
     } catch (e) {
       _showError('Mutfağa gönderilemedi: $e');
     }

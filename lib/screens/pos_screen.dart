@@ -223,15 +223,10 @@ class _PosScreenState extends State<PosScreen> {
     }
   }
 
-  /// Mutfağa gönder - sadece yazdırılmamış ürünleri yazıcıya gönderir
+  /// Mutfağa gönder - yazıcı gruplarına göre ürünleri ilgili yazıcılara gönderir
   Future<void> _sendToKitchen() async {
     if (_currentTicket == null) {
       _showError('Adisyon yok');
-      return;
-    }
-
-    if (!widget.printerService.isConfigured) {
-      _showError('Yazici ayarlanmamis. Ayarlar\'dan yazici ekleyin.');
       return;
     }
 
@@ -248,6 +243,7 @@ class _PosScreenState extends State<PosScreen> {
       }
 
       final items = result['items'] as List? ?? [];
+      final printerGroups = result['printerGroups'] as List? ?? [];
       final ticket = result['ticket'] as Map<String, dynamic>? ?? _currentTicket!;
 
       if (items.isEmpty) {
@@ -255,21 +251,65 @@ class _PosScreenState extends State<PosScreen> {
         return;
       }
 
-      // Yazıcıya gönder
-      final success = await widget.printerService.printKitchenReceipt(
-        ticket: ticket,
-        items: items,
-      );
+      // Her yazıcı grubuna ayrı fiş gönder
+      int successCount = 0;
+      int failCount = 0;
 
-      if (success) {
-        _showSuccess('Mutfaga gonderildi (${items.length} urun)');
-        // Ticket'ı yenile (items'daki printed flag güncellendi)
-        final response = await widget.apiService.getTableTicket(_selectedTable!['id']);
-        if (response != null && response['ticket'] != null) {
-          setState(() => _currentTicket = response['ticket']);
+      for (final group in printerGroups) {
+        final printerIp = group['printer_ip'] as String?;
+        final printerPort = group['printer_port'] as int? ?? 9100;
+        final groupItems = group['items'] as List? ?? [];
+        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+
+        if (groupItems.isEmpty) continue;
+
+        bool success = false;
+
+        if (printerIp != null && printerIp.isNotEmpty) {
+          // Sunucudan gelen yazıcı bilgileriyle yazdır
+          success = await widget.printerService.printKitchenReceiptToIp(
+            ticket: ticket,
+            items: groupItems,
+            ip: printerIp,
+            port: printerPort,
+          );
+        } else {
+          // Varsayılan yazıcıya gönder
+          success = await widget.printerService.printKitchenReceipt(
+            ticket: ticket,
+            items: groupItems,
+          );
         }
+
+        if (success) {
+          successCount += groupItems.length;
+          print('[POS] $printerName yazicisina ${groupItems.length} urun gonderildi');
+        } else {
+          failCount += groupItems.length;
+          print('[POS] $printerName yazicisina gonderilemedi');
+        }
+      }
+
+      // printerGroups boşsa ama items varsa, fallback olarak local yazıcıya gönder
+      if (printerGroups.isEmpty && items.isNotEmpty) {
+        final success = await widget.printerService.printKitchenReceipt(
+          ticket: ticket,
+          items: items,
+        );
+        if (success) {
+          successCount = items.length;
+        } else {
+          failCount = items.length;
+        }
+      }
+
+      // Sonucu göster ve masalar ekranına dön
+      if (failCount == 0 && successCount > 0) {
+        if (mounted) Navigator.pop(context);
+      } else if (successCount > 0) {
+        _showError('$successCount urun gonderildi, $failCount urun gonderilemedi');
       } else {
-        _showError('Yazici hatasi');
+        _showError('Yazici hatasi - hicbir urun gonderilemedi');
       }
     } catch (e) {
       print('[POS] Mutfaga gonderme hatasi: $e');

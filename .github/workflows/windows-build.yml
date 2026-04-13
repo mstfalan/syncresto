@@ -1,4 +1,4 @@
-name: Windows Build
+name: Windows Build & Release
 
 on:
   push:
@@ -12,6 +12,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Get version from pubspec
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -33,9 +41,33 @@ jobs:
           cd build/windows/x64/runner/Release
           Compress-Archive -Path * -DestinationPath ../../../../../SyncResto-Windows.zip
 
-      - name: Upload Windows Build
+      - name: Upload Windows Build (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: SyncResto-Windows
           path: SyncResto-Windows.zip
           retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: SyncResto POS v${{ steps.version.outputs.version }}
+          body: |
+            ## SyncResto POS v${{ steps.version.outputs.version }}
+
+            ### Windows
+            - `SyncResto-Windows.zip` dosyasini indirip cikartin
+
+            ### Degisiklikler
+            - Yazici gruplari: her urun kendi atanmis yazicisina gidiyor
+            - Salon ozet fis yazicisi destegi
+            - Mutfaga gonder sonrasi masalar ekranina otomatik donus
+            - Lisans sistemi birlestirildi
+            - CloudFlare CDN ve cache optimizasyonu
+            - Custom domain destegi
+          files: SyncResto-Windows.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -53,7 +53,13 @@ class _SetupScreenState extends State<SetupScreen> {
     });
 
     try {
-      final apiUrl = _apiUrlController.text.trim();
+      var apiUrl = _apiUrlController.text.trim();
+      if (apiUrl.startsWith('http://')) {
+        apiUrl = apiUrl.replaceFirst('http://', 'https://');
+      }
+      if (!apiUrl.startsWith('https://')) {
+        apiUrl = 'https://$apiUrl';
+      }
       widget.apiService.setBaseUrl(apiUrl);
       final result = await widget.apiService.validateApiKey(apiKey);
 
@@ -62,9 +68,11 @@ class _SetupScreenState extends State<SetupScreen> {
         await widget.storageService.saveApiKey(apiKey, result['restaurant_name'] ?? 'POS');
 
         // Save backend URL for images/assets
-        if (result['backend_url'] != null) {
-          await widget.storageService.saveBackendUrl(result['backend_url']);
-          widget.apiService.setBackendUrl(result['backend_url']);
+        // image_base_url: backend_url varsa onu, yoksa panel.syncresto.com'u kullan
+        final imageBaseUrl = result['image_base_url'] ?? result['backend_url'];
+        if (imageBaseUrl != null) {
+          await widget.storageService.saveBackendUrl(imageBaseUrl);
+          widget.apiService.setBackendUrl(imageBaseUrl);
         }
 
         if (mounted) {
@@ -82,7 +90,11 @@ class _SetupScreenState extends State<SetupScreen> {
         }
       } else {
         setState(() {
-          _errorMessage = result['error'] ?? 'Gecersiz API Key';
+          if (result['error'] == 'DEVICE_CONFLICT') {
+            _errorMessage = 'Bu API key ba\u015Fka bir cihazda kullan\u0131lmaktad\u0131r: ${result['existing_device'] ?? 'Bilinmeyen Cihaz'}.\n\nHer API key sadece 1 cihazda kullan\u0131labilir. Yeni key i\u00E7in SyncResto ile ileti\u015Fime ge\u00E7in.';
+          } else {
+            _errorMessage = result['error'] ?? 'Gecersiz API Key';
+          }
         });
       }
     } catch (e) {

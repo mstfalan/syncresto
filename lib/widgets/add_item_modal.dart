@@ -43,6 +43,7 @@ class _AddItemModalState extends State<AddItemModal> {
   List<dynamic> _products = [];
   List<dynamic> _filteredProducts = [];
   List<dynamic> _ticketItems = [];
+  Map<String, dynamic>? _ticketInfo;
   bool _isLoading = true;
   int? _selectedCategoryId;
   String _searchQuery = '';
@@ -101,17 +102,37 @@ class _AddItemModalState extends State<AddItemModal> {
     if (!mounted) return;
     setState(() => _isLoading = true);
     try {
-      final categories = await widget.apiService.getCategories();
-      final products = await widget.apiService.getProducts();
-      if (!mounted) return;
-      setState(() {
-        _categories = categories;
-        _products = products;
-        _filteredProducts = products;
-      });
+      // Önce cache'ten yükle (anında), sonra API'den güncelle (arka plan)
+      final cachedCats = await widget.apiService.getCachedCategories();
+      final cachedProds = await widget.apiService.getCachedProducts();
+      if (mounted && cachedCats.isNotEmpty) {
+        setState(() {
+          _categories = cachedCats;
+          _products = cachedProds;
+          _filteredProducts = cachedProds;
+          _isLoading = false;
+        });
+      }
+      // Ticket items yükle
       await _loadTicketItems();
+      // API'den taze veri (arka planda)
+      widget.apiService.getCategories().then((cats) {
+        if (mounted && cats.isNotEmpty) setState(() => _categories = cats);
+      }).catchError((_) {});
+      widget.apiService.getProducts().then((prods) {
+        if (mounted && prods.isNotEmpty) setState(() { _products = prods; _filteredProducts = prods; });
+      }).catchError((_) {});
     } catch (e) {
-      if (mounted) _showError('Veri yüklenemedi: $e');
+      // Cache de yoksa API'den dene
+      try {
+        final categories = await widget.apiService.getCategories();
+        final products = await widget.apiService.getProducts();
+        if (!mounted) return;
+        setState(() { _categories = categories; _products = products; _filteredProducts = products; });
+        await _loadTicketItems();
+      } catch (e2) {
+        if (mounted) _showError('Veri yuklenemedi: $e2');
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -127,9 +148,10 @@ class _AddItemModalState extends State<AddItemModal> {
           final ticket = ticketData['ticket'] as Map<String, dynamic>?;
           if (ticket != null) {
             final items = (ticket['items'] as List?) ?? [];
-            print('[AddItemModal] items loaded: ${items.length}');
+            print('[AddItemModal] items loaded: ${items.length}, discount: ${ticket['discount']}, discount_type: ${ticket['discount_type']}');
             setState(() {
               _ticketItems = items;
+              _ticketInfo = ticket;
             });
           } else {
             // ticket null ama ticketData var — belki doğrudan ticket objesi
@@ -180,24 +202,141 @@ class _AddItemModalState extends State<AddItemModal> {
     _filterProducts();
   }
 
-  /// Ürüne tıkla → direkt ekle (popup yok)
+  /// Ürüne tıkla → varyant varsa popup, yoksa direkt ekle
   Future<void> _addProductDirectly(Map<String, dynamic> product) async {
+    final rawVariants = product['variants'];
+    final variants = rawVariants is List ? rawVariants : [];
+    final showVariants = product['show_variants_pos'] == 1 || product['show_variants_pos'] == true;
+
+    if (showVariants && variants.isNotEmpty) {
+      _showVariantPopup(product, variants);
+      return;
+    }
+
+    _addProductWithPrice(product, product['name']?.toString() ?? '',
+      _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']));
+  }
+
+  void _showVariantPopup(Map<String, dynamic> product, List variants) {
+    final basePrice = _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']);
+    final productName = product['name']?.toString() ?? '';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          width: 360,
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(productName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue[600],
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _addProductWithPrice(product, productName, basePrice);
+                  },
+                  child: Text('1 Porsiyon  -  ₺${basePrice.toStringAsFixed(0)}'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              ...variants.map((v) {
+                final modifier = _safeDouble(v['price_modifier']);
+                final variantPrice = basePrice + modifier;
+                final variantName = v['name']?.toString() ?? '';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange[600],
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _addProductWithPrice(product, '$productName ($variantName)', variantPrice);
+                      },
+                      child: Text('$variantName  -  ₺${variantPrice.toStringAsFixed(0)}'),
+                    ),
+                  ),
+                );
+              }),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('İptal', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _addProductWithPrice(Map<String, dynamic> product, String displayName, double price) async {
     try {
       final productId = _safeInt(product['id']);
       if (productId == null) return;
 
-      await widget.apiService.addTicketItem(
+      final name = displayName;
+
+      // Optimistic update - aninda UI'ya ekle
+      setState(() {
+        final existingIndex = _ticketItems.indexWhere((i) => i['product_id'] == productId && i['status'] != 'cancelled' && (i['notes'] == null || i['notes'] == ''));
+        if (existingIndex >= 0) {
+          _ticketItems[existingIndex] = Map<String, dynamic>.from(_ticketItems[existingIndex])
+            ..['quantity'] = (_ticketItems[existingIndex]['quantity'] ?? 1) + 1;
+        } else {
+          _ticketItems.add({
+            'id': -DateTime.now().millisecondsSinceEpoch, // temp ID
+            'product_id': productId,
+            'product_name': name,
+            'unit_price': price,
+            'quantity': 1,
+            'status': 'active',
+            'printed': 0,
+            'notes': null,
+            'extras': [],
+          });
+        }
+      });
+
+      // Arka planda sunucuya gonder (UI beklemez)
+      widget.apiService.addTicketItem(
         ticketId: widget.ticketId,
         productId: productId,
-        productName: product['name']?.toString() ?? '',
-        unitPrice: _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']),
+        productName: name,
+        unitPrice: price,
         quantity: 1,
         waiterId: widget.waiterId,
-      );
-      widget.onItemAdded();
-      await _loadTicketItems();
+      ).then((_) {
+        widget.onItemAdded();
+        _loadTicketItems(); // Gercek ID'leri al
+      }).catchError((e) {
+        _showError('Sunucu hatasi: $e');
+        _loadTicketItems(); // Geri al
+      });
     } catch (e) {
-      _showError('Ürün eklenemedi: $e');
+      _showError('Urun eklenemedi: $e');
     }
   }
 
@@ -756,6 +895,12 @@ class _AddItemModalState extends State<AddItemModal> {
       );
 
       if (result['success'] == true) {
+        // Ödeme başarılı, şimdi ticket'ı kapat
+        await widget.apiService.closeTicket(
+          ticketId: widget.ticketId,
+          paymentMethod: paymentMethod,
+          waiterId: widget.waiterId,
+        );
         _showSuccess('Hesap kapatıldı');
         widget.onItemAdded();
         widget.onClose();
@@ -1195,13 +1340,26 @@ class _AddItemModalState extends State<AddItemModal> {
     return total;
   }
 
-  double get _ticketTotal {
+  double get _ticketSubtotal {
     double total = 0;
     for (var item in _ticketItems) {
       if (item['status'] == 'cancelled') continue;
       total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
     }
     return total;
+  }
+
+  double get _ticketDiscount {
+    if (_ticketInfo == null) return 0;
+    final d = _ticketInfo!['discount_amount'] ?? _ticketInfo!['discount'];
+    if (d == null) return 0;
+    return d is num ? d.toDouble() : double.tryParse(d.toString()) ?? 0;
+  }
+
+  String? get _ticketDiscountType => _ticketInfo?['discount_type']?.toString();
+
+  double get _ticketTotal {
+    return _ticketSubtotal - _ticketDiscount;
   }
 
   @override
@@ -1224,12 +1382,14 @@ class _AddItemModalState extends State<AddItemModal> {
                   ? Center(child: CircularProgressIndicator(color: theme.primaryColor))
                   : Row(
                       children: [
-                        // SOL: Kategoriler (2 sütun)
+                        // 1. SOL: Kategoriler
                         _buildCategoriesPanel(theme),
-                        // ORTA: Ürünler
-                        Expanded(flex: 3, child: _buildProductsPanel(theme)),
-                        // SAĞ: Adisyon + aksiyon butonları
+                        // 2. ORTA-SOL: Ürünler (geniş)
+                        Expanded(flex: 4, child: _buildProductsPanel(theme)),
+                        // 3. ORTA-SAĞ: Adisyon listesi (scroll)
                         _buildTicketPanel(theme),
+                        // 4. SAĞ: Aksiyon butonları
+                        _buildActionPanel(theme),
                       ],
                     ),
             ),
@@ -1403,14 +1563,14 @@ class _AddItemModalState extends State<AddItemModal> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final crossAxisCount = (constraints.maxWidth / 130).floor().clamp(2, 6);
+        final crossAxisCount = (constraints.maxWidth / 160).floor().clamp(2, 5);
         return GridView.builder(
           padding: const EdgeInsets.all(10),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: crossAxisCount,
-            childAspectRatio: widget.showProductImages ? 0.85 : 1.8,
-            crossAxisSpacing: 8,
-            mainAxisSpacing: 8,
+            childAspectRatio: widget.showProductImages ? 0.85 : 1.5,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 10,
           ),
           itemCount: _filteredProducts.length,
           itemBuilder: (context, index) => _buildProductCard(_filteredProducts[index], theme),
@@ -1576,6 +1736,28 @@ class _AddItemModalState extends State<AddItemModal> {
                   ),
                   const SizedBox(height: 4),
                 ],
+                if (_ticketDiscount > 0) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Ara Toplam', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                      Text('${_ticketSubtotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                    ],
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        _ticketDiscountType == 'percentage'
+                            ? 'İndirim (%${(_ticketSubtotal > 0 ? (_ticketDiscount / _ticketSubtotal * 100) : 0).toStringAsFixed(0)})'
+                            : 'İndirim',
+                        style: TextStyle(fontSize: 11, color: Colors.red[700]),
+                      ),
+                      Text('-${_ticketDiscount.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.red[700])),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                ],
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -1587,9 +1769,94 @@ class _AddItemModalState extends State<AddItemModal> {
             ),
           ),
 
-          // Aksiyon butonları
-          _buildActionButtons(theme, hasItems),
         ],
+      ),
+    );
+  }
+
+  Widget _buildActionPanel(ThemeProvider theme) {
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    final hasItems = activeItems.isNotEmpty;
+
+    return Container(
+      width: 130,
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        border: Border(left: BorderSide(color: Colors.grey[200]!)),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          children: [
+            // Grup 1: Not Ekle, Ürün İptal, Mutfak, Yazdır
+            _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemIndex != null ? _openNoteDialog : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemIndex != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(icon: Icons.restaurant, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(icon: Icons.print, label: 'Yazdır', color: Colors.blueGrey, onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null),
+
+            const SizedBox(height: 12),
+            Divider(color: Colors.grey[300], height: 1),
+            const SizedBox(height: 12),
+
+            // Grup 2: İndirim, Masa Değiştir, Parçalı Ödeme
+            if (_hasPermission('apply_discount')) ...[
+              _buildActionBtnVertical(icon: Icons.percent, label: 'İndirim', color: const Color(0xFFE11D48), onTap: hasItems ? _openDiscountDialog : null),
+              const SizedBox(height: 5),
+            ],
+            if (_hasPermission('transfer_table')) ...[
+              _buildActionBtnVertical(icon: Icons.swap_horiz, label: 'Masa Değiştir', color: const Color(0xFF0EA5E9), onTap: hasItems ? _transferTable : null),
+              const SizedBox(height: 5),
+            ],
+            _buildActionBtnVertical(icon: Icons.splitscreen, label: 'Parçalı Ödeme', color: const Color(0xFF7C3AED), onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null),
+
+            const SizedBox(height: 12),
+            Divider(color: Colors.grey[300], height: 1),
+            const SizedBox(height: 12),
+
+            // Grup 3: Ödeme kapama
+            _buildActionBtnVertical(icon: Icons.payments, label: 'Nakit Kapat', color: theme.primaryColor, onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(icon: Icons.credit_card, label: 'Kart Kapat', color: const Color(0xFF3B82F6), onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Nakit', color: const Color(0xFF059669), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('cash') : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Kart', color: const Color(0xFF2563EB), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('credit_card') : null),
+
+            const SizedBox(height: 12),
+            Divider(color: Colors.grey[300], height: 1),
+            const SizedBox(height: 12),
+
+            // Grup 4: Adisyon İptal
+            if (_hasPermission('void_ticket'))
+              _buildActionBtnVertical(icon: Icons.delete_outline, label: 'Adisyon İptal', color: const Color(0xFFDC2626), onTap: _voidTicket),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionBtnVertical({required IconData icon, required String label, required Color color, VoidCallback? onTap}) {
+    final isDisabled = onTap == null;
+    return GestureDetector(
+      onTap: isDisabled ? null : onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: isDisabled ? Colors.grey[200] : color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: isDisabled ? Colors.grey[300]! : color.withOpacity(0.3)),
+        ),
+        child: Column(
+          children: [
+            Icon(icon, size: 18, color: isDisabled ? Colors.grey[400] : color),
+            const SizedBox(height: 2),
+            Text(label, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: isDisabled ? Colors.grey[400] : color), textAlign: TextAlign.center),
+          ],
+        ),
       ),
     );
   }
@@ -1603,31 +1870,32 @@ class _AddItemModalState extends State<AddItemModal> {
     final payMethod = item['payment_method']?.toString().toUpperCase() ?? '';
 
     return GestureDetector(
-                                onTap: () => setState(() => _selectedItemIndex = isSelected ? null : index),
+      onTap: () => setState(() => _selectedItemIndex = isSelected ? null : index),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        // Dokunmatik ekran icin 2x - padding + fontSize artirildi
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
           color: isPaid
               ? Colors.green[50]
               : (isSelected ? theme.primaryColor.withOpacity(0.08) : Colors.transparent),
           border: Border(
-            bottom: BorderSide(color: Colors.grey[100]!),
-            left: isSelected ? BorderSide(color: theme.primaryColor, width: 3) : BorderSide.none,
+            bottom: BorderSide(color: Colors.grey[200]!),
+            left: isSelected ? BorderSide(color: theme.primaryColor, width: 4) : BorderSide.none,
           ),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
-              width: 24,
-              height: 24,
+              width: 40,
+              height: 40,
               decoration: BoxDecoration(
                 color: isPaid ? Colors.green : theme.primaryColor,
-                borderRadius: BorderRadius.circular(5),
+                borderRadius: BorderRadius.circular(8),
               ),
-              child: Center(child: Text('$quantity', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))),
+              child: Center(child: Text('$quantity', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18))),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1637,34 +1905,37 @@ class _AddItemModalState extends State<AddItemModal> {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
                       color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
                     ),
                   ),
                   if (notes != null && notes.isNotEmpty)
-                    Text(notes, style: TextStyle(fontSize: 10, color: Colors.grey[500], fontStyle: FontStyle.italic)),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(notes, style: TextStyle(fontSize: 14, color: Colors.grey[600], fontStyle: FontStyle.italic)),
+                    ),
                   if (isPaid)
                     Container(
-                      margin: const EdgeInsets.only(top: 2),
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      margin: const EdgeInsets.only(top: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
                         color: payMethod == 'CASH' ? Colors.green : Colors.blue,
-                        borderRadius: BorderRadius.circular(3),
+                        borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
                         payMethod == 'CASH' ? 'NAKİT' : 'KART',
-                        style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.bold),
+                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
                       ),
                     ),
                 ],
               ),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 8),
             Text(
               '${total.toStringAsFixed(2)}',
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 18,
                 fontWeight: FontWeight.bold,
                 color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
               ),

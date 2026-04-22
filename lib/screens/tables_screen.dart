@@ -18,6 +18,7 @@ import 'printer_settings_screen.dart';
 import '../widgets/ticket_modal.dart';
 import '../widgets/add_item_modal.dart';
 import '../widgets/offline_data_modal.dart';
+import 'order_tracking_screen.dart';
 
 class TablesScreen extends StatefulWidget {
   final StorageService storageService;
@@ -48,6 +49,7 @@ class _TablesScreenState extends State<TablesScreen> {
   Timer? _refreshTimer;
   String _currentTime = '';
   String _currentDate = '';
+  int _pendingItemCount = 0; // MASA TAKIP buton badge'i icin
 
   // Offline monitoring
   final ConnectivityService _connectivity = ConnectivityService();
@@ -100,15 +102,26 @@ class _TablesScreenState extends State<TablesScreen> {
     _clockTimer?.cancel();
     _refreshTimer?.cancel();
     _licenseCheckTimer?.cancel();
+    _pendingCountTimer?.cancel();
     _connectivitySubscription?.cancel();
     super.dispose();
   }
+
+  Timer? _pendingCountTimer;
 
   void _startAutoRefresh() {
     // Her 2 saniyede masaları güncelle (sessiz mod - loading gösterme)
     _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (_isOnline && mounted) {
         _loadData(silent: true);
+      }
+    });
+
+    // MASA TAKIP badge icin pending count - 15 sn'de bir yeterli (gorsel indicator)
+    _refreshPendingCount(); // ilk cagri hemen
+    _pendingCountTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_isOnline && mounted) {
+        _refreshPendingCount();
       }
     });
   }
@@ -278,6 +291,7 @@ class _TablesScreenState extends State<TablesScreen> {
           _selectedSectionId = _safeInt(sections[0]['id']);
         }
       });
+
     } catch (e) {
       if (!silent) {
         _showError('Veri yuklenemedi: $e');
@@ -287,6 +301,30 @@ class _TablesScreenState extends State<TablesScreen> {
         setState(() => _isLoading = false);
       }
     }
+  }
+
+  Future<void> _refreshPendingCount() async {
+    try {
+      final rows = await widget.apiService.getPendingOrders();
+      final c = rows.where((r) => r is Map && r['delivered_at'] == null).length;
+      if (mounted && c != _pendingItemCount) {
+        setState(() => _pendingItemCount = c);
+      }
+    } catch (_) {
+      // Sessiz: bu endpoint henuz deploy edilmemis olabilir
+    }
+  }
+
+  void _openTableTracking() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OrderTrackingScreen(
+          apiService: widget.apiService,
+          waiter: widget.waiter,
+        ),
+      ),
+    ).then((_) => _loadData(silent: true));
   }
 
   void _showError(String message) {
@@ -794,60 +832,140 @@ class _TablesScreenState extends State<TablesScreen> {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 24),
         child: Row(
-          children: _sections.map((section) {
-            final sectionId = _safeInt(section['id']);
-            final isSelected = sectionId == _selectedSectionId;
-            final color = _parseColor(section['color'] ?? '#16A34A');
+          children: [
+            ..._sections.map((section) {
+              final sectionId = _safeInt(section['id']);
+              final isSelected = sectionId == _selectedSectionId;
+              final color = _parseColor(section['color'] ?? '#16A34A');
 
-            return Padding(
-              padding: const EdgeInsets.only(right: 12),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () => setState(() => _selectedSectionId = sectionId),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: isSelected ? color : Colors.grey[100],
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: isSelected ? color : Colors.grey[300]!,
-                        width: 2,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Text(
-                          section['name'],
-                          style: TextStyle(
-                            color: isSelected ? Colors.white : Colors.grey[700],
-                            fontWeight: FontWeight.w600,
-                          ),
+              return Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => setState(() => _selectedSectionId = sectionId),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      constraints: const BoxConstraints(minHeight: 56, minWidth: 120),
+                      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+                      decoration: BoxDecoration(
+                        color: isSelected ? color : Colors.grey[100],
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isSelected ? color : Colors.grey[300]!,
+                          width: 2,
                         ),
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isSelected ? Colors.white.withValues(alpha: 0.2) : Colors.grey[200],
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Text(
-                            '${section['table_count'] ?? 0}',
+                      ),
+                      child: Row(
+                        children: [
+                          Text(
+                            section['name'],
                             style: TextStyle(
-                              color: isSelected ? Colors.white : Colors.grey[600],
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
+                              color: isSelected ? Colors.white : Colors.grey[700],
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
                             ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: 10),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: isSelected ? Colors.white.withValues(alpha: 0.2) : Colors.grey[200],
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${section['table_count'] ?? 0}',
+                              style: TextStyle(
+                                color: isSelected ? Colors.white : Colors.grey[600],
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
+              );
+            }),
+            // MASA TAKIP butonu — en sağda, badge overlay'li
+            Padding(
+              padding: const EdgeInsets.only(left: 12, right: 12, top: 4, bottom: 4),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: _openTableTracking,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 56),
+                        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFFEA580C), Color(0xFFDC2626)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.12),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.track_changes, color: Colors.white, size: 22),
+                          SizedBox(width: 10),
+                          Text(
+                            'MASA TAKİP',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 16,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ]),
+                      ),
+                    ),
+                  ),
+                  if (_pendingItemCount > 0)
+                    Positioned(
+                      top: -10,
+                      right: -10,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.amber[700],
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.white, width: 2),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.2),
+                              blurRadius: 4,
+                              offset: const Offset(0, 1),
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          'Bekleyen Ürün: $_pendingItemCount',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
-            );
-          }).toList(),
+            ),
+          ],
         ),
       ),
     );
@@ -921,10 +1039,14 @@ class _TablesScreenState extends State<TablesScreen> {
   Widget _buildTableCard(Map<String, dynamic> table, ThemeProvider theme) {
     final isOccupied = table['status'] == 'occupied' || table['current_ticket_id'] != null || table['active_ticket_id'] != null;
     final tableNumber = (table['table_number'] ?? 'M${table['id']}').toString().replaceAll('Masa ', '');
-    final total = table['current_total'];
+    final totalRaw = table['current_total'];
+    final total = totalRaw is num ? totalRaw.toDouble() : double.tryParse(totalRaw?.toString() ?? '') ?? 0.0;
     final openedAt = table['ticket_opened_at'];
-    final paidTotal = table['paid_total'] is num ? (table['paid_total'] as num).toDouble() : 0.0;
-    final unpaidTotal = table['unpaid_total'] is num ? (table['unpaid_total'] as num).toDouble() : 0.0;
+    final lastItemAt = table['last_item_at'];
+    final paidRaw = table['paid_total'];
+    final paidTotal = paidRaw is num ? paidRaw.toDouble() : double.tryParse(paidRaw?.toString() ?? '') ?? 0.0;
+    final unpaidRaw = table['unpaid_total'];
+    final unpaidTotal = unpaidRaw is num ? unpaidRaw.toDouble() : double.tryParse(unpaidRaw?.toString() ?? '') ?? 0.0;
     final hasPartialPayment = paidTotal > 0 && unpaidTotal > 0;
 
     return GestureDetector(
@@ -947,23 +1069,24 @@ class _TablesScreenState extends State<TablesScreen> {
             ],
           ),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisAlignment: isOccupied ? MainAxisAlignment.start : MainAxisAlignment.center,
             children: [
+              if (isOccupied) const SizedBox(height: 8),
               // Table number
               Text(
                 tableNumber,
                 style: TextStyle(
                   color: isOccupied ? Colors.white : const Color(0xFF1F2937),
-                  fontSize: 32,
+                  fontSize: isOccupied ? 24 : 32,
                   fontWeight: FontWeight.bold,
                 ),
               ),
 
-              const SizedBox(height: 8),
+              SizedBox(height: isOccupied ? 4 : 8),
 
               // Status
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                padding: EdgeInsets.symmetric(horizontal: isOccupied ? 8 : 12, vertical: isOccupied ? 2 : 4),
                 decoration: BoxDecoration(
                   color: isOccupied
                       ? Colors.white.withValues(alpha: 0.2)
@@ -974,7 +1097,7 @@ class _TablesScreenState extends State<TablesScreen> {
                   isOccupied ? 'Dolu' : 'Bos',
                   style: TextStyle(
                     color: isOccupied ? Colors.white : Colors.grey[600],
-                    fontSize: 12,
+                    fontSize: isOccupied ? 10 : 12,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -982,37 +1105,56 @@ class _TablesScreenState extends State<TablesScreen> {
 
               // Total (if occupied)
               if (isOccupied) ...[
-                const SizedBox(height: 6),
-                Text(
-                  '${(total is num ? total.toDouble() : 0.0).toStringAsFixed(2)} TL',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                // Parçalı ödeme varsa ödenen/kalan göster
+                const SizedBox(height: 3),
                 if (hasPartialPayment) ...[
-                  const SizedBox(height: 4),
                   Text(
-                    'Ödenen: ${paidTotal.toStringAsFixed(2)} TL',
-                    style: TextStyle(color: Colors.green[200], fontSize: 10, fontWeight: FontWeight.w600),
+                    '${unpaidTotal.toStringAsFixed(0)} TL',
+                    style: TextStyle(
+                      color: Colors.orange[200],
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                   Text(
-                    'Kalan: ${unpaidTotal.toStringAsFixed(2)} TL',
-                    style: TextStyle(color: Colors.orange[200], fontSize: 10, fontWeight: FontWeight.w600),
+                    'Odenen: ${paidTotal.toStringAsFixed(0)} TL',
+                    style: TextStyle(color: Colors.green[200], fontSize: 9, fontWeight: FontWeight.w600),
+                  ),
+                ] else ...[
+                  Text(
+                    '${total.toStringAsFixed(0)} TL',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                 ],
               ],
 
-              // Duration (if occupied)
+              // Açılış saati ve son sipariş saati
               if (isOccupied && openedAt != null) ...[
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
+                Text(
+                  'Acilis: ${_formatTime(openedAt)}',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    fontSize: 8,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (lastItemAt != null)
+                  Text(
+                    'Son Siparis: ${_formatTime(lastItemAt)}',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.7),
+                      fontSize: 8,
+                    ),
+                  ),
                 Text(
                   _formatDuration(openedAt),
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.8),
-                    fontSize: 10,
+                    color: Colors.white.withValues(alpha: 0.6),
+                    fontSize: 8,
                   ),
                 ),
               ],
@@ -1062,6 +1204,15 @@ class _TablesScreenState extends State<TablesScreen> {
         ),
       ],
     );
+  }
+
+  String _formatTime(String dateStr) {
+    try {
+      final dt = DateTime.parse(dateStr).toLocal();
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (e) {
+      return '';
+    }
   }
 
   String _formatDuration(String openedAt) {

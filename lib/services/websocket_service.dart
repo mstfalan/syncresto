@@ -18,9 +18,14 @@ class WebSocketService {
   Function(bool)? onConnectionChange;
 
   bool get isConnected => _isConnected;
+  String? _authToken;
 
-  Future<void> connect(String serverUrl) async {
-    _serverUrl = serverUrl.replaceAll('/api', '');
+  Future<void> connect(String serverUrl, {String? token}) async {
+    var url = serverUrl.replaceAll('/api', '');
+    // HTTP → HTTPS, ws → wss
+    if (url.startsWith('http://')) url = url.replaceFirst('http://', 'https://');
+    _serverUrl = url;
+    _authToken = token;
     _connect();
   }
 
@@ -44,8 +49,11 @@ class WebSocketService {
         onConnectionChange?.call(true);
         _logService.info(LogType.general, 'WebSocket baglantisi kuruldu', details: {'server': _serverUrl});
 
-        // Join as POS client
-        _socket!.emit('pos_join', {'device': 'syncresto_pos'});
+        // Join as POS client with auth
+        _socket!.emit('pos_join', {
+          'device': 'syncresto_pos',
+          if (_authToken != null) 'token': _authToken,
+        });
       });
 
       _socket!.onDisconnect((_) {

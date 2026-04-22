@@ -132,15 +132,11 @@ class SyncRestoPosApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Check if API key exists
-    final hasApiKey = storageService.getApiKey() != null;
-
     return Consumer<ThemeProvider>(
       builder: (context, theme, child) {
         return MaterialApp(
           title: theme.brandName,
           debugShowCheckedModeBanner: false,
-          // Dokunmatik ekran desteği: tüm pointer türlerini scroll için etkinleştir
           scrollBehavior: const MaterialScrollBehavior().copyWith(
             dragDevices: {
               PointerDeviceKind.touch,
@@ -157,12 +153,10 @@ class SyncRestoPosApp extends StatelessWidget {
             ),
             useMaterial3: true,
             fontFamily: 'Roboto',
-            // Dokunmatik ekran: splash/ripple efektlerini hızlandır
             splashFactory: NoSplash.splashFactory,
-            // Minimum tap target boyutu
             materialTapTargetSize: MaterialTapTargetSize.padded,
           ),
-          home: hasApiKey
+          home: storageService.getApiKey() != null
               ? InitialSyncScreen(
                   storageService: storageService,
                   apiService: apiService,

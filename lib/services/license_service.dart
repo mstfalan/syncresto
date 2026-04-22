@@ -63,9 +63,10 @@ class LicenseInfo {
         'signature': _generateSignature(),
       };
 
-  String _generateSignature() {
+  String _generateSignature({String? deviceSalt}) {
+    final salt = deviceSalt ?? LicenseService._deviceSalt ?? 'SyncResto_Fallback';
     final data = '$isActive:${expiresAt?.millisecondsSinceEpoch}:$restaurantId:${checkedAt.millisecondsSinceEpoch}';
-    final bytes = utf8.encode(data + 'SyncResto_License_Salt_2026');
+    final bytes = utf8.encode(data + salt);
     return sha256.convert(bytes).toString().substring(0, 16);
   }
 
@@ -148,13 +149,22 @@ class LicenseService {
 
   static const String _licenseKey = 'pos_license_info';
   static const String _lastOnlineCheckKey = 'pos_license_last_online_check';
+  static const String _deviceSaltKey = 'pos_device_salt';
+  static String? _deviceSalt;
 
   LicenseInfo? _cachedLicenseInfo;
 
   /// Servisi başlat
-  void init(Dio dio, String apiKey) {
+  void init(Dio dio, String apiKey) async {
     _dio = dio;
     _apiKey = apiKey;
+    // Device-specific salt oluştur/yükle
+    final prefs = await SharedPreferences.getInstance();
+    _deviceSalt = prefs.getString(_deviceSaltKey);
+    if (_deviceSalt == null) {
+      _deviceSalt = sha256.convert(utf8.encode('SyncResto:${DateTime.now().microsecondsSinceEpoch}:$apiKey')).toString();
+      await prefs.setString(_deviceSaltKey, _deviceSalt!);
+    }
   }
 
   /// Lisans kontrolü yap
@@ -268,14 +278,7 @@ class LicenseService {
   /// Online lisans kontrolü
   Future<LicenseCheckResult> _checkLicenseOnline() async {
     try {
-      final response = await _dio!.post(
-        '/api/pos/validate-key',
-        options: Options(
-          headers: {
-            'X-API-Key': _apiKey,
-          },
-        ),
-      );
+      final response = await _dio!.post('/api/pos/validate-key');
 
       if (response.statusCode == 200 && response.data['valid'] == true) {
         final data = response.data;

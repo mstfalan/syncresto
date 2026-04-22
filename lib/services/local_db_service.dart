@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
@@ -34,7 +35,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 4, // v4: restaurant_price eklendi
+      version: 6, // v6: product variants
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -66,6 +67,8 @@ class LocalDbService {
         is_active INTEGER DEFAULT 1,
         is_out_of_stock INTEGER DEFAULT 0,
         extras TEXT,
+        show_variants_pos INTEGER DEFAULT 0,
+        variants TEXT,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -275,6 +278,34 @@ class LocalDbService {
         print('[LocalDb] restaurant_price zaten var: $e');
       }
     }
+
+    if (oldVersion < 5) {
+      // v5: Mevcut plaintext PIN'leri hash'le
+      try {
+        final waiters = await db.query('cached_waiters');
+        for (final w in waiters) {
+          final pin = w['pin'] as String?;
+          if (pin != null && pin.isNotEmpty && !pin.startsWith('sha256:')) {
+            final hashed = sha256.convert(utf8.encode('SyncRestoPOS:$pin')).toString();
+            await db.update('cached_waiters', {'pin': hashed}, where: 'id = ?', whereArgs: [w['id']]);
+          }
+        }
+        print('[LocalDb] PIN hash migration tamamlandi');
+      } catch (e) {
+        print('[LocalDb] PIN migration hatasi: $e');
+      }
+    }
+
+    if (oldVersion < 6) {
+      // v6: cached_products'a variants desteği
+      try {
+        await db.execute('ALTER TABLE cached_products ADD COLUMN show_variants_pos INTEGER DEFAULT 0');
+        await db.execute('ALTER TABLE cached_products ADD COLUMN variants TEXT');
+        print('[LocalDb] cached_products variants kolonları eklendi');
+      } catch (e) {
+        print('[LocalDb] variants kolonları zaten var: $e');
+      }
+    }
   }
 
   // ==================== CACHE İŞLEMLERİ ====================
@@ -323,7 +354,9 @@ class LocalDbService {
           'image': prod['image'],
           'is_active': prod['is_active'] ?? 1,
           'is_out_of_stock': prod['is_out_of_stock'] ?? 0,
-          'extras': prod['extras']?.toString(),
+          'extras': prod['extras'] is String ? prod['extras'] : (prod['extras'] != null ? prod['extras'].toString() : null),
+          'show_variants_pos': prod['show_variants_pos'] ?? 0,
+          'variants': prod['variants'] is String ? prod['variants'] : (prod['variants'] != null ? prod['variants'].toString() : null),
           'cached_at': now,
         });
       }

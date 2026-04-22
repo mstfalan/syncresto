@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart';
@@ -900,7 +902,7 @@ class SyncService {
           where: 'id = ?',
           whereArgs: [waiter['id']],
         );
-        print('[Sync] Garson güncellendi (PIN korundu): ${waiter['name']}');
+        if (kDebugMode) print('[Sync] Garson güncellendi: ${waiter['name']}');
         return;
       }
     }
@@ -910,23 +912,31 @@ class SyncService {
       {
         'id': waiter['id'],
         'name': waiter['name'],
-        'pin': pinValue,
+        'pin': _hashPin(pinValue),
         'permissions': jsonEncode(waiter['permissions'] ?? []),
         'sections': jsonEncode(waiter['sections'] ?? []),
         'cached_at': now,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
-    print('[Sync] Garson cache\'lendi: ${waiter['name']} (PIN: $pinValue)');
+    if (kDebugMode) print('[Sync] Garson cache\'lendi: ${waiter['name']}');
+  }
+
+  /// PIN hash'le (SHA-256 + salt)
+  String _hashPin(String pin) {
+    if (pin.isEmpty) return '';
+    final bytes = utf8.encode('SyncRestoPOS:$pin');
+    return sha256.convert(bytes).toString();
   }
 
   // Cache'den garson getir (PIN ile)
   Future<Map<String, dynamic>?> getCachedWaiterByPin(String pin) async {
     final db = await _localDb.database;
+    final hashedPin = _hashPin(pin);
     final results = await db.query(
       'cached_waiters',
       where: 'pin = ?',
-      whereArgs: [pin],
+      whereArgs: [hashedPin],
     );
 
     if (results.isEmpty) return null;

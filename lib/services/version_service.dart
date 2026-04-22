@@ -240,15 +240,6 @@ class VersionService {
         connectTimeout: const Duration(seconds: 30),
       ));
 
-      // Windows'ta SSL sertifika sorunlarını bypass et
-      if (Platform.isWindows) {
-        (downloadDio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
-          final client = HttpClient();
-          client.badCertificateCallback = (cert, host, port) => true;
-          return client;
-        };
-      }
-
       final response = await downloadDio.download(
         downloadUrl,
         filePath,

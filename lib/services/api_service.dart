@@ -1,4 +1,10 @@
+import 'dart:convert';
+import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'sync_service.dart';
@@ -50,10 +56,12 @@ class ApiService {
     ));
 
     _dio.interceptors.add(LogInterceptor(
-      requestBody: true,
-      responseBody: true,
+      requestBody: false,
+      responseBody: false,
+      requestHeader: false,
+      responseHeader: false,
       error: true,
-      logPrint: (obj) => print('[API] $obj'),
+      logPrint: (obj) { if (kDebugMode) print('[API] $obj'); },
     ));
   }
 
@@ -103,24 +111,60 @@ class ApiService {
   Future<Map<String, dynamic>> validateApiKey(String apiKey) async {
     try {
       setApiKey(apiKey);
-      final response = await _dio.post('/api/pos/validate-key');
+
+      // Device ID oluştur (cihaza özgü)
+      final deviceId = await _getDeviceId();
+      final deviceName = await _getDeviceName();
+
+      final response = await _dio.post('/api/pos/validate-key', data: {
+        'device_id': deviceId,
+        'device_name': deviceName,
+      });
+
       if (response.data['valid'] == true) {
-        _logService.info(LogType.general, 'API key dogrulandi', details: {
-          'restaurant': response.data['restaurant_name'],
-        });
         return response.data;
       }
-      _logService.warning(LogType.general, 'API key gecersiz');
       return {
         'valid': false,
         'error': response.data['error'] ?? 'Gecersiz API Key',
       };
     } on DioException catch (e) {
-      _logService.error(LogType.error, 'API key dogrulama hatasi', error: e);
+      // 409 = Başka cihazda kullanılıyor
+      if (e.response?.statusCode == 409) {
+        final data = e.response?.data;
+        return {
+          'valid': false,
+          'error': 'DEVICE_CONFLICT',
+          'message': data?['message'] ?? 'Bu API key baska bir cihazda kullanilmaktadir',
+          'existing_device': data?['existing_device'] ?? 'Bilinmeyen Cihaz',
+        };
+      }
       return {
         'valid': false,
         'error': e.response?.data?['error'] ?? 'Baglanti hatasi',
       };
+    }
+  }
+
+  Future<String> _getDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    var id = prefs.getString('pos_device_id');
+    if (id == null) {
+      // Platform bilgisi + unique ID
+      final info = await DeviceInfoPlugin().deviceInfo;
+      final raw = '${info.data['systemName'] ?? Platform.operatingSystem}:${info.data['model'] ?? 'unknown'}:${DateTime.now().microsecondsSinceEpoch}';
+      id = sha256.convert(utf8.encode(raw)).toString().substring(0, 32);
+      await prefs.setString('pos_device_id', id);
+    }
+    return id;
+  }
+
+  Future<String> _getDeviceName() async {
+    try {
+      final info = await DeviceInfoPlugin().deviceInfo;
+      return '${info.data['computerName'] ?? info.data['model'] ?? Platform.operatingSystem}';
+    } catch (_) {
+      return Platform.operatingSystem;
     }
   }
 
@@ -278,18 +322,18 @@ class ApiService {
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.get('/api/pos/products');
-        // Cache'e kaydet
         await _localDb.cacheProducts(List<Map<String, dynamic>>.from(response.data));
         return response.data;
       } on DioException catch (e) {
-        print('[API] Online products basarisiz: ${e.message}');
+        if (kDebugMode) print('[API] Online products basarisiz: ${e.message}');
       }
     }
-
-    // Offline - cache'den getir
-    print('[API] Products cache\'den yukleniyor...');
     return await _localDb.getCachedProducts();
   }
+
+  // Cache-first (UI aninda yuklensin)
+  Future<List<dynamic>> getCachedCategories() async => await _localDb.getCachedCategories();
+  Future<List<dynamic>> getCachedProducts() async => await _localDb.getCachedProducts();
 
   // =============================================
   // Tickets (Adisyonlar) - Offline destekli
@@ -901,6 +945,51 @@ class ApiService {
   // =============================================
 
   /// Yazdırılmamış ürünleri getir ve yazdırıldı olarak işaretle
+  // =============================================
+  // MASA TAKIP (Sipariş Takip)
+  // =============================================
+
+  // Tum acik adisyonlarin acik item'larini tek sorguda getir
+  Future<List<dynamic>> getPendingOrders() async {
+    if (!_connectivity.isOnline) return [];
+    try {
+      final response = await _dio.get('/api/pos/tickets/pending-orders');
+      return (response.data['rows'] as List?) ?? [];
+    } on DioException catch (_) {
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // Kalem teslim toggle (delivered_at null<->now())
+  Future<Map<String, dynamic>> markItemAsServed({
+    required int ticketId,
+    required int itemId,
+    int? waiterId,
+  }) async {
+    if (!_connectivity.isOnline) {
+      return {'success': false, 'error': 'Internet gerekli'};
+    }
+    try {
+      final response = await _dio.post(
+        '/api/pos/tickets/$ticketId/items/$itemId/mark-served',
+        data: { if (waiterId != null) 'waiter_id': waiterId },
+      );
+      if (response.data['success'] == true) {
+        _logService.logAction('Kalem teslim toggle', details: {
+          'ticket_id': ticketId, 'item_id': itemId,
+          'action': response.data['action'],
+        });
+      }
+      return response.data;
+    } on DioException catch (e) {
+      return {'success': false, 'error': e.response?.data?['error'] ?? e.message};
+    } catch (e) {
+      return {'success': false, 'error': e.toString()};
+    }
+  }
+
   Future<Map<String, dynamic>> printKitchen({
     required int ticketId,
     int? waiterId,

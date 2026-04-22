@@ -32,6 +32,22 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
   String _pin = '';
   bool _isLoading = false;
   String? _errorMessage;
+  String _keyName = 'POS';
+
+  // Rate limiting
+  int _failedAttempts = 0;
+  DateTime? _lockoutUntil;
+  static const int _maxAttempts = 5;
+  static const int _lockoutSeconds = 60;
+
+  bool get _isLockedOut =>
+      _lockoutUntil != null && DateTime.now().isBefore(_lockoutUntil!);
+
+  String get _lockoutMessage {
+    if (_lockoutUntil == null) return '';
+    final remaining = _lockoutUntil!.difference(DateTime.now()).inSeconds;
+    return 'Cok fazla deneme. ${remaining > 0 ? remaining : 0} saniye bekleyin.';
+  }
 
   void _addDigit(String digit) {
     if (_pin.length >= 4) return;
@@ -63,6 +79,15 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
   }
 
   Future<void> _attemptLogin() async {
+    // Rate limiting kontrolü
+    if (_isLockedOut) {
+      setState(() {
+        _errorMessage = _lockoutMessage;
+        _pin = '';
+      });
+      return;
+    }
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -80,6 +105,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
           await widget.storageService.saveWaiterSession(token, waiterJson);
           widget.apiService.setWaiterToken(token);
         }
+        _failedAttempts = 0;
 
         // Log artık api_service.waiterLogin içinde tutuluyor
 
@@ -97,14 +123,17 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
           );
         }
       } else {
-        // Log artık api_service.waiterLogin içinde tutuluyor
+        _failedAttempts++;
+        if (_failedAttempts >= _maxAttempts) {
+          _lockoutUntil = DateTime.now().add(const Duration(seconds: _lockoutSeconds));
+          _failedAttempts = 0;
+        }
         setState(() {
-          _errorMessage = result['error'] ?? 'Gecersiz PIN';
+          _errorMessage = _isLockedOut ? _lockoutMessage : (result['error'] ?? 'Gecersiz PIN');
           _pin = '';
         });
       }
     } catch (e) {
-      // Log artık api_service.waiterLogin içinde tutuluyor
       setState(() {
         _errorMessage = 'Giris hatasi';
         _pin = '';

@@ -97,7 +97,18 @@ class _TicketModalState extends State<TicketModal> {
         } else {
           _ticket = null;
         }
-        print('[TicketModal] _ticket set: $_ticket');
+        // Sunucudan gelen indirim bilgisini yükle (discount her zaman tutar olarak saklanıyor)
+        if (_ticket != null) {
+          final serverDiscount = _ticket!['discount_amount'] ?? _ticket!['discount'];
+          if (serverDiscount != null) {
+            final discountVal = serverDiscount is num ? serverDiscount.toDouble() : double.tryParse(serverDiscount.toString()) ?? 0;
+            if (discountVal > 0) {
+              _localDiscount = discountVal;
+              _localDiscountType = 'fixed'; // DB'de tutar olarak saklanıyor, her zaman fixed
+            }
+          }
+        }
+        print('[TicketModal] _ticket set: $_ticket, discount: $_localDiscount $_localDiscountType');
       });
 
       // Adisyon açıldıktan sonra otomatik ürün ekle ekranını aç
@@ -754,10 +765,15 @@ class _TicketModalState extends State<TicketModal> {
 
   double get _calculatedDiscount {
     if (_ticket == null) return 0;
-    final subtotal = (_ticket!['subtotal'] as num?)?.toDouble() ?? 0;
-
+    // Önce sunucudan gelen discount_amount'u kullan
+    final serverDiscount = _ticket!['discount_amount'] ?? _ticket!['discount'];
+    if (serverDiscount != null) {
+      final val = serverDiscount is num ? serverDiscount.toDouble() : double.tryParse(serverDiscount.toString()) ?? 0;
+      if (val > 0) return val;
+    }
+    // Yoksa local discount'u hesapla
     if (_localDiscount <= 0) return 0;
-
+    final subtotal = (_ticket!['subtotal'] as num?)?.toDouble() ?? 0;
     if (_localDiscountType == 'percentage') {
       return subtotal * _localDiscount / 100;
     }
@@ -766,6 +782,12 @@ class _TicketModalState extends State<TicketModal> {
 
   double get _calculatedTotal {
     if (_ticket == null) return 0;
+    // Önce sunucudan gelen total_amount'u kullan
+    final serverTotal = _ticket!['total_amount'] ?? _ticket!['total'];
+    if (serverTotal != null) {
+      final val = serverTotal is num ? serverTotal.toDouble() : double.tryParse(serverTotal.toString()) ?? 0;
+      if (val > 0 && _calculatedDiscount > 0) return val;
+    }
     final subtotal = (_ticket!['subtotal'] as num?)?.toDouble() ?? 0;
     return subtotal - _calculatedDiscount;
   }
@@ -1098,8 +1120,8 @@ class _TicketModalState extends State<TicketModal> {
           _buildSummaryRow('Ara Toplam', '${subtotal.toStringAsFixed(2)} TL'),
           if (discountAmount > 0)
             _buildSummaryRow(
-              _localDiscountType == 'percentage'
-                  ? 'Indirim (%${_localDiscount.toStringAsFixed(0)})'
+              (_ticket?['discount_type'] == 'percentage' || _localDiscountType == 'percentage')
+                  ? 'Indirim (%${(subtotal > 0 ? (discountAmount / subtotal * 100) : 0).toStringAsFixed(0)})'
                   : 'Indirim',
               '-${discountAmount.toStringAsFixed(2)} TL',
               isDiscount: true,

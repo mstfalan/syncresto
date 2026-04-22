@@ -150,12 +150,104 @@ class _PosScreenState extends State<PosScreen> {
       if (_currentTicket == null) return;
     }
 
+    final rawVariants = product['variants'];
+    final variants = rawVariants is List ? rawVariants : [];
+    final showVariants = product['show_variants_pos'] == 1 || product['show_variants_pos'] == true;
+    print('[POS] Product: ${product['name']}, show_variants_pos: ${product['show_variants_pos']}, variants: ${variants.length}, rawType: ${rawVariants.runtimeType}');
+
+    if (showVariants && variants.isNotEmpty) {
+      _showVariantPopup(product, variants);
+      return;
+    }
+
+    await _addProductDirect(product, product['name'],
+      ((product['restaurant_price'] != null && product['restaurant_price'] != 0 ? product['restaurant_price'] : product['price']) as num).toDouble());
+  }
+
+  void _showVariantPopup(Map<String, dynamic> product, List variants) {
+    final basePrice = ((product['restaurant_price'] != null && product['restaurant_price'] != 0 ? product['restaurant_price'] : product['price']) as num).toDouble();
+    final productName = product['name'] as String;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          width: 360,
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(productName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              // Ana porsiyon (base)
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue[600],
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _addProductDirect(product, productName, basePrice);
+                  },
+                  child: Text('1 Porsiyon  -  ₺${basePrice.toStringAsFixed(0)}'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // Varyantlar
+              ...variants.map((v) {
+                final modifier = (v['price_modifier'] as num?)?.toDouble() ?? 0;
+                final variantPrice = basePrice + modifier;
+                final variantName = v['name'] as String;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange[600],
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _addProductDirect(product, '$productName ($variantName)', variantPrice);
+                      },
+                      child: Text('$variantName  -  ₺${variantPrice.toStringAsFixed(0)}'),
+                    ),
+                  ),
+                );
+              }),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('İptal', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _addProductDirect(Map<String, dynamic> product, String displayName, double unitPrice) async {
     try {
       await widget.apiService.addTicketItem(
         ticketId: _currentTicket!['id'],
         productId: product['id'],
-        productName: product['name'],
-        unitPrice: ((product['restaurant_price'] != null && product['restaurant_price'] != 0 ? product['restaurant_price'] : product['price']) as num).toDouble(),
+        productName: displayName,
+        unitPrice: unitPrice,
         waiterId: widget.waiter['id'],
       );
 
@@ -164,7 +256,7 @@ class _PosScreenState extends State<PosScreen> {
       if (response != null && response['ticket'] != null) {
         setState(() => _currentTicket = response['ticket']);
       }
-      _showSuccess('${product['name']} eklendi');
+      _showSuccess('$displayName eklendi');
     } catch (e) {
       print('[POS] Error adding product: $e');
       _showError('Urun eklenemedi: $e');

@@ -195,10 +195,21 @@ class LicenseService {
         }
 
         // Online kontrol başarısız (API key pasif, lisans yok vs.)
-        // Local cache'i de geçersiz kıl!
+        // Local cache hâlâ geçerliyse onu kullan (false-positive'i önle)
         if (onlineResult.status == LicenseStatus.inactive ||
             onlineResult.status == LicenseStatus.expired) {
-          await clearLicense(); // Local cache'i temizle
+          if (localLicense != null && localLicense.isValid) {
+            _logService.warning(
+              LogType.general,
+              'Online check ${onlineResult.status.name} dondu ama local lisans gecerli - local kullaniliyor',
+            );
+            _cachedLicenseInfo = localLicense;
+            return LicenseCheckResult(
+              status: LicenseStatus.valid,
+              licenseInfo: localLicense,
+            );
+          }
+          await clearLicense();
           _logService.warning(
             LogType.general,
             'Lisans geçersiz - cache temizlendi',
@@ -217,6 +228,17 @@ class LicenseService {
         } else {
           // 401, 403 gibi hatalar - lisans geçersiz
           if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+            if (localLicense != null && localLicense.isValid) {
+              _logService.warning(
+                LogType.general,
+                'Online ${e.response?.statusCode} dondu ama local lisans gecerli - local kullaniliyor',
+              );
+              _cachedLicenseInfo = localLicense;
+              return LicenseCheckResult(
+                status: LicenseStatus.valid,
+                licenseInfo: localLicense,
+              );
+            }
             await clearLicense();
             _logService.warning(
               LogType.general,
@@ -278,7 +300,11 @@ class LicenseService {
   /// Online lisans kontrolü
   Future<LicenseCheckResult> _checkLicenseOnline() async {
     try {
-      final response = await _dio!.post('/api/pos/validate-key');
+      final prefs = await SharedPreferences.getInstance();
+      final deviceId = prefs.getString('pos_device_id');
+      final response = await _dio!.post('/api/pos/validate-key', data: {
+        if (deviceId != null) 'device_id': deviceId,
+      });
 
       if (response.statusCode == 200 && response.data['valid'] == true) {
         final data = response.data;

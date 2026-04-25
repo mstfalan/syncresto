@@ -789,8 +789,8 @@ class _AddItemModalState extends State<AddItemModal> {
         }
       }
 
-      // Masalar ekranına dön
-      if (mounted) Navigator.of(context).pop();
+      // Masalar ekranına dön (hem AddItemModal'ı hem alttaki TicketModal'ı kapat)
+      widget.onClose();
     } catch (e) {
       _showError('Mutfağa gönderilemedi: $e');
     }
@@ -1054,9 +1054,15 @@ class _AddItemModalState extends State<AddItemModal> {
         ticketId: widget.ticketId,
         apiService: widget.apiService,
         onPaymentComplete: (allPaid) {
-          Navigator.pop(ctx);
-          widget.onItemAdded();
-          widget.onClose();
+          if (allPaid) {
+            // Tüm ürünler ödendi, adisyon kapanır - dialog ve modal kapanır
+            Navigator.pop(ctx);
+            widget.onItemAdded();
+            widget.onClose();
+          } else {
+            // Kısmi ödeme - dialog açık kalır, sadece arkadaki listeyi tazele
+            widget.onItemAdded();
+          }
         },
         onClose: () => Navigator.pop(ctx),
       ),

@@ -202,91 +202,196 @@ class _AddItemModalState extends State<AddItemModal> {
     _filterProducts();
   }
 
-  /// Ürüne tıkla → varyant varsa popup, yoksa direkt ekle
+  /// Ürüne tıkla → direkt sepete ekle (varyant secimi sepetten "Varyant" butonu ile yapilir)
   Future<void> _addProductDirectly(Map<String, dynamic> product) async {
-    final rawVariants = product['variants'];
-    final variants = rawVariants is List ? rawVariants : [];
-    final showVariants = product['show_variants_pos'] == 1 || product['show_variants_pos'] == true;
-
-    if (showVariants && variants.isNotEmpty) {
-      _showVariantPopup(product, variants);
-      return;
-    }
-
     _addProductWithPrice(product, product['name']?.toString() ?? '',
       _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']));
   }
 
-  void _showVariantPopup(Map<String, dynamic> product, List variants) {
-    final basePrice = _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']);
-    final productName = product['name']?.toString() ?? '';
+  /// Secili sepet item'inin urunu icin varyant kayitlari var mi?
+  List _variantsForSelectedItem() {
+    if (_selectedItemIndex == null) return const [];
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    if (_selectedItemIndex! >= activeItems.length) return const [];
+    final item = activeItems[_selectedItemIndex!];
+    final productId = item['product_id'];
+    if (productId == null) return const [];
+    final prod = _products.where((p) => p['id'] == productId).firstOrNull;
+    if (prod == null) return const [];
+    final raw = prod['variants'];
+    return raw is List ? raw : const [];
+  }
 
-    showDialog(
+  /// Sepetteki secili item icin varyant secim dialog'u
+  Future<void> _openVariantDialogForSelected() async {
+    if (_selectedItemIndex == null) return;
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    if (_selectedItemIndex! >= activeItems.length) return;
+    final item = activeItems[_selectedItemIndex!];
+    final productId = item['product_id'];
+    if (productId == null) return;
+    final prod = _products.where((p) => p['id'] == productId).firstOrNull;
+    if (prod == null) return;
+
+    final variants = (prod['variants'] is List) ? prod['variants'] as List : const [];
+    if (variants.isEmpty) return;
+
+    final basePrice = _safeDouble(
+      (prod['restaurant_price'] != null && prod['restaurant_price'] != 0)
+          ? prod['restaurant_price']
+          : prod['price'],
+    );
+    final productName = prod['name']?.toString() ?? '';
+    final currentNotes = item['notes']?.toString() ?? '';
+
+    // Hangi varyant secili (notes icinden parse — basit eslestirme)
+    int? currentSelectedId;
+    for (final v in variants) {
+      final vname = v['name']?.toString() ?? '';
+      if (vname.isNotEmpty && currentNotes.contains(vname)) {
+        currentSelectedId = _safeInt(v['id']);
+        break;
+      }
+    }
+
+    final result = await showDialog<Map<String, dynamic>?>(
       context: context,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: Container(
-          width: 360,
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(productName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue[600],
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      builder: (ctx) {
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Container(
+            width: 420,
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(children: [
+                  Expanded(
+                    child: Text(productName,
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                   ),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _addProductWithPrice(product, productName, basePrice);
-                  },
-                  child: Text('1 Porsiyon  -  ₺${basePrice.toStringAsFixed(0)}'),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(ctx, null),
+                  ),
+                ]),
+                Text('Varyant secin', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+                const SizedBox(height: 14),
+                // 1 Porsiyon (varyantsiz) - tikla, direkt uygula
+                _variantOptionTile(
+                  label: '1 Porsiyon',
+                  price: basePrice,
+                  selected: currentSelectedId == null,
+                  onTap: () => Navigator.pop(ctx, {'variant': null}),
+                  color: Colors.blue[600]!,
                 ),
-              ),
-              const SizedBox(height: 8),
-              ...variants.map((v) {
-                final modifier = _safeDouble(v['price_modifier']);
-                final variantPrice = basePrice + modifier;
-                final variantName = v['name']?.toString() ?? '';
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 56,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.orange[600],
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                      ),
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        _addProductWithPrice(product, '$productName ($variantName)', variantPrice);
-                      },
-                      child: Text('$variantName  -  ₺${variantPrice.toStringAsFixed(0)}'),
+                const SizedBox(height: 8),
+                ...variants.map((v) {
+                  final id = _safeInt(v['id']);
+                  final modifier = _safeDouble(v['price_modifier']);
+                  final variantPrice = basePrice + modifier;
+                  final vname = v['name']?.toString() ?? '';
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _variantOptionTile(
+                      label: vname,
+                      price: variantPrice,
+                      modifier: modifier,
+                      selected: currentSelectedId == id,
+                      onTap: () => Navigator.pop(ctx, {'variant': v}),
+                      color: Colors.orange[600]!,
                     ),
-                  ),
-                );
-              }),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                height: 44,
-                child: TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('İptal', style: TextStyle(fontSize: 14, color: Colors.grey)),
-                ),
-              ),
-            ],
+                  );
+                }),
+              ],
+            ),
           ),
+        );
+      },
+    );
+
+    if (result == null) return; // Iptal (X butonu)
+    final selectedVariant = result['variant'];
+
+    // Eski varyant adlarini notes'tan temizle, yeni varyant adini ekle
+    String newNotes = currentNotes;
+    for (final v in variants) {
+      final vname = v['name']?.toString() ?? '';
+      if (vname.isEmpty) continue;
+      newNotes = newNotes
+          .replaceAll(RegExp(',\\s*' + RegExp.escape(vname) + '(\\s*\\(\\+[0-9.]+TL\\))?'), '')
+          .replaceAll(RegExp('^' + RegExp.escape(vname) + '(\\s*\\(\\+[0-9.]+TL\\))?,?\\s*'), '')
+          .replaceAll(vname, '')
+          .trim();
+    }
+    newNotes = newNotes.replaceAll(RegExp(',\\s*,'), ',').replaceAll(RegExp('^,|,\$'), '').trim();
+
+    if (selectedVariant != null) {
+      final vname = selectedVariant['name']?.toString() ?? '';
+      final mod = _safeDouble(selectedVariant['price_modifier']);
+      final label = mod != 0
+          ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)'
+          : vname;
+      newNotes = newNotes.isEmpty ? label : '$newNotes, $label';
+    }
+
+    // Yeni unit_price
+    final newUnitPrice = basePrice +
+        (selectedVariant != null ? _safeDouble(selectedVariant['price_modifier']) : 0);
+
+    final itemId = _safeInt(item['id']);
+    if (itemId == null) return;
+
+    try {
+      final res = await widget.apiService.updateTicketItem(
+        ticketId: widget.ticketId,
+        itemId: itemId,
+        notes: newNotes.isEmpty ? null : newNotes,
+        unitPrice: newUnitPrice,
+        waiterId: widget.waiterId,
+      );
+      if (res['success'] == true) {
+        await _loadTicketItems();
+      } else {
+        _showError(res['error']?.toString() ?? 'Varyant uygulanamadi');
+      }
+    } catch (e) {
+      _showError('Varyant hatasi: $e');
+    }
+  }
+
+  Widget _variantOptionTile({
+    required String label,
+    required double price,
+    double? modifier,
+    required bool selected,
+    required VoidCallback onTap,
+    required Color color,
+  }) {
+    final modText = (modifier != null && modifier != 0)
+        ? ' (${modifier > 0 ? '+' : ''}${modifier.toStringAsFixed(0)} TL)'
+        : '';
+    return SizedBox(
+      width: double.infinity,
+      height: 56,
+      child: OutlinedButton(
+        onPressed: onTap,
+        style: OutlinedButton.styleFrom(
+          backgroundColor: selected ? color : Colors.white,
+          foregroundColor: selected ? Colors.white : color,
+          side: BorderSide(color: color, width: 2),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Expanded(child: Text('$label$modText', overflow: TextOverflow.ellipsis)),
+            Text('₺${price.toStringAsFixed(0)}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
         ),
       ),
     );
@@ -1068,6 +1173,7 @@ class _AddItemModalState extends State<AddItemModal> {
       builder: (ctx) => _PartialPaymentDialog(
         items: activeItems,
         ticketId: serverTicketId!,
+        waiterId: widget.waiterId,
         apiService: widget.apiService,
         onPaymentComplete: (allPaid) {
           if (allPaid) {
@@ -1463,17 +1569,21 @@ class _AddItemModalState extends State<AddItemModal> {
               ),
             ),
           ),
-          const SizedBox(width: 12),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onClose,
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(8),
+          const SizedBox(width: 16),
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: Material(
+              color: Colors.white.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                onTap: widget.onClose,
+                borderRadius: BorderRadius.circular(12),
+                child: const SizedBox(
+                  width: 64,
+                  height: 64,
+                  child: Icon(Icons.close, color: Colors.white, size: 36),
+                ),
               ),
-              child: const Icon(Icons.close, color: Colors.white, size: 22),
             ),
           ),
         ],
@@ -1585,7 +1695,8 @@ class _AddItemModalState extends State<AddItemModal> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final crossAxisCount = (constraints.maxWidth / 160).floor().clamp(2, 5);
+        // Min 3 sutun garanti: pencere kuculurse urunler o oranda kuculsun
+        final crossAxisCount = (constraints.maxWidth / 160).floor().clamp(3, 6);
         return GridView.builder(
           padding: const EdgeInsets.all(10),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -1619,21 +1730,22 @@ class _AddItemModalState extends State<AddItemModal> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (widget.showProductImages)
+              // Gorsel sadece varsa goster, yoksa hic yer kaplamasin
+              if (widget.showProductImages && hasImage)
                 Expanded(
                   flex: 3,
                   child: ClipRRect(
                     borderRadius: const BorderRadius.only(topLeft: Radius.circular(10), topRight: Radius.circular(10)),
-                    child: hasImage ? _buildProductImage(product) : _buildPlaceholder(product),
+                    child: _buildProductImage(product),
                   ),
                 ),
               Expanded(
-                flex: widget.showProductImages ? 2 : 1,
+                flex: (widget.showProductImages && hasImage) ? 2 : 1,
                 child: Padding(
                   padding: const EdgeInsets.all(6),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: widget.showProductImages ? MainAxisAlignment.start : MainAxisAlignment.center,
+                    mainAxisAlignment: (widget.showProductImages && hasImage) ? MainAxisAlignment.start : MainAxisAlignment.center,
                     children: [
                       Text(
                         product['name']?.toString() ?? '',
@@ -1641,8 +1753,8 @@ class _AddItemModalState extends State<AddItemModal> {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11, color: Color(0xFF1f2937)),
                       ),
-                      if (widget.showProductImages) const Spacer(),
-                      if (!widget.showProductImages) const SizedBox(height: 2),
+                      if (widget.showProductImages && hasImage) const Spacer(),
+                      if (!(widget.showProductImages && hasImage)) const SizedBox(height: 2),
                       Text(
                         '${(product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price'] ?? 0} TL',
                         style: TextStyle(color: theme.primaryColor, fontWeight: FontWeight.bold, fontSize: 13),
@@ -1810,8 +1922,17 @@ class _AddItemModalState extends State<AddItemModal> {
         padding: const EdgeInsets.all(8),
         child: Column(
           children: [
-            // Grup 1: Not Ekle, Ürün İptal, Mutfak, Yazdır
+            // Grup 1: Not Ekle, Varyant, Ürün İptal, Mutfak, Yazdır
             _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemIndex != null ? _openNoteDialog : null),
+            const SizedBox(height: 5),
+            _buildActionBtnVertical(
+              icon: Icons.tune,
+              label: 'Varyant',
+              color: const Color(0xFFF59E0B),
+              onTap: hasItems && _selectedItemIndex != null && _variantsForSelectedItem().isNotEmpty
+                  ? _openVariantDialogForSelected
+                  : null,
+            ),
             const SizedBox(height: 5),
             _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemIndex != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
             const SizedBox(height: 5),
@@ -1978,7 +2099,7 @@ class _AddItemModalState extends State<AddItemModal> {
       ),
       child: Column(
         children: [
-          // İlk satır: Not Ekle + Urun Iptal
+          // İlk satır: Not Ekle + Varyant + Urun Iptal
           Row(
             children: [
               Expanded(
@@ -1987,6 +2108,17 @@ class _AddItemModalState extends State<AddItemModal> {
                   label: 'Not Ekle',
                   color: Colors.blueGrey,
                   onTap: hasItems && _selectedItemIndex != null ? _openNoteDialog : null,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildActionBtn(
+                  icon: Icons.tune,
+                  label: 'Varyant',
+                  color: const Color(0xFFF59E0B),
+                  onTap: hasItems && _selectedItemIndex != null && _variantsForSelectedItem().isNotEmpty
+                      ? _openVariantDialogForSelected
+                      : null,
                 ),
               ),
               const SizedBox(width: 6),
@@ -2230,6 +2362,7 @@ class _AddItemModalState extends State<AddItemModal> {
 class _PartialPaymentDialog extends StatefulWidget {
   final List<dynamic> items;
   final int ticketId;
+  final int? waiterId;
   final ApiService apiService;
   final Function(bool allPaid) onPaymentComplete;
   final VoidCallback onClose;
@@ -2240,6 +2373,7 @@ class _PartialPaymentDialog extends StatefulWidget {
     required this.apiService,
     required this.onPaymentComplete,
     required this.onClose,
+    this.waiterId,
   });
 
   @override
@@ -2332,8 +2466,20 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
         }
         _selectedIds.clear();
 
-        // Tüm ürünler ödendi mi?
+        // Tüm ürünler ödendi mi? Evet ise ticket'i de kapat (masa bossun)
         final allPaid = _items.every((i) => i['payment_status'] == 'paid');
+        if (allPaid) {
+          try {
+            await widget.apiService.closeTicket(
+              ticketId: widget.ticketId,
+              paymentMethod: paymentMethod,
+              waiterId: widget.waiterId,
+            );
+          } catch (e) {
+            _showError('Adisyon kapatilamadi: $e');
+            return;
+          }
+        }
         widget.onPaymentComplete(allPaid);
       } else {
         _showError(result['error'] ?? 'Ödeme başarısız');
@@ -2390,6 +2536,17 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
       );
 
       if (result['success'] == true) {
+        // Tum urunler odendi - adisyonu kapat
+        try {
+          await widget.apiService.closeTicket(
+            ticketId: widget.ticketId,
+            paymentMethod: paymentMethod,
+            waiterId: widget.waiterId,
+          );
+        } catch (e) {
+          _showError('Adisyon kapatilamadi: $e');
+          return;
+        }
         widget.onPaymentComplete(true);
       } else {
         _showError(result['error'] ?? 'Ödeme başarısız');

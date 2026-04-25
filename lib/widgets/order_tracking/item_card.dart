@@ -19,9 +19,10 @@ class ItemCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context, listen: false);
-    final h = compact ? 60.0 : 92.0;
-    final qtyFont = compact ? 18.0 : 28.0;
-    final nameFont = compact ? 14.0 : 20.0;
+    // Daha fazla urun sigsin diye kompakt boyutlar
+    final h = compact ? 44.0 : 56.0;
+    final qtyFont = compact ? 14.0 : 18.0;
+    final nameFont = compact ? 12.0 : 14.0;
     final qty = item['quantity']?.toString() ?? '1';
     final name = item['product_name']?.toString() ?? '';
     final notes = item['notes']?.toString();
@@ -50,7 +51,7 @@ class ItemCard extends StatelessWidget {
         ),
         child: Row(children: [
           Container(
-            width: compact ? 50 : 72,
+            width: compact ? 38 : 48,
             height: double.infinity,
             decoration: BoxDecoration(
               color: isDelivered ? const Color(0xFF16A34A) : theme.primaryColor,
@@ -69,7 +70,7 @@ class ItemCard extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

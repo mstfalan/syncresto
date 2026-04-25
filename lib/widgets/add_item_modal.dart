@@ -1044,6 +1044,22 @@ class _AddItemModalState extends State<AddItemModal> {
     final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
     if (activeItems.isEmpty) return;
 
+    // Ticket'in server'a sync olduğunu doğrula ve gerçek server ID'sini al
+    int? serverTicketId;
+    try {
+      final ticketData = await widget.apiService.getTableTicket(widget.tableId);
+      final serverTicket = ticketData?['ticket'] as Map<String, dynamic>?;
+      if (serverTicket != null && serverTicket['offline'] != true) {
+        final id = serverTicket['id'];
+        serverTicketId = id is int ? id : int.tryParse(id?.toString() ?? '');
+      }
+    } catch (_) {}
+
+    if (serverTicketId == null) {
+      _showError('Adisyon henuz sunucuya senkronize edilmedi. Lutfen birkac saniye bekleyip tekrar deneyin veya internet baglantinizi kontrol edin.');
+      return;
+    }
+
     if (!mounted) return;
 
     await showDialog(
@@ -1051,7 +1067,7 @@ class _AddItemModalState extends State<AddItemModal> {
       barrierDismissible: false,
       builder: (ctx) => _PartialPaymentDialog(
         items: activeItems,
-        ticketId: widget.ticketId,
+        ticketId: serverTicketId!,
         apiService: widget.apiService,
         onPaymentComplete: (allPaid) {
           if (allPaid) {

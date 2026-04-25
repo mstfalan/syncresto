@@ -793,8 +793,16 @@ class ApiService {
       });
       return response.data;
     } on DioException catch (e) {
-      print('[API] payItems hatası: ${e.message}');
-      return {'success': false, 'error': e.message};
+      print('[API] payItems hatası: status=${e.response?.statusCode} body=${e.response?.data}');
+      String errorMsg;
+      if (e.response?.statusCode == 404) {
+        errorMsg = 'Adisyon sunucuda bulunamadi. Lutfen sayfayi tazeleyip tekrar deneyin.';
+      } else {
+        errorMsg = e.response?.data is Map
+            ? (e.response!.data['error']?.toString() ?? 'Odeme basarisiz')
+            : (e.message ?? 'Odeme basarisiz');
+      }
+      return {'success': false, 'error': errorMsg};
     }
   }
 

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -68,32 +69,81 @@ void main() async {
     }
   };
 
+  Timer? printerHealthTimer;
+  Future<void> runPrinterHealthCheck() async {
+    try {
+      final results = await printerService.probeAllPrintersHealth();
+      for (final r in results) {
+        final id = r['id'];
+        if (id is int) {
+          webSocketService.emitPrinterHealth(
+            id,
+            (r['status'] as String?) ?? 'unknown',
+            error: r['error'] as String?,
+          );
+        }
+      }
+    } catch (e) {
+      print('[Main] Printer health check error: $e');
+    }
+  }
+
   webSocketService.onConnectionChange = (connected) {
     print('[Main] WebSocket baglantisi: ${connected ? 'Bagli' : 'Bagli degil'}');
+    if (connected) {
+      // First check immediately, then every 60s
+      runPrinterHealthCheck();
+      printerHealthTimer?.cancel();
+      printerHealthTimer = Timer.periodic(
+        const Duration(seconds: 60),
+        (_) => runPrinterHealthCheck(),
+      );
+    } else {
+      printerHealthTimer?.cancel();
+      printerHealthTimer = null;
+    }
   };
 
   // Web panelden yazdırma isteği gelince (dinamik yazıcı yönlendirmesi)
-  webSocketService.onPrintRequest = (order) {
+  webSocketService.onPrintRequest = (order) async {
     final printType = order['_print_type'] as String?;
     final printer = order['_printer'] as Map<String, dynamic>?;
+    final jobId = order['_job_id'];
 
     print('[Main] ========== ONLINE SIPARIS YAZDIRMA ==========');
     print('[Main] order_number: ${order['order_number']}');
     print('[Main] printType: $printType');
     print('[Main] printer: $printer');
+    print('[Main] job_id: $jobId');
     print('[Main] ===============================================');
 
     soundService.playNewOrderSound();
 
-    // Hedef yazıcı bilgisi varsa ona gönder
-    if (printer != null && printerService.isConfigured) {
-      final department = printType == 'cashier_print' ? 'KASA' : 'MUTFAK';
-      print('[Main] Department: $department, yaziciya gonderiliyor...');
-      printerService.printOrderReceipt(order, department, targetPrinter: printer);
-    } else if (printerService.isConfigured) {
-      // Eski davranış: varsayılan yazıcıya gönder
-      print('[Main] Varsayilan yaziciya gonderiliyor (printer null veya bos)');
-      printerService.printOrderReceipt(order, 'WEB SIPARIS');
+    bool printed = false;
+    String? errorMsg;
+    try {
+      if (printer != null && printerService.isConfigured) {
+        final department = printType == 'cashier_print' ? 'KASA' : 'MUTFAK';
+        print('[Main] Department: $department, yaziciya gonderiliyor...');
+        printed = await printerService.printOrderReceipt(order, department, targetPrinter: printer);
+      } else if (printerService.isConfigured) {
+        print('[Main] Varsayilan yaziciya gonderiliyor (printer null veya bos)');
+        printed = await printerService.printOrderReceipt(order, 'WEB SIPARIS');
+      } else {
+        errorMsg = 'POS uygulamasinda yazici ayarlanmamis';
+      }
+    } catch (e) {
+      errorMsg = e.toString();
+      print('[Main] Yazdirma istisnasi: $e');
+    }
+
+    // Telemetry: only emit when we have a job_id from server
+    if (jobId != null) {
+      if (printed) {
+        webSocketService.emitPrintDone(jobId);
+      } else {
+        webSocketService.emitPrintFailed(jobId, errorMsg ?? 'Yazici cevap vermedi');
+      }
     }
   };
 

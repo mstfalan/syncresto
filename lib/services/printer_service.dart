@@ -1527,4 +1527,37 @@ class PrinterService {
   Future<void> clearFailedPrintJobs() async {
     await _localDb.clearFailedPrintJobs();
   }
+
+  /// Probes a single printer with a quick TCP connect (1s timeout) and reports
+  /// {id, status: online|offline, error?}. Does NOT send any bytes — pure health check.
+  Future<Map<String, dynamic>> _probePrinterHealth(Map<String, dynamic> p) async {
+    final id = p['id'];
+    final ip = (p['ip_address'] ?? p['ip'])?.toString();
+    final port = (p['port'] is int) ? p['port'] as int : int.tryParse('${p['port'] ?? 9100}') ?? 9100;
+    if (ip == null || ip.isEmpty || id == null) {
+      return {'id': id, 'status': 'unknown', 'error': 'IP/ID eksik'};
+    }
+    Socket? sock;
+    try {
+      sock = await Socket.connect(ip, port, timeout: const Duration(seconds: 1));
+      try { sock.destroy(); } catch (_) {}
+      return {'id': id, 'status': 'online'};
+    } catch (e) {
+      return {'id': id, 'status': 'offline', 'error': '$ip:$port — $e'};
+    } finally {
+      try { sock?.destroy(); } catch (_) {}
+    }
+  }
+
+  /// Concurrently probes every active server-side printer and returns a list
+  /// of {id, status, error?} maps. Use from a Timer to feed printer_health events.
+  Future<List<Map<String, dynamic>>> probeAllPrintersHealth() async {
+    final printers = _serverPrinters.where((p) {
+      final active = p['is_active'];
+      return active == true || active == 1 || active == '1' || active == 't';
+    }).toList();
+    if (printers.isEmpty) return [];
+    final results = await Future.wait(printers.map(_probePrinterHealth));
+    return results;
+  }
 }

@@ -106,6 +106,18 @@ class WebSocketService {
         print('[WebSocket] Print request received');
         if (data != null && data['order'] != null) {
           final order = Map<String, dynamic>.from(data['order']);
+
+          // Telemetry: server tags each print request with a job_id; immediately
+          // ack receipt so the panel sees status='delivered'. Carry the job_id
+          // on the order object so PrinterService can emit done/failed later.
+          final jobId = data['job_id'];
+          if (jobId != null) {
+            order['_job_id'] = jobId;
+            try {
+              _socket?.emit('print_ack', {'job_id': jobId});
+            } catch (_) {}
+          }
+
           // Settings varsa order'a ekle
           if (data['settings'] != null) {
             order['_settings'] = Map<String, dynamic>.from(data['settings']);
@@ -122,6 +134,7 @@ class WebSocketService {
             'order_number': order['order_number'],
             'print_type': data['type'],
             'printer_name': data['printer']?['name'],
+            if (jobId != null) 'job_id': jobId,
           });
           onPrintRequest?.call(order);
         }
@@ -137,6 +150,43 @@ class WebSocketService {
       _isConnected = false;
       onConnectionChange?.call(false);
       _logService.error(LogType.error, 'WebSocket baglanti hatasi', error: e);
+    }
+  }
+
+  /// Tells the server: "the print job ran on the printer and bytes were sent."
+  /// Server flips status to 'printed'. Safe no-op when offline or no job_id.
+  void emitPrintDone(dynamic jobId) {
+    if (jobId == null) return;
+    try {
+      _socket?.emit('print_done', {'job_id': jobId});
+    } catch (e) {
+      print('[WebSocket] emitPrintDone failed: $e');
+    }
+  }
+
+  /// Tells the server the print attempt failed with the given reason.
+  /// Server flips status to 'failed' and stores the error.
+  void emitPrintFailed(dynamic jobId, String error) {
+    if (jobId == null) return;
+    try {
+      _socket?.emit('print_failed', {'job_id': jobId, 'error': error});
+    } catch (e) {
+      print('[WebSocket] emitPrintFailed failed: $e');
+    }
+  }
+
+  /// Reports printer reachability to the server (60s heartbeat).
+  /// Server updates panel_pos_printers.last_seen_at/last_status/last_error.
+  void emitPrinterHealth(int printerId, String status, {String? error}) {
+    try {
+      final body = <String, dynamic>{
+        'printer_id': printerId,
+        'status': status,
+      };
+      if (error != null) body['error'] = error;
+      _socket?.emit('printer_health', body);
+    } catch (e) {
+      print('[WebSocket] emitPrinterHealth failed: $e');
     }
   }
 

@@ -271,41 +271,47 @@ class PrinterService {
           'printer_ip': ip,
           'printer_type': printerType ?? 'cashier',
         });
-      } else {
-        // Başarısız - kuyruğa ekle
-        await _localDb.addToPrintQueue(
-          printType: 'ticket',
-          printerIp: ip,
-          printerPort: port,
-          printerName: printerName,
-          receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
-        );
-        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
-        _logService.warning(LogType.action, 'Fis kuyruga eklendi', details: {
-          'ticket_number': ticket['ticket_number'],
-          'printer_ip': ip,
-        });
+        return true;
       }
 
-      return success;
+      // Print failed — enqueue for retry. Status is reported through onStatusChange.
+      // We return TRUE because the system has accepted responsibility for the job
+      // (queue will retry); a hard "Yazici hatasi" red toast on top is misleading.
+      await _localDb.addToPrintQueue(
+        printType: 'ticket',
+        printerIp: ip,
+        printerPort: port,
+        printerName: printerName,
+        receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
+      );
+      onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+      _logService.warning(LogType.action, 'Fis kuyruga eklendi', details: {
+        'ticket_number': ticket['ticket_number'],
+        'printer_ip': ip,
+      });
+      return true;
     } catch (e) {
       print('[Printer] Ticket yazdirilirken hata: $e');
 
-      // Hata durumunda da kuyruğa ekle
-      final config = _getPrinterConfig(printerType ?? 'cashier');
-      if (config != null && config['ip'] != null) {
+      // Hata durumunda da kuyruğa ekle — kuyruğa eklenirse caller'a true dön ki
+      // çift hata bildirimi gösterilmesin.
+      final cfg = _getPrinterConfig(printerType ?? 'cashier');
+      if (cfg != null && cfg['ip'] != null) {
         await _localDb.addToPrintQueue(
           printType: 'ticket',
-          printerIp: config['ip'] as String,
-          printerPort: config['port'] as int? ?? 9100,
-          printerName: config['name'] as String? ?? 'Yazici',
+          printerIp: cfg['ip'] as String,
+          printerPort: cfg['port'] as int? ?? 9100,
+          printerName: cfg['name'] as String? ?? 'Yazici',
           receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
         );
         onStatusChange?.call('Hata, kuyruga eklendi', true);
-      } else {
-        onStatusChange?.call('Hata: $e', true);
+        _logService.error(LogType.error, 'Fis yazdirma hatasi (kuyruga alindi)', error: e, details: {
+          'ticket_number': ticket['ticket_number'],
+        });
+        return true;
       }
 
+      onStatusChange?.call('Hata: $e', true);
       _logService.error(LogType.error, 'Fis yazdirma hatasi', error: e, details: {
         'ticket_number': ticket['ticket_number'],
       });
@@ -520,7 +526,15 @@ class PrinterService {
 
   /// Send bytes to printer via TCP
   Future<bool> _sendToPrinter(String ip, int port, List<int> bytes) async {
+    // Strategy: connect+write+flush is the actual print operation. If those succeed,
+    // the printer has the bytes and will print regardless of whether the TCP close
+    // completes cleanly. Many thermal printers (PalmX etc.) reset the connection
+    // immediately after receiving data, which makes close() throw — but the print
+    // already happened. So we treat the operation as successful as soon as flush
+    // returns, and run close()/destroy() in the background without affecting the
+    // result.
     Socket? socket;
+    bool wroteSuccessfully = false;
     try {
       socket = await Socket.connect(
         ip,
@@ -532,16 +546,38 @@ class PrinterService {
       await socket.flush().timeout(const Duration(seconds: 5), onTimeout: () {
         print('[Printer] flush timeout - $ip:$port');
       });
-      await socket.close().timeout(const Duration(seconds: 3), onTimeout: () {
-        print('[Printer] close timeout - $ip:$port');
-      });
+      wroteSuccessfully = true;
+
+      // Small grace period so the printer fully consumes the buffer before close()
+      await Future.delayed(const Duration(milliseconds: 150));
+
+      // Close in background — don't let close errors override a successful print
+      final socketRef = socket;
+      socket = null; // prevent finally from destroying it before close completes
+      socketRef.close()
+        .timeout(const Duration(seconds: 3))
+        .catchError((e) {
+          print('[Printer] close ignored ($ip:$port): $e');
+          try { socketRef.destroy(); } catch (_) {}
+        })
+        .whenComplete(() {
+          try { socketRef.destroy(); } catch (_) {}
+        });
 
       return true;
     } catch (e) {
+      // If we already wrote+flushed successfully, treat connection-reset on close as success.
+      if (wroteSuccessfully) {
+        print('[Printer] post-write error ignored ($ip:$port): $e');
+        return true;
+      }
       print('[Printer] TCP gonderim hatasi ($ip:$port): $e');
       return false;
     } finally {
-      try { socket?.destroy(); } catch (_) {}
+      // Only triggered for the failure path before background close
+      if (socket != null) {
+        try { socket.destroy(); } catch (_) {}
+      }
     }
   }
 

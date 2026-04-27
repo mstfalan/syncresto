@@ -108,7 +108,7 @@ class ApiService {
   // API Key Validation
   // =============================================
 
-  Future<Map<String, dynamic>> validateApiKey(String apiKey) async {
+  Future<Map<String, dynamic>> validateApiKey(String apiKey, {bool force = false}) async {
     try {
       setApiKey(apiKey);
 
@@ -116,10 +116,13 @@ class ApiService {
       final deviceId = await _getDeviceId();
       final deviceName = await _getDeviceName();
 
-      final response = await _dio.post('/api/pos/validate-key', data: {
+      final body = <String, dynamic>{
         'device_id': deviceId,
         'device_name': deviceName,
-      });
+      };
+      if (force) body['force'] = true;
+
+      final response = await _dio.post('/api/pos/validate-key', data: body);
 
       if (response.data['valid'] == true) {
         return response.data;
@@ -137,6 +140,7 @@ class ApiService {
           'error': 'DEVICE_CONFLICT',
           'message': data?['message'] ?? 'Bu API key baska bir cihazda kullanilmaktadir',
           'existing_device': data?['existing_device'] ?? 'Bilinmeyen Cihaz',
+          'can_force': data?['can_force'] == true,
         };
       }
       return {

@@ -39,7 +39,7 @@ class _SetupScreenState extends State<SetupScreen> {
     super.dispose();
   }
 
-  Future<void> _validateAndConnect() async {
+  Future<void> _validateAndConnect({bool force = false}) async {
     final apiKey = _apiKeyController.text.trim();
 
     if (apiKey.isEmpty) {
@@ -61,7 +61,7 @@ class _SetupScreenState extends State<SetupScreen> {
         apiUrl = 'https://$apiUrl';
       }
       widget.apiService.setBaseUrl(apiUrl);
-      final result = await widget.apiService.validateApiKey(apiKey);
+      final result = await widget.apiService.validateApiKey(apiKey, force: force);
 
       if (result['valid'] == true) {
         await widget.storageService.saveApiUrl(apiUrl);
@@ -89,9 +89,20 @@ class _SetupScreenState extends State<SetupScreen> {
           );
         }
       } else {
+        if (result['error'] == 'DEVICE_CONFLICT' && result['can_force'] == true && !force) {
+          if (mounted) setState(() => _isLoading = false);
+          final accept = await _showDeviceConflictDialog(result['existing_device']?.toString() ?? 'Bilinmeyen Cihaz');
+          if (accept == true) {
+            await _validateAndConnect(force: true);
+            return;
+          } else {
+            setState(() => _errorMessage = 'Iptal edildi. API key hala diger cihazda aktif.');
+            return;
+          }
+        }
         setState(() {
           if (result['error'] == 'DEVICE_CONFLICT') {
-            _errorMessage = 'Bu API key ba\u015Fka bir cihazda kullan\u0131lmaktad\u0131r: ${result['existing_device'] ?? 'Bilinmeyen Cihaz'}.\n\nHer API key sadece 1 cihazda kullan\u0131labilir. Yeni key i\u00E7in SyncResto ile ileti\u015Fime ge\u00E7in.';
+            _errorMessage = 'Bu API key baska bir cihazda kullanilmaktadir: ${result['existing_device'] ?? 'Bilinmeyen Cihaz'}.';
           } else {
             _errorMessage = result['error'] ?? 'Gecersiz API Key';
           }
@@ -106,6 +117,72 @@ class _SetupScreenState extends State<SetupScreen> {
         setState(() => _isLoading = false);
       }
     }
+  }
+
+  Future<bool?> _showDeviceConflictDialog(String existingDeviceName) async {
+    if (!mounted) return false;
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('API Key Baska Cihazda'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Bu API key su anda baska bir cihazda kullaniliyor:',
+              style: TextStyle(color: Colors.grey[700]),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.orange[200]!),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.devices, color: Colors.orange[700]),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      existingDeviceName,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Diger cihazdan otomatik cikis yapilarak bu cihazda devam edilsin mi?',
+              style: TextStyle(fontSize: 14),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Not: Diger cihazda tekrar API key girilmesi gerekecek.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600], fontStyle: FontStyle.italic),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Vazgec'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange[700],
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Burada Kullan'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override

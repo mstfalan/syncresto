@@ -39,10 +39,70 @@ jobs:
       - name: Build Windows
         run: flutter build windows --release
 
+      - name: Create self-signed certificate and sign exe
+        shell: pwsh
+        run: |
+          # Self-signed code signing certificate olustur (CN=SyncResto)
+          $cert = New-SelfSignedCertificate `
+            -Subject "CN=SyncResto, O=SyncResto, C=TR" `
+            -Type CodeSigningCert `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -NotAfter (Get-Date).AddYears(3)
+
+          $thumbprint = $cert.Thumbprint
+          Write-Host "Cert Thumbprint: $thumbprint"
+
+          # Sertifikayi PFX olarak kaydet (timestamp icin gerekli degil ama referans)
+          $pwd = ConvertTo-SecureString -String "syncresto-temp-pass" -Force -AsPlainText
+          Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$thumbprint" -FilePath "$env:RUNNER_TEMP\syncresto-cert.pfx" -Password $pwd | Out-Null
+
+          # signtool yolunu bul
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object { [version]($_.Directory.Parent.Name) } -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "signtool: $signtool"
+
+          # SyncResto POS.exe'yi imzala
+          $exePath = "build\windows\x64\runner\Release\SyncResto POS.exe"
+          if (-not (Test-Path $exePath)) {
+            # Alternatif isim (pubspec'teki app name'e gore)
+            $exePath = Get-ChildItem "build\windows\x64\runner\Release\*.exe" | Select-Object -First 1 -ExpandProperty FullName
+          }
+          Write-Host "Signing: $exePath"
+
+          & $signtool sign `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr "http://timestamp.digicert.com" `
+            /sha1 $thumbprint `
+            /d "SyncResto POS" `
+            /du "https://syncresto.com" `
+            "$exePath"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool sign basarisiz oldu (exit $LASTEXITCODE)"
+            exit 1
+          }
+
+          # Imza dogrulama
+          & $signtool verify /pa /v "$exePath"
+
       - name: Create zip package
+        shell: pwsh
         run: |
           cd build/windows/x64/runner/Release
-          Compress-Archive -Path * -DestinationPath ../../../../../SyncResto-Windows.zip
+          Compress-Archive -Path * -DestinationPath ../../../../../SyncResto-Windows.zip -Force
+
+      - name: Calculate SHA-256 checksum
+        id: checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Path "SyncResto-Windows.zip" -Algorithm SHA256).Hash
+          Write-Host "SHA256: $hash"
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Upload Windows Build (Artifact)
         uses: actions/upload-artifact@v4
@@ -61,14 +121,16 @@ jobs:
 
             ### Windows
             - `SyncResto-Windows.zip` dosyasini indirip cikartin
+            - Imzalayan: SyncResto (self-signed)
+            - SHA-256: `${{ steps.checksum.outputs.sha256 }}`
 
             ### Degisiklikler
-            - Yazici gruplari: her urun kendi atanmis yazicisina gidiyor
-            - Salon ozet fis yazicisi destegi
-            - Mutfaga gonder sonrasi masalar ekranina otomatik donus
-            - Lisans sistemi birlestirildi
-            - CloudFlare CDN ve cache optimizasyonu
-            - Custom domain destegi
+            - Windows guncelleme akisi: robocopy /MIR ile mevcut dosyalarin uzerine yazilir
+            - macOS guncelleme: PlistBuddy ile sürüm dogrulamasi + rollback
+            - Self-signed code signing (SyncResto publisher)
+            - PIN ekrani buyutuldu, dokunma sorunlari giderildi
+            - Parcali odeme dialog: kirmizi "ODENMEDI" badge, X kapatma otomatik mutfaga gonder
+            - Masalar ekraninda buyuk kilit iconu (garson degistir)
           files: SyncResto-Windows.zip
           draft: false
           prerelease: false

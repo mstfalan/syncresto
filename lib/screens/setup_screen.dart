@@ -4,6 +4,7 @@ import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
+import '../services/license_service.dart';
 import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 
@@ -64,6 +65,13 @@ class _SetupScreenState extends State<SetupScreen> {
       final result = await widget.apiService.validateApiKey(apiKey, force: force);
 
       if (result['valid'] == true) {
+        // Yeni API key kaydedilmeden ÖNCE eski lisans cache'ini temizle
+        // (aksi halde eski "inactive" cache "Lisans devre dışı" gösterebilir)
+        try {
+          final licSvc = LicenseService();
+          await licSvc.clearLicense();
+        } catch (_) {}
+
         await widget.storageService.saveApiUrl(apiUrl);
         await widget.storageService.saveApiKey(apiKey, result['restaurant_name'] ?? 'POS');
 

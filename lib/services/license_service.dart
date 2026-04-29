@@ -150,20 +150,37 @@ class LicenseService {
   static const String _licenseKey = 'pos_license_info';
   static const String _lastOnlineCheckKey = 'pos_license_last_online_check';
   static const String _deviceSaltKey = 'pos_device_salt';
+  static const String _lastApiKeyHashKey = 'pos_license_last_api_key_hash';
   static String? _deviceSalt;
 
   LicenseInfo? _cachedLicenseInfo;
 
   /// Servisi başlat
+  /// Yeni bir API key (farklı hash) ile çağrılırsa eski local lisans cache'ini temizler
+  /// — aksi halde eski "inactive" cache "Lisans devre dışı" olarak görünmeye devam eder.
   void init(Dio dio, String apiKey) async {
     _dio = dio;
     _apiKey = apiKey;
-    // Device-specific salt oluştur/yükle
     final prefs = await SharedPreferences.getInstance();
+
+    // Device salt
     _deviceSalt = prefs.getString(_deviceSaltKey);
     if (_deviceSalt == null) {
       _deviceSalt = sha256.convert(utf8.encode('SyncResto:${DateTime.now().microsecondsSinceEpoch}:$apiKey')).toString();
       await prefs.setString(_deviceSaltKey, _deviceSalt!);
+    }
+
+    // API key değişiklik tespiti — değiştiyse local lisans cache'i temizle
+    final currentKeyHash = sha256.convert(utf8.encode(apiKey)).toString().substring(0, 32);
+    final lastKeyHash = prefs.getString(_lastApiKeyHashKey);
+    if (lastKeyHash != null && lastKeyHash != currentKeyHash) {
+      debugPrint('[LicenseService] API key degisti, local lisans cache temizleniyor');
+      await prefs.remove(_licenseKey);
+      await prefs.remove(_lastOnlineCheckKey);
+      _cachedLicenseInfo = null;
+    }
+    if (lastKeyHash != currentKeyHash) {
+      await prefs.setString(_lastApiKeyHashKey, currentKeyHash);
     }
   }
 

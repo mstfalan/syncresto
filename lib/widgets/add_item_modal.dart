@@ -1096,6 +1096,31 @@ class _AddItemModalState extends State<AddItemModal> {
     } catch (_) {}
   }
 
+  /// Modal X ile kapatılırken çağrılır.
+  /// Yazdırılmamış (printed=0) ürün varsa önce mutfağa otomatik gönderir,
+  /// sonra modal'ı kapatır. Garson "Mutfağa Gönder"e basmayı unutsa bile
+  /// mutfak çıktısı kaybolmaz.
+  Future<void> _handleClose() async {
+    // _ticketItems içinde aktif (cancelled olmayan) ve printed=0 olan var mı?
+    final hasUnprinted = _ticketItems.any((it) {
+      final m = it as Map<String, dynamic>;
+      if (m['status'] == 'cancelled') return false;
+      final p = m['printed'];
+      if (p == null) return true;
+      if (p is bool) return !p;
+      if (p is num) return p == 0;
+      final s = p.toString();
+      return s == '0' || s.isEmpty || s == 'false';
+    });
+
+    if (hasUnprinted) {
+      // Server-side _sendToKitchenSilent zaten unprinted filtresi yapıyor; arkada gönder
+      try { await _sendToKitchenSilent(); } catch (_) {}
+    }
+
+    if (mounted) widget.onClose();
+  }
+
   Future<void> _printSummaryReceipt(String paymentMethod) async {
     print('[AddItemModal] _printSummaryReceipt: printerService=${widget.printerService != null}, section=${widget.section}');
     if (widget.printerService == null || widget.section == null) {
@@ -1494,7 +1519,14 @@ class _AddItemModalState extends State<AddItemModal> {
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context, listen: false);
 
-    return Dialog(
+    return PopScope(
+      // Modal sistem geri tuşu/ESC ile kapatılırsa da otomatik mutfağa gönder
+      canPop: false,
+      onPopInvoked: (didPop) async {
+        if (didPop) return;
+        await _handleClose();
+      },
+      child: Dialog(
       backgroundColor: Colors.transparent,
       insetPadding: EdgeInsets.zero,
       child: Scaffold(
@@ -1523,6 +1555,7 @@ class _AddItemModalState extends State<AddItemModal> {
             ),
           ],
         ),
+      ),
       ),
       ),
     );
@@ -1576,7 +1609,8 @@ class _AddItemModalState extends State<AddItemModal> {
               color: Colors.white.withOpacity(0.2),
               borderRadius: BorderRadius.circular(12),
               child: InkWell(
-                onTap: widget.onClose,
+                // X ile kapatırken yazdırılmamış ürünler otomatik mutfağa gönderilsin
+                onTap: _handleClose,
                 borderRadius: BorderRadius.circular(12),
                 child: const SizedBox(
                   width: 64,
@@ -2573,15 +2607,26 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
 
     return Dialog(
       backgroundColor: Colors.transparent,
+      elevation: 0,
       insetPadding: const EdgeInsets.all(16),
-      child: Scaffold(
-        body: Container(
+      // Scaffold yerine direkt Container kullan ki arkada beyaz Scaffold pencere çıkmasın
+      // Center ile ekranın ortasına yerleştir
+      child: Center(
+        child: Container(
           width: MediaQuery.of(context).size.width * 0.7,
           height: MediaQuery.of(context).size.height * 0.75,
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.18),
+                blurRadius: 24,
+                offset: const Offset(0, 8),
+              ),
+            ],
           ),
+          clipBehavior: Clip.antiAlias,
           child: Column(
             children: [
               // Header
@@ -2743,76 +2788,122 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     final price = _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
     final paymentMethod = item['payment_method']?.toString().toUpperCase() ?? '';
 
-    return GestureDetector(
-      onTap: isPaid ? null : () { if (itemId != null) _toggleItem(itemId); },
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 6),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: isPaid ? Colors.green[50] : (isSelected ? const Color(0xFF7C3AED).withOpacity(0.08) : Colors.white),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: isPaid ? Colors.green[300]! : (isSelected ? const Color(0xFF7C3AED) : Colors.grey[200]!),
-            width: isSelected ? 2 : 1,
+    // Renk şeması:
+    //   Ödenmiş → yeşil
+    //   Seçili (ödenmemiş) → mor (purple seçim rengi)
+    //   Ödenmemiş (seçilmemiş) → kırmızı/uyarı
+    final unpaidBg = const Color(0xFFFEE2E2);  // red-100
+    final unpaidBorder = const Color(0xFFEF4444);  // red-500
+    final unpaidText = const Color(0xFFB91C1C);  // red-700
+
+    final Color bgColor;
+    final Color borderColor;
+    final Color textColor;
+    final Color qtyBg;
+    if (isPaid) {
+      bgColor = Colors.green[50]!;
+      borderColor = Colors.green[300]!;
+      textColor = Colors.green[700]!;
+      qtyBg = Colors.green;
+    } else if (isSelected) {
+      bgColor = const Color(0xFF7C3AED).withOpacity(0.10);
+      borderColor = const Color(0xFF7C3AED);
+      textColor = const Color(0xFF1F2937);
+      qtyBg = const Color(0xFF7C3AED);
+    } else {
+      bgColor = unpaidBg;
+      borderColor = unpaidBorder;
+      textColor = unpaidText;
+      qtyBg = unpaidBorder;
+    }
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: isPaid ? null : () { if (itemId != null) _toggleItem(itemId); },
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: borderColor,
+              width: isSelected ? 2 : 1,
+            ),
           ),
-        ),
-        child: Row(
-          children: [
-            // Checkbox
-            if (!isPaid)
+          child: Row(
+            children: [
+              // Checkbox
+              if (!isPaid)
+                Container(
+                  width: 24, height: 24,
+                  margin: const EdgeInsets.only(right: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected ? const Color(0xFF7C3AED) : Colors.white,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: isSelected ? const Color(0xFF7C3AED) : unpaidBorder, width: 2),
+                  ),
+                  child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 16) : null,
+                ),
+              // Miktar
               Container(
-                width: 24, height: 24,
-                margin: const EdgeInsets.only(right: 10),
+                width: 28, height: 28,
                 decoration: BoxDecoration(
-                  color: isSelected ? const Color(0xFF7C3AED) : Colors.white,
+                  color: qtyBg,
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: isSelected ? const Color(0xFF7C3AED) : Colors.grey[300]!, width: 2),
                 ),
-                child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 16) : null,
+                child: Center(child: Text('$qty', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))),
               ),
-            // Miktar
-            Container(
-              width: 28, height: 28,
-              decoration: BoxDecoration(
-                color: isPaid ? Colors.green : theme.primaryColor,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Center(child: Text('$qty', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))),
-            ),
-            const SizedBox(width: 10),
-            // Ürün adı
-            Expanded(
-              child: Text(
-                item['product_name']?.toString() ?? '',
-                style: TextStyle(
-                  fontWeight: FontWeight.w500,
-                  color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
-                ),
-              ),
-            ),
-            // Badge (ödenmişse)
-            if (isPaid)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                margin: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  color: paymentMethod == 'CASH' ? Colors.green : Colors.blue,
-                  borderRadius: BorderRadius.circular(4),
-                ),
+              const SizedBox(width: 10),
+              // Ürün adı
+              Expanded(
                 child: Text(
-                  paymentMethod == 'CASH' ? 'NAKİT' : 'KART',
-                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  item['product_name']?.toString() ?? '',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w500,
+                    color: textColor,
+                  ),
                 ),
               ),
-            // Fiyat
-            Text(
-              '${price.toStringAsFixed(2)} TL',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+              // Badge (ödenmişse — yeşil/mavi; ödenmemişse — kırmızı "ÖDENMEDİ")
+              if (isPaid)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: paymentMethod == 'CASH' ? Colors.green : Colors.blue,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    paymentMethod == 'CASH' ? 'NAKİT' : 'KART',
+                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                )
+              else if (!isSelected)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: unpaidBorder,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    'ÖDENMEDİ',
+                    style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              // Fiyat
+              Text(
+                '${price.toStringAsFixed(2)} TL',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: textColor,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

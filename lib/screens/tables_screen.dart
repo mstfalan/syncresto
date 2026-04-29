@@ -481,6 +481,28 @@ class _TablesScreenState extends State<TablesScreen> {
     }
   }
 
+  /// Garson değiştir — mevcut session'ı kapatıp PIN ekranına dön.
+  /// Restoran açıkken farklı garson devreye girebilir.
+  Future<void> _switchWaiter() async {
+    _logService.logAction('Garson değiştir tıklandı', details: {
+      'previous_waiter_id': widget.waiter['id'],
+      'previous_waiter_name': widget.waiter['name'],
+    });
+    await widget.storageService.clearWaiterSession();
+    widget.apiService.clearWaiterToken();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (context) => PinLoginScreen(
+          storageService: widget.storageService,
+          apiService: widget.apiService,
+          printerService: widget.printerService,
+          webSocketService: widget.webSocketService,
+        ),
+      ),
+    );
+  }
+
   void _logout() {
     showDialog(
       context: context,
@@ -644,6 +666,25 @@ class _TablesScreenState extends State<TablesScreen> {
           ),
 
           const Spacer(),
+
+          // Garson Değiştir (Kilit) — tıklayınca PIN ekranı açılır, garson değiştirilebilir
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Material(
+              color: theme.primaryColor.withOpacity(0.10),
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                onTap: _switchWaiter,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  alignment: Alignment.center,
+                  child: Icon(Icons.lock_outline, color: theme.primaryColor, size: 32),
+                ),
+              ),
+            ),
+          ),
 
           // Waiter info
           PopupMenuButton<String>(

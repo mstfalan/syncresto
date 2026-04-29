@@ -389,16 +389,6 @@ class VersionService {
           }
         }
 
-        // Eski uygulamayı sil
-        final oldApp = Directory(appPath);
-        if (await oldApp.exists()) {
-          debugPrint('[VersionService] Eski uygulama siliniyor: $appPath');
-          await oldApp.delete(recursive: true);
-        }
-
-        // Yeni uygulamayı kopyala
-        debugPrint('[VersionService] Yeni uygulama kopyalanıyor: $newAppPath -> $appPath');
-
         // Source app var mı kontrol et
         final sourceApp = Directory(newAppPath);
         final sourceExists = await sourceApp.exists();
@@ -408,6 +398,48 @@ class VersionService {
           throw Exception('Kaynak app bulunamadı: $newAppPath');
         }
 
+        // ÖN-DOĞRULAMA: Yeni .app içindeki Info.plist version'ı, beklenen sürümle eşleşiyor mu?
+        // Eşleşmezse mevcut kuruluma DOKUNMA — yanlış/bozuk paket kullanıcının çalışan kurulumunu bozmasın.
+        try {
+          final plistPath = '$newAppPath/Contents/Info.plist';
+          final plistFile = File(plistPath);
+          if (await plistFile.exists()) {
+            final plistResult = await Process.run(
+              '/usr/libexec/PlistBuddy',
+              ['-c', 'Print CFBundleShortVersionString', plistPath],
+            );
+            final actualVersion = (plistResult.stdout as String).trim();
+            await _writeDebugLog('İndirilen .app sürümü: $actualVersion (beklenen: ${versionInfo.currentVersion})');
+            debugPrint('[VersionService] .app version: $actualVersion, beklenen: ${versionInfo.currentVersion}');
+            // Sadece major.minor.patch karşılaştır (çıkardığımız zip'te +build farklı olabilir)
+            String stripBuild(String v) => v.split('+').first.trim();
+            if (actualVersion.isNotEmpty && stripBuild(actualVersion) != stripBuild(versionInfo.currentVersion)) {
+              await _writeDebugLog('UYARI: Sürüm eşleşmiyor — mevcut kurulum korunuyor');
+              throw Exception('İndirilen paket sürümü beklenen sürümle eşleşmiyor (paket: $actualVersion, beklenen: ${versionInfo.currentVersion}). Güncelleme iptal edildi.');
+            }
+          }
+        } catch (e) {
+          // PlistBuddy yoksa veya hata varsa, akışa devam et (kritik değil) ama logla
+          if (e.toString().contains('eşleşmiyor')) rethrow;
+          await _writeDebugLog('Plist doğrulama atlandı: $e');
+        }
+
+        // Eski uygulamayı YEDEKLE (rollback için), sonra sil
+        final backupPath = '$appPath.backup';
+        final oldApp = Directory(appPath);
+        if (await oldApp.exists()) {
+          debugPrint('[VersionService] Eski uygulama yedekleniyor: $appPath -> $backupPath');
+          // Eski yedek varsa sil
+          final oldBackup = Directory(backupPath);
+          if (await oldBackup.exists()) {
+            await oldBackup.delete(recursive: true);
+          }
+          // Eski .app'i .backup'a taşı (rename)
+          await Process.run('mv', [appPath, backupPath]);
+        }
+
+        // Yeni uygulamayı kopyala
+        debugPrint('[VersionService] Yeni uygulama kopyalanıyor: $newAppPath -> $appPath');
         await _writeDebugLog('Kopyalama: $newAppPath -> $appPath');
         final copyResult = await Process.run('cp', ['-R', newAppPath, appPath]);
         await _writeDebugLog('Copy exit code: ${copyResult.exitCode}');
@@ -416,7 +448,12 @@ class VersionService {
         debugPrint('[VersionService] Copy stderr: ${copyResult.stderr}');
 
         if (copyResult.exitCode != 0) {
-          await _writeDebugLog('HATA: Kopyalama başarısız');
+          await _writeDebugLog('HATA: Kopyalama başarısız, eski sürümü geri yükle');
+          // Rollback: yedeği geri taşı
+          final backup = Directory(backupPath);
+          if (await backup.exists()) {
+            await Process.run('mv', [backupPath, appPath]);
+          }
           throw Exception('Kopyalama hatası: ${copyResult.stderr}');
         }
 
@@ -427,9 +464,22 @@ class VersionService {
         debugPrint('[VersionService] Target app exists: $targetExists');
 
         if (!targetExists) {
-          await _writeDebugLog('HATA: Hedef app bulunamadı');
+          await _writeDebugLog('HATA: Hedef app bulunamadı, eski sürümü geri yükle');
+          // Rollback
+          final backup = Directory(backupPath);
+          if (await backup.exists()) {
+            await Process.run('mv', [backupPath, appPath]);
+          }
           throw Exception('Kopyalama sonrası hedef app bulunamadı');
         }
+
+        // Başarılı — yedeği temizle
+        try {
+          final backup = Directory(backupPath);
+          if (await backup.exists()) {
+            await backup.delete(recursive: true);
+          }
+        } catch (_) {}
 
         await _writeDebugLog('Güncelleme tamamlandı!');
         _logService.logUpdate('Güncelleme tamamlandı, uygulama yeniden başlatılıyor...');
@@ -457,7 +507,12 @@ class VersionService {
         exit(0);
 
       } else if (_platform == 'windows') {
-        // Windows: ZIP'i çıkart ve güncelle
+        // Windows: ZIP'i çıkart ve mevcut kurulumu KOMPLE değiştir.
+        // Kritik kurallar:
+        //   1. Önce eski klasörün İÇERİĞİ silinir (klasörün kendisi değil — yetki sorunu çıkmasın)
+        //   2. Yeni dosyalar robocopy /MIR ile aynalanır (eski silinen dosyalar bırakılmaz)
+        //   3. Çalışan .exe kapanması için 20 saniye bekle, sonra start
+        //   4. Hata olursa batch errorlevel ile yakalanır, log'a yazılır
         final appData = Platform.environment['LOCALAPPDATA'];
         if (appData == null) {
           throw Exception('LOCALAPPDATA bulunamadı');
@@ -466,6 +521,19 @@ class VersionService {
         final appDir = '$appData\\SyncResto POS';
         final tempDir = await getTemporaryDirectory();
         final extractDir = '${tempDir.path}\\SyncResto_Update';
+        final logFile = '${tempDir.path}\\syncresto_updater.log';
+
+        await _writeDebugLog('=== Windows update başlıyor ===');
+        await _writeDebugLog('appDir: $appDir');
+        await _writeDebugLog('extractDir: $extractDir');
+
+        // Önceki extract dizinini temizle
+        try {
+          final oldExtract = Directory(extractDir);
+          if (await oldExtract.exists()) {
+            await oldExtract.delete(recursive: true);
+          }
+        } catch (_) {}
 
         // Uygulama dizini yoksa oluştur
         final appDirObj = Directory(appDir);
@@ -475,29 +543,87 @@ class VersionService {
 
         // PowerShell ile ZIP çıkart
         final extractResult = await Process.run('powershell', [
+          '-NoProfile',
+          '-NonInteractive',
           '-Command',
           'Expand-Archive -Path "${updateFile.path}" -DestinationPath "$extractDir" -Force',
         ]);
 
         if (extractResult.exitCode != 0) {
+          await _writeDebugLog('Extract hatası: ${extractResult.stderr}');
           throw Exception('ZIP çıkartma hatası: ${extractResult.stderr}');
         }
 
-        // Batch script oluştur ve çalıştır
+        // ZIP içinde nested klasör (örn. "SyncResto-Windows/") olabilir, gerçek source path'i bul
+        // Eğer extractDir içinde tek bir alt klasör varsa ve içinde .exe varsa, onu kullan
+        String sourceDir = extractDir;
+        try {
+          final entries = await Directory(extractDir).list().toList();
+          final dirs = entries.whereType<Directory>().toList();
+          // Tek dir + içinde exe yoksa nested kabul et
+          if (dirs.length == 1) {
+            final exeInRoot = entries.whereType<File>().any((f) => f.path.toLowerCase().endsWith('.exe'));
+            if (!exeInRoot) {
+              sourceDir = dirs.first.path;
+              await _writeDebugLog('Nested klasör tespit edildi: $sourceDir');
+            }
+          }
+        } catch (e) {
+          await _writeDebugLog('Source dir tespit hatası: $e');
+        }
+
+        // Updater batch script — robocopy /MIR + bekleme + restart + hata kontrolü
+        // %ERRORLEVEL% < 8 = robocopy başarılı (8+ gerçek hata)
         final batchContent = '''
 @echo off
-timeout /t 2 /nobreak > nul
-xcopy /E /Y "$extractDir\\*" "$appDir\\"
+setlocal enabledelayedexpansion
+echo [%date% %time%] Update başlıyor > "$logFile"
+echo Source: $sourceDir >> "$logFile"
+echo Target: $appDir >> "$logFile"
+
+REM Çalışan POS uygulamasının kapanmasını bekle (max 30 sn)
+echo Eski uygulama kapanıyor... >> "$logFile"
+taskkill /IM "SyncResto POS.exe" /F >nul 2>&1
+timeout /t 5 /nobreak > nul
+
+REM Robocopy ile mirror — eski dosyalar silinir, yeniler kopyalanır
+REM /MIR: mirror, /R:3 retry 3, /W:2 wait 2, /NFL/NDL/NJH/NJS quiet
+robocopy "$sourceDir" "$appDir" /MIR /R:3 /W:2 /NFL /NDL /NJH /NJS >> "$logFile" 2>&1
+set RC=!ERRORLEVEL!
+echo Robocopy exit code: !RC! >> "$logFile"
+
+REM Robocopy 0-7 başarılı, 8+ hata
+if !RC! GEQ 8 (
+  echo HATA: Robocopy başarısız !RC! >> "$logFile"
+  pause
+  exit /b 1
+)
+
+echo Yeni uygulama başlatılıyor... >> "$logFile"
 start "" "$appDir\\SyncResto POS.exe"
-del "%~f0"
+echo [%date% %time%] Update tamamlandı >> "$logFile"
+
+REM Updater script'i kendini sil
+(goto) 2>nul & del "%~f0"
 ''';
 
         final batchFile = File('${tempDir.path}\\syncresto_updater.bat');
         await batchFile.writeAsString(batchContent);
 
-        await Process.start('cmd', ['/c', batchFile.path], mode: ProcessStartMode.detached);
+        await _writeDebugLog('Batch dosyası yazıldı: ${batchFile.path}');
 
+        // Detached olarak başlat — POS app kapatılınca da batch yaşamaya devam etsin
+        await Process.start(
+          'cmd',
+          ['/c', 'start', '""', '/MIN', batchFile.path],
+          mode: ProcessStartMode.detached,
+          runInShell: true,
+        );
+
+        await _writeDebugLog('Updater başlatıldı, uygulama kapatılıyor...');
         await _logService.flush();
+        // Kısa bekleme — batch'in taskkill'e ulaşmasından önce kendi çıkışımızı garantile
+        await Future.delayed(const Duration(milliseconds: 500));
         exit(0);
       }
 

@@ -225,8 +225,10 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
           child: Center(
             child: SingleChildScrollView(
               child: Container(
-                width: 360,
-                padding: const EdgeInsets.all(32),
+                // Numpad: 3 buton × 88 px + 8 yatay padding × 2 × 3 = ~316 px
+                // Card padding 28×2 = 56 → toplam 372 px → 420 yeterli + nefes payı
+                width: 420,
+                padding: const EdgeInsets.all(28),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(24),
@@ -376,6 +378,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
 
   Widget _buildNumpad() {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -385,7 +388,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
             _buildNumButton('3'),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -394,7 +397,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
             _buildNumButton('6'),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -403,7 +406,7 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
             _buildNumButton('9'),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 16),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -417,26 +420,27 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
   }
 
   Widget _buildNumButton(String digit) {
+    // POS dokunmatik ekranlar için 96x80 (önceden 70x56 — çok küçüktü, yanlış tuşa basıyordu)
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      child: SizedBox(
-        width: 70,
-        height: 56,
-        child: ElevatedButton(
-          onPressed: () => _addDigit(digit),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFFF3F4F6),
-            foregroundColor: const Color(0xFF1F2937),
-            elevation: 0,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-          ),
-          child: Text(
-            digit,
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.w600,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Material(
+        color: const Color(0xFFF3F4F6),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          onTap: () => _addDigit(digit),
+          borderRadius: BorderRadius.circular(14),
+          child: SizedBox(
+            width: 92,
+            height: 74,
+            child: Center(
+              child: Text(
+                digit,
+                style: const TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF1F2937),
+                ),
+              ),
             ),
           ),
         ),
@@ -445,30 +449,31 @@ class _PinLoginScreenState extends State<PinLoginScreen> {
   }
 
   Widget _buildActionButton(String? label, Color color, VoidCallback onPressed, {IconData? icon}) {
+    // Aynı boyut (96x80) — touch target kuralı
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      child: SizedBox(
-        width: 70,
-        height: 56,
-        child: ElevatedButton(
-          onPressed: onPressed,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: color.withOpacity(0.1),
-            foregroundColor: color,
-            elevation: 0,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Material(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(14),
+          child: SizedBox(
+            width: 92,
+            height: 74,
+            child: Center(
+              child: icon != null
+                  ? Icon(icon, size: 28, color: color)
+                  : Text(
+                      label!,
+                      style: TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w700,
+                        color: color,
+                      ),
+                    ),
             ),
           ),
-          child: icon != null
-              ? Icon(icon, size: 24)
-              : Text(
-                  label!,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
         ),
       ),
     );

@@ -1030,6 +1030,89 @@ class ApiService {
     }
   }
 
+  /// Yaziciya basariyla bastiktan sonra item'lari printed=1 isaretle.
+  /// Yazici fail olursa BU CAGRI YAPILMAZ; printed=0 kalir, sonraki "Mutfaga
+  /// Gonder" tekrar dener (sessiz kayip onleme).
+  ///
+  /// jobIds: panel_print_jobs telemetri kayitlari (printed olarak isaretlenir).
+  Future<bool> markItemsPrinted({
+    required int ticketId,
+    required List<int> itemIds,
+    List<int>? jobIds,
+  }) async {
+    if (itemIds.isEmpty && (jobIds == null || jobIds.isEmpty)) return true;
+    if (!_connectivity.isOnline) {
+      _logService.warning(LogType.action, 'mark-items-printed atlandi: cevrimdisi', details: {
+        'ticket_id': ticketId,
+        'item_ids': itemIds,
+        'job_ids': jobIds,
+      });
+      return false;
+    }
+    try {
+      final response = await _dio.post(
+        '/api/pos/tickets/$ticketId/mark-items-printed',
+        data: {
+          'item_ids': itemIds,
+          if (jobIds != null && jobIds.isNotEmpty) 'job_ids': jobIds,
+        },
+      );
+      return response.data['success'] == true;
+    } on DioException catch (e) {
+      print('[API] markItemsPrinted hatasi: ${e.message}');
+      _logService.error(LogType.error, 'mark-items-printed hatasi', error: e, details: {
+        'ticket_id': ticketId,
+        'item_ids': itemIds,
+        'job_ids': jobIds,
+      });
+      return false;
+    }
+  }
+
+  /// Yazdirma fail oldu — telemetriye bildir.
+  /// Sunucuda panel_print_jobs.status = 'failed', failed_at = NOW(), error doldurulur.
+  Future<bool> reportPrintFailed({
+    required int ticketId,
+    required int jobId,
+    required String error,
+  }) async {
+    if (!_connectivity.isOnline) return false;
+    try {
+      final response = await _dio.post(
+        '/api/pos/tickets/$ticketId/report-print-failed',
+        data: {'job_id': jobId, 'error': error},
+      );
+      return response.data['success'] == true;
+    } on DioException catch (e) {
+      print('[API] reportPrintFailed hatasi: ${e.message}');
+      return false;
+    }
+  }
+
+  /// Yazici heartbeat — periyodik olarak DLE EOT 1 sonucunu sunucuya yaz.
+  /// Sunucuda panel_pos_printers.last_seen_at, last_status, last_error guncellenir.
+  Future<bool> printerHeartbeat({
+    required int printerId,
+    required String status, // 'online' | 'offline' | 'paper_out' | 'cover_open'
+    String? error,
+  }) async {
+    if (!_connectivity.isOnline) return false;
+    try {
+      final response = await _dio.post(
+        '/api/pos/printers/$printerId/heartbeat',
+        data: {
+          'status': status,
+          if (error != null) 'error': error,
+        },
+      );
+      return response.data['success'] == true;
+    } on DioException catch (e) {
+      // Heartbeat patlamasi POS akisini etkilemesin — sadece sessiz logla
+      print('[API] printerHeartbeat hatasi: ${e.message}');
+      return false;
+    }
+  }
+
   // =============================================
   // Sync & Connectivity
   // =============================================

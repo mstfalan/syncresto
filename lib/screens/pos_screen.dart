@@ -346,39 +346,75 @@ class _PosScreenState extends State<PosScreen> {
       // Her yazıcı grubuna ayrı fiş gönder
       int successCount = 0;
       int failCount = 0;
+      // Sunucuda printed=1 yapilacak item ID'leri ve panel_print_jobs ID'leri.
+      // Mutfak yazicilarinin basari/fail durumu telemetri tablosuna yazilir.
+      // Ozet fis (type=summary) basarisi printed=1 tetiklemez (mutfak'la ayni item'i tekrarlar).
+      final Set<int> printedItemIds = <int>{};
+      final Set<int> printedJobIds = <int>{};
+
+      int? _toInt(dynamic x) {
+        if (x is int) return x;
+        if (x is String) return int.tryParse(x);
+        if (x is double) return x.toInt();
+        return null;
+      }
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final groupType = group['type'] as String? ?? 'kitchen';
+        final jobId = _toInt(group['job_id']);
 
         if (groupItems.isEmpty) continue;
 
         bool success = false;
+        String? failReason;
 
-        if (printerIp != null && printerIp.isNotEmpty) {
-          // Sunucudan gelen yazıcı bilgileriyle yazdır
-          success = await widget.printerService.printKitchenReceiptToIp(
-            ticket: ticket,
-            items: groupItems,
-            ip: printerIp,
-            port: printerPort,
-          );
-        } else {
-          // Varsayılan yazıcıya gönder
-          success = await widget.printerService.printKitchenReceipt(
-            ticket: ticket,
-            items: groupItems,
-          );
+        try {
+          if (printerIp != null && printerIp.isNotEmpty) {
+            success = await widget.printerService.printKitchenReceiptToIp(
+              ticket: ticket,
+              items: groupItems,
+              ip: printerIp,
+              port: printerPort,
+            );
+            if (!success) failReason = 'TCP/print failed at $printerIp:$printerPort';
+          } else {
+            success = await widget.printerService.printKitchenReceipt(
+              ticket: ticket,
+              items: groupItems,
+            );
+            if (!success) failReason = 'Local printer failed';
+          }
+        } catch (e) {
+          success = false;
+          failReason = e.toString();
         }
 
         if (success) {
           successCount += groupItems.length;
           print('[POS] $printerName yazicisina ${groupItems.length} urun gonderildi');
+          if (groupType == 'kitchen') {
+            // Sadece mutfak grubu basarisi printed=1 ve job_id 'printed' yapma yetkisi verir
+            for (final it in groupItems) {
+              final id = _toInt((it is Map) ? it['id'] : null);
+              if (id != null) printedItemIds.add(id);
+            }
+            if (jobId != null) printedJobIds.add(jobId);
+          }
         } else {
           failCount += groupItems.length;
-          print('[POS] $printerName yazicisina gonderilemedi');
+          print('[POS] $printerName yazicisina gonderilemedi: $failReason');
+          // Telemetri: fail bildir
+          if (jobId != null) {
+            widget.apiService.reportPrintFailed(
+              ticketId: _currentTicket!['id'],
+              jobId: jobId,
+              error: failReason ?? 'unknown',
+            ); // fire-and-forget; UI'yi bloklama
+          }
         }
       }
 
@@ -390,8 +426,24 @@ class _PosScreenState extends State<PosScreen> {
         );
         if (success) {
           successCount = items.length;
+          for (final it in items) {
+            final id = _toInt((it is Map) ? it['id'] : null);
+            if (id != null) printedItemIds.add(id);
+          }
         } else {
           failCount = items.length;
+        }
+      }
+
+      // Yaziciya basariyla bastiktan sonra sunucuda printed=1 ve telemetri'de 'printed' isaretle.
+      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
+        final marked = await widget.apiService.markItemsPrinted(
+          ticketId: _currentTicket!['id'],
+          itemIds: printedItemIds.toList(),
+          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
+        );
+        if (!marked) {
+          print('[POS] mark-items-printed basarisiz; sunucuda printed=0 kalmis olabilir');
         }
       }
 

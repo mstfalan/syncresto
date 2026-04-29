@@ -75,13 +75,16 @@ void main() async {
       final results = await printerService.probeAllPrintersHealth();
       for (final r in results) {
         final id = r['id'];
-        if (id is int) {
-          webSocketService.emitPrinterHealth(
-            id,
-            (r['status'] as String?) ?? 'unknown',
-            error: r['error'] as String?,
-          );
-        }
+        if (id is! int) continue;
+        final status = (r['status'] as String?) ?? 'unknown';
+        final error = r['error'] as String?;
+
+        // 1) WebSocket emit (eski sistem — transient bildirim)
+        webSocketService.emitPrinterHealth(id, status, error: error);
+
+        // 2) REST heartbeat → panel_pos_printers.last_seen_at/last_status/last_error
+        //    Admin UI "Yazici Sagligi" tablosunda bu veri okunuyor.
+        apiService.printerHeartbeat(printerId: id, status: status, error: error);
       }
     } catch (e) {
       print('[Main] Printer health check error: $e');

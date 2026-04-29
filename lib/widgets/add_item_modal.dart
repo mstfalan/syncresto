@@ -426,6 +426,9 @@ class _AddItemModalState extends State<AddItemModal> {
       });
 
       // Arka planda sunucuya gonder (UI beklemez)
+      // NOT: Success path'te _loadTicketItems() COKMUSUNCE 5sn donmaya yol aciyordu.
+      // Optimistic update zaten yapildi (yukarida). Gercek ID'ler bir sonraki acilista
+      // veya manuel refresh'te senkronize olur. Error path'te rollback icin reload tutuyoruz.
       widget.apiService.addTicketItem(
         ticketId: widget.ticketId,
         productId: productId,
@@ -435,10 +438,9 @@ class _AddItemModalState extends State<AddItemModal> {
         waiterId: widget.waiterId,
       ).then((_) {
         widget.onItemAdded();
-        _loadTicketItems(); // Gercek ID'leri al
       }).catchError((e) {
         _showError('Sunucu hatasi: $e');
-        _loadTicketItems(); // Geri al
+        _loadTicketItems(); // Geri al — optimistic update'i temizle
       });
     } catch (e) {
       _showError('Urun eklenemedi: $e');

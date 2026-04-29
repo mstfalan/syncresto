@@ -1528,8 +1528,15 @@ class PrinterService {
     await _localDb.clearFailedPrintJobs();
   }
 
-  /// Probes a single printer with a quick TCP connect (1s timeout) and reports
-  /// {id, status: online|offline, error?}. Does NOT send any bytes — pure health check.
+  /// ESC/POS yazici saglik kontrolu: TCP connect + DLE EOT n status query.
+  /// Detail seviyeleri:
+  ///   1) TCP connect basarisiz → status='offline', error='unreachable'
+  ///   2) DLE EOT 1 (printer status):  bit2=1 → drawer open (yok say); bit3=1 → offline (cover/paper sorun)
+  ///   3) DLE EOT 4 (paper sensor):   bit5,6 → kagit yok
+  ///   4) DLE EOT 2 (offline cause):  bit2=1 cover open; bit3=1 paper feed; bit5=1 paper end; bit6=1 error
+  /// Yazici DLE EOT'a cevap vermezse 'online' kabul edilir (bazi modeller bunu desteklemiyor).
+  ///
+  /// Donus: {id, status: online|offline|paper_out|cover_open|unreachable, error?}
   Future<Map<String, dynamic>> _probePrinterHealth(Map<String, dynamic> p) async {
     final id = p['id'];
     final ip = (p['ip_address'] ?? p['ip'])?.toString();
@@ -1537,15 +1544,76 @@ class PrinterService {
     if (ip == null || ip.isEmpty || id == null) {
       return {'id': id, 'status': 'unknown', 'error': 'IP/ID eksik'};
     }
+
     Socket? sock;
     try {
       sock = await Socket.connect(ip, port, timeout: const Duration(seconds: 1));
-      try { sock.destroy(); } catch (_) {}
-      return {'id': id, 'status': 'online'};
     } catch (e) {
-      return {'id': id, 'status': 'offline', 'error': '$ip:$port — $e'};
-    } finally {
-      try { sock?.destroy(); } catch (_) {}
+      return {'id': id, 'status': 'offline', 'error': 'unreachable: $ip:$port'};
+    }
+
+    // DLE EOT 1 (printer status), 2 (offline cause), 4 (paper sensor)
+    // Yazici cevap vermezse 1.5sn icinde ignore et (online kabul).
+    try {
+      final responses = <int>[];
+      final completer = Completer<List<int>>();
+      final sub = sock.listen(
+        (data) { responses.addAll(data); },
+        onError: (_) {},
+        onDone: () { if (!completer.isCompleted) completer.complete(responses); },
+        cancelOnError: false,
+      );
+      // DLE EOT 1, 2, 4 — 3 ardisik query
+      sock.add([0x10, 0x04, 0x01]);
+      sock.add([0x10, 0x04, 0x02]);
+      sock.add([0x10, 0x04, 0x04]);
+      await sock.flush();
+      // 1.2sn cevap bekle (yeterli; flush sonrasi yazici hemen ack atar)
+      await Future.any([
+        Future.delayed(const Duration(milliseconds: 1200)),
+        completer.future,
+      ]);
+      await sub.cancel();
+      try { sock.destroy(); } catch (_) {}
+
+      if (responses.isEmpty) {
+        // Yazici DLE EOT desteklemiyor olabilir — connect basarili oldu, online kabul et
+        return {'id': id, 'status': 'online'};
+      }
+
+      // Cevap byte'larini analiz et
+      // ESC/POS: bit4 her zaman 1, bit0 ve bit7 her zaman 0
+      String status = 'online';
+      String? error;
+
+      for (final byte in responses) {
+        // Status (DLE EOT 1): bit3=1 offline
+        // Offline cause (DLE EOT 2): bit2=1 cover open, bit5=1 paper end, bit6=1 error
+        // Paper sensor (DLE EOT 4): bit5=1 OR bit6=1 paper end
+        if ((byte & 0x04) != 0) { // cover open (DLE EOT 2 bit2)
+          status = 'cover_open';
+          error = 'Kapak acik';
+          break;
+        }
+        if ((byte & 0x60) != 0 || (byte & 0x20) != 0) { // paper end bits
+          status = 'paper_out';
+          error = 'Kagit yok';
+          break;
+        }
+        if ((byte & 0x40) != 0) { // error bit (DLE EOT 2 bit6)
+          status = 'offline';
+          error = 'Yazici hata bayragi';
+          break;
+        }
+      }
+
+      return error != null
+          ? {'id': id, 'status': status, 'error': error}
+          : {'id': id, 'status': 'online'};
+    } catch (e) {
+      try { sock.destroy(); } catch (_) {}
+      // DLE EOT exception'i online'i bozmaz — connect basarili oldu
+      return {'id': id, 'status': 'online'};
     }
   }
 

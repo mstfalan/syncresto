@@ -305,7 +305,8 @@ class VersionService {
   }
 
   /// Güncellemeyi uygula
-  Future<bool> applyUpdate(File updateFile) async {
+  /// [expectedVersion]: paket içindeki .app sürümü bununla eşleşmeli (mac doğrulama için)
+  Future<bool> applyUpdate(File updateFile, {String? expectedVersion}) async {
     try {
       await _writeDebugLog('=== Güncelleme başlıyor ===');
       await _writeDebugLog('Update file: ${updateFile.path}');
@@ -400,28 +401,30 @@ class VersionService {
 
         // ÖN-DOĞRULAMA: Yeni .app içindeki Info.plist version'ı, beklenen sürümle eşleşiyor mu?
         // Eşleşmezse mevcut kuruluma DOKUNMA — yanlış/bozuk paket kullanıcının çalışan kurulumunu bozmasın.
-        try {
-          final plistPath = '$newAppPath/Contents/Info.plist';
-          final plistFile = File(plistPath);
-          if (await plistFile.exists()) {
-            final plistResult = await Process.run(
-              '/usr/libexec/PlistBuddy',
-              ['-c', 'Print CFBundleShortVersionString', plistPath],
-            );
-            final actualVersion = (plistResult.stdout as String).trim();
-            await _writeDebugLog('İndirilen .app sürümü: $actualVersion (beklenen: ${versionInfo.currentVersion})');
-            debugPrint('[VersionService] .app version: $actualVersion, beklenen: ${versionInfo.currentVersion}');
-            // Sadece major.minor.patch karşılaştır (çıkardığımız zip'te +build farklı olabilir)
-            String stripBuild(String v) => v.split('+').first.trim();
-            if (actualVersion.isNotEmpty && stripBuild(actualVersion) != stripBuild(versionInfo.currentVersion)) {
-              await _writeDebugLog('UYARI: Sürüm eşleşmiyor — mevcut kurulum korunuyor');
-              throw Exception('İndirilen paket sürümü beklenen sürümle eşleşmiyor (paket: $actualVersion, beklenen: ${versionInfo.currentVersion}). Güncelleme iptal edildi.');
+        if (expectedVersion != null && expectedVersion.isNotEmpty) {
+          try {
+            final plistPath = '$newAppPath/Contents/Info.plist';
+            final plistFile = File(plistPath);
+            if (await plistFile.exists()) {
+              final plistResult = await Process.run(
+                '/usr/libexec/PlistBuddy',
+                ['-c', 'Print CFBundleShortVersionString', plistPath],
+              );
+              final actualVersion = (plistResult.stdout as String).trim();
+              await _writeDebugLog('İndirilen .app sürümü: $actualVersion (beklenen: $expectedVersion)');
+              debugPrint('[VersionService] .app version: $actualVersion, beklenen: $expectedVersion');
+              // Sadece major.minor.patch karşılaştır (çıkardığımız zip'te +build farklı olabilir)
+              String stripBuild(String v) => v.split('+').first.trim();
+              if (actualVersion.isNotEmpty && stripBuild(actualVersion) != stripBuild(expectedVersion)) {
+                await _writeDebugLog('UYARI: Sürüm eşleşmiyor — mevcut kurulum korunuyor');
+                throw Exception('İndirilen paket sürümü beklenen sürümle eşleşmiyor (paket: $actualVersion, beklenen: $expectedVersion). Güncelleme iptal edildi.');
+              }
             }
+          } catch (e) {
+            // PlistBuddy yoksa veya hata varsa, akışa devam et (kritik değil) ama logla
+            if (e.toString().contains('eşleşmiyor')) rethrow;
+            await _writeDebugLog('Plist doğrulama atlandı: $e');
           }
-        } catch (e) {
-          // PlistBuddy yoksa veya hata varsa, akışa devam et (kritik değil) ama logla
-          if (e.toString().contains('eşleşmiyor')) rethrow;
-          await _writeDebugLog('Plist doğrulama atlandı: $e');
         }
 
         // Eski uygulamayı YEDEKLE (rollback için), sonra sil

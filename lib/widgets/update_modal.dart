@@ -296,7 +296,10 @@ class _UpdateModalState extends State<UpdateModal> {
       });
 
       // Güncellemeyi uygula
-      final success = await _versionService.applyUpdate(updateFile);
+      final success = await _versionService.applyUpdate(
+        updateFile,
+        expectedVersion: _versionInfo.currentVersion,
+      );
 
       if (!success) {
         throw Exception('Güncelleme uygulanamadı');

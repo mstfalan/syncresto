@@ -47,7 +47,20 @@ class _AddItemModalState extends State<AddItemModal> {
   bool _isLoading = true;
   int? _selectedCategoryId;
   String _searchQuery = '';
-  int? _selectedItemIndex;
+  /// Seçili ticket item'in ID'si (server tarafındaki id).
+  /// Index yerine ID kullanıyoruz çünkü _ticketItems sırası API refresh sonrası
+  /// değişebiliyordu ve eski index yanlış item'ı işaret ediyordu (notları başka
+  /// ürünlere uyguluyordu). ID ile her zaman doğru item bulunur.
+  int? _selectedItemId;
+  /// Helper — ID ile item bul (cancelled olmayanlar arasından)
+  Map<String, dynamic>? _findSelectedItem() {
+    if (_selectedItemId == null) return null;
+    for (final it in _ticketItems) {
+      if (it['status'] == 'cancelled') continue;
+      if (_safeInt(it['id']) == _selectedItemId) return it;
+    }
+    return null;
+  }
   final TextEditingController _searchController = TextEditingController();
   final ImageCacheService _imageCache = ImageCacheService();
   bool _imageCacheReady = false;
@@ -210,10 +223,8 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Secili sepet item'inin urunu icin varyant kayitlari var mi?
   List _variantsForSelectedItem() {
-    if (_selectedItemIndex == null) return const [];
-    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
-    if (_selectedItemIndex! >= activeItems.length) return const [];
-    final item = activeItems[_selectedItemIndex!];
+    final item = _findSelectedItem();
+    if (item == null) return const [];
     final productId = item['product_id'];
     if (productId == null) return const [];
     final prod = _products.where((p) => p['id'] == productId).firstOrNull;
@@ -224,10 +235,8 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Sepetteki secili item icin varyant secim dialog'u
   Future<void> _openVariantDialogForSelected() async {
-    if (_selectedItemIndex == null) return;
-    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
-    if (_selectedItemIndex! >= activeItems.length) return;
-    final item = activeItems[_selectedItemIndex!];
+    final item = _findSelectedItem();
+    if (item == null) return;
     final productId = item['product_id'];
     if (productId == null) return;
     final prod = _products.where((p) => p['id'] == productId).firstOrNull;
@@ -449,12 +458,8 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Seçili ürüne not ekle popup — hazır notlar + serbest yazı
   Future<void> _openNoteDialog() async {
-    if (_selectedItemIndex == null) return;
-
-    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
-    if (_selectedItemIndex! >= activeItems.length) return;
-
-    final item = activeItems[_selectedItemIndex!];
+    final item = _findSelectedItem();
+    if (item == null) return;
     final currentNote = item['notes']?.toString() ?? '';
     final controller = TextEditingController(text: currentNote);
 
@@ -695,9 +700,22 @@ class _AddItemModalState extends State<AddItemModal> {
       final note = result['note'] as String? ?? '';
       final addedPrice = result['extraPrice'] as double? ?? 0;
 
-      // Tek API çağrısında hem not hem fiyat güncelle
-      final currentPrice = _safeDouble(item['unit_price']);
-      final newPrice = addedPrice > 0 ? currentPrice + addedPrice : null;
+      // Fiyat hesaplama — her zaman BASE fiyat + addedPrice (not eklendiğinde de
+      // çıkarıldığında da). Eski mantık (currentPrice + addedPrice) varyant
+      // kaldırılınca eski şişmiş fiyatı koruyordu.
+      final productId = item['product_id'];
+      double basePrice = 0;
+      if (productId != null) {
+        final prod = _products.where((p) => p['id'] == productId).firstOrNull;
+        if (prod != null) {
+          basePrice = _safeDouble(prod['restaurant_price'] != null && prod['restaurant_price'] != 0
+              ? prod['restaurant_price']
+              : prod['price']);
+        }
+      }
+      // Fallback — products listesinde bulunamazsa item'in mevcut fiyatından geri hesapla
+      // (önceki addedPrice'ı bilemiyoruz; bu durumda fiyatı değiştirme)
+      final newPrice = basePrice > 0 ? basePrice + addedPrice : null;
 
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
@@ -733,10 +751,8 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Ürün iptal — sebep seçimi zorunlu
   Future<void> _cancelSelectedItem() async {
-    if (_selectedItemIndex == null) return;
-    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
-    if (_selectedItemIndex! >= activeItems.length) return;
-    final item = activeItems[_selectedItemIndex!];
+    final item = _findSelectedItem();
+    if (item == null) return;
     final itemId = _safeInt(item['id']);
     if (itemId == null) return;
 
@@ -841,7 +857,7 @@ class _AddItemModalState extends State<AddItemModal> {
         cancelReason: selectedReason,
         waiterId: widget.waiterId,
       );
-      setState(() => _selectedItemIndex = null);
+      setState(() => _selectedItemId = null);
       await _loadTicketItems();
       widget.onItemAdded();
       _showSuccess('Ürün iptal edildi: $selectedReason');
@@ -1099,27 +1115,9 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   /// Modal X ile kapatılırken çağrılır.
-  /// Yazdırılmamış (printed=0) ürün varsa önce mutfağa otomatik gönderir,
-  /// sonra modal'ı kapatır. Garson "Mutfağa Gönder"e basmayı unutsa bile
-  /// mutfak çıktısı kaybolmaz.
+  /// Otomatik mutfağa gönderme kaldırıldı — kullanıcı isteği üzerine.
+  /// Yazdırma için garson açıkça "Mutfağa Gönder" butonuna basmalı.
   Future<void> _handleClose() async {
-    // _ticketItems içinde aktif (cancelled olmayan) ve printed=0 olan var mı?
-    final hasUnprinted = _ticketItems.any((it) {
-      final m = it as Map<String, dynamic>;
-      if (m['status'] == 'cancelled') return false;
-      final p = m['printed'];
-      if (p == null) return true;
-      if (p is bool) return !p;
-      if (p is num) return p == 0;
-      final s = p.toString();
-      return s == '0' || s.isEmpty || s == 'false';
-    });
-
-    if (hasUnprinted) {
-      // Server-side _sendToKitchenSilent zaten unprinted filtresi yapıyor; arkada gönder
-      try { await _sendToKitchenSilent(); } catch (_) {}
-    }
-
     if (mounted) widget.onClose();
   }
 
@@ -1874,7 +1872,8 @@ class _AddItemModalState extends State<AddItemModal> {
                     itemCount: activeItems.length,
                     itemBuilder: (context, index) {
                       final item = activeItems[index];
-                      final isSelected = _selectedItemIndex == index;
+                      final itemId = _safeInt(item['id']);
+                      final isSelected = itemId != null && _selectedItemId == itemId;
                       return _buildTicketItemRow(item, theme, index, isSelected);
                     },
                   ),
@@ -1959,18 +1958,18 @@ class _AddItemModalState extends State<AddItemModal> {
         child: Column(
           children: [
             // Grup 1: Not Ekle, Varyant, Ürün İptal, Mutfak, Yazdır
-            _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemIndex != null ? _openNoteDialog : null),
+            _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null),
             const SizedBox(height: 5),
             _buildActionBtnVertical(
               icon: Icons.tune,
               label: 'Varyant',
               color: const Color(0xFFF59E0B),
-              onTap: hasItems && _selectedItemIndex != null && _variantsForSelectedItem().isNotEmpty
+              onTap: hasItems && _selectedItemId != null && _variantsForSelectedItem().isNotEmpty
                   ? _openVariantDialogForSelected
                   : null,
             ),
             const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemIndex != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
+            _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
             const SizedBox(height: 5),
             _buildActionBtnVertical(icon: Icons.restaurant, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
             const SizedBox(height: 5),
@@ -2049,7 +2048,10 @@ class _AddItemModalState extends State<AddItemModal> {
     final payMethod = item['payment_method']?.toString().toUpperCase() ?? '';
 
     return GestureDetector(
-      onTap: () => setState(() => _selectedItemIndex = isSelected ? null : index),
+      onTap: () {
+        final itemId = _safeInt(item['id']);
+        setState(() => _selectedItemId = isSelected ? null : itemId);
+      },
       child: Container(
         // Dokunmatik ekran icin 2x - padding + fontSize artirildi
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
@@ -2126,7 +2128,7 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildActionButtons(ThemeProvider theme, bool hasItems) {
-    print('[AddItemModal] _buildActionButtons: hasItems=$hasItems, _selectedItemIndex=$_selectedItemIndex, cancel_perm=${_hasPermission("cancel_item")}');
+    print('[AddItemModal] _buildActionButtons: hasItems=$hasItems, _selectedItemId=$_selectedItemId, cancel_perm=${_hasPermission("cancel_item")}');
     return Container(
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
@@ -2143,7 +2145,7 @@ class _AddItemModalState extends State<AddItemModal> {
                   icon: Icons.edit_note,
                   label: 'Not Ekle',
                   color: Colors.blueGrey,
-                  onTap: hasItems && _selectedItemIndex != null ? _openNoteDialog : null,
+                  onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null,
                 ),
               ),
               const SizedBox(width: 6),
@@ -2152,7 +2154,7 @@ class _AddItemModalState extends State<AddItemModal> {
                   icon: Icons.tune,
                   label: 'Varyant',
                   color: const Color(0xFFF59E0B),
-                  onTap: hasItems && _selectedItemIndex != null && _variantsForSelectedItem().isNotEmpty
+                  onTap: hasItems && _selectedItemId != null && _variantsForSelectedItem().isNotEmpty
                       ? _openVariantDialogForSelected
                       : null,
                 ),
@@ -2163,9 +2165,9 @@ class _AddItemModalState extends State<AddItemModal> {
                   icon: Icons.close,
                   label: 'Ürün İptal',
                   color: Colors.red[400]!,
-                  onTap: hasItems && _selectedItemIndex != null
+                  onTap: hasItems && _selectedItemId != null
                       ? () async {
-                          print('[AddItemModal] Ürün İptal butonuna tıklandı! selectedIndex=$_selectedItemIndex');
+                          print('[AddItemModal] Ürün İptal butonuna tıklandı! selectedItemId=$_selectedItemId');
                           if (!_hasPermission('cancel_item')) {
                             print('[AddItemModal] cancel_item yetkisi YOK');
                             await showDialog(

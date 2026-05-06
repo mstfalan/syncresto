@@ -413,7 +413,7 @@ class _AddItemModalState extends State<AddItemModal> {
 
       final name = displayName;
 
-      // Optimistic update - aninda UI'ya ekle
+      final tempId = -DateTime.now().millisecondsSinceEpoch;
       setState(() {
         final existingIndex = _ticketItems.indexWhere((i) => i['product_id'] == productId && i['status'] != 'cancelled' && (i['notes'] == null || i['notes'] == ''));
         if (existingIndex >= 0) {
@@ -421,7 +421,7 @@ class _AddItemModalState extends State<AddItemModal> {
             ..['quantity'] = (_ticketItems[existingIndex]['quantity'] ?? 1) + 1;
         } else {
           _ticketItems.add({
-            'id': -DateTime.now().millisecondsSinceEpoch, // temp ID
+            'id': tempId,
             'product_id': productId,
             'product_name': name,
             'unit_price': price,
@@ -434,10 +434,6 @@ class _AddItemModalState extends State<AddItemModal> {
         }
       });
 
-      // Arka planda sunucuya gonder (UI beklemez)
-      // NOT: Success path'te _loadTicketItems() COKMUSUNCE 5sn donmaya yol aciyordu.
-      // Optimistic update zaten yapildi (yukarida). Gercek ID'ler bir sonraki acilista
-      // veya manuel refresh'te senkronize olur. Error path'te rollback icin reload tutuyoruz.
       widget.apiService.addTicketItem(
         ticketId: widget.ticketId,
         productId: productId,
@@ -445,11 +441,30 @@ class _AddItemModalState extends State<AddItemModal> {
         unitPrice: price,
         quantity: 1,
         waiterId: widget.waiterId,
-      ).then((_) {
+        clientTempId: tempId,
+      ).then((response) {
         widget.onItemAdded();
+        if (!mounted) return;
+        int? realId = _safeInt(response['new_item_id']) ?? _safeInt(response['id']);
+        if (realId == null && response['items'] is List) {
+          for (final it in (response['items'] as List).reversed) {
+            if (it is Map && _safeInt(it['client_temp_id']) == tempId) {
+              realId = _safeInt(it['id']);
+              break;
+            }
+          }
+        }
+        if (realId == null || realId <= 0) return;
+        setState(() {
+          final idx = _ticketItems.indexWhere((i) => _safeInt(i['id']) == tempId);
+          if (idx >= 0) {
+            _ticketItems[idx] = Map<String, dynamic>.from(_ticketItems[idx])..['id'] = realId;
+          }
+          if (_selectedItemId == tempId) _selectedItemId = realId;
+        });
       }).catchError((e) {
         _showError('Sunucu hatasi: $e');
-        _loadTicketItems(); // Geri al — optimistic update'i temizle
+        _loadTicketItems();
       });
     } catch (e) {
       _showError('Urun eklenemedi: $e');

@@ -478,6 +478,7 @@ class ApiService {
     String? notes,
     String? portion,
     int? waiterId,
+    int? clientTempId,
   }) async {
     if (_connectivity.isOnline) {
       try {
@@ -489,6 +490,7 @@ class ApiService {
           if (notes != null) 'notes': notes,
           if (portion != null) 'portion': portion,
           if (waiterId != null) 'waiter_id': waiterId,
+          if (clientTempId != null) 'client_temp_id': clientTempId,
         });
         if (response.data['success'] == true) {
           _logService.logAction('Urun eklendi (online)', details: {

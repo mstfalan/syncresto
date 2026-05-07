@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'services/storage_service.dart';
 import 'services/api_service.dart';
@@ -14,46 +17,106 @@ import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  // Desktop icin SQLite FFI kullan
-  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-    sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
+/// 7 May 2026 — Self-healing init: bozuk SharedPreferences cache'i tara, JSON parse fail
+/// olan key'leri otomatik temizle. Bir daha "FormatException Unexpected character"
+/// nedeniyle uygulama acilmama sorunu yasanmasin.
+Future<void> _selfHealCorruptCache() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().toList();
+    int healed = 0;
+    for (final key in keys) {
+      final value = prefs.getString(key);
+      if (value == null) continue;
+      // Sadece JSON-vari (obje veya dizi) basliyorsa kontrol et
+      final trimmed = value.trim();
+      if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
+      try {
+        jsonDecode(trimmed);
+      } catch (_) {
+        // Bozuk JSON — temizle
+        await prefs.remove(key);
+        healed++;
+        if (kDebugMode) print('[SelfHeal] Bozuk SharedPreferences key silindi: $key');
+      }
+    }
+    if (healed > 0 && kDebugMode) print('[SelfHeal] Toplam $healed bozuk key temizlendi');
+  } catch (e) {
+    if (kDebugMode) print('[SelfHeal] Hata: $e');
   }
+}
 
-  final storageService = StorageService();
-  await storageService.init();
+/// Main entry — 7 May 2026: runZonedGuarded ile sarmalandi.
+/// Yakalanmayan herhangi bir exception app'i oldurmesin.
+void main() {
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  final apiService = ApiService();
-  final printerService = PrinterService();
-  final soundService = SoundService();
-  final webSocketService = WebSocketService();
+    // 7 May 2026: Bozuk cache'leri ilk acilista temizle (FormatException onlemi)
+    await _selfHealCorruptCache().timeout(
+      const Duration(seconds: 3),
+      onTimeout: () {
+        if (kDebugMode) print('[SelfHeal] Timeout — devam ediliyor');
+      },
+    );
 
-  // Theme provider
-  final themeProvider = ThemeProvider();
-  await themeProvider.loadCachedTheme();
+    // Desktop icin SQLite FFI kullan
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+    }
 
-  final savedApiUrl = storageService.getApiUrl();
-  if (savedApiUrl != null) {
-    apiService.setBaseUrl(savedApiUrl);
-  }
-  final savedApiKey = storageService.getApiKey();
-  if (savedApiKey != null) {
-    apiService.setApiKey(savedApiKey);
-  }
+    final storageService = StorageService();
+    await storageService.init().timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        if (kDebugMode) print('[Main] storageService.init timeout');
+      },
+    );
 
-  // Backend URL (for images/assets)
-  final savedBackendUrl = storageService.getBackendUrl();
-  if (savedBackendUrl != null) {
-    apiService.setBackendUrl(savedBackendUrl);
-  }
+    final apiService = ApiService();
+    final printerService = PrinterService();
+    final soundService = SoundService();
+    final webSocketService = WebSocketService();
 
-  await apiService.initOfflineServices();
+    // Theme provider
+    final themeProvider = ThemeProvider();
+    await themeProvider.loadCachedTheme().timeout(
+      const Duration(seconds: 3),
+      onTimeout: () {
+        if (kDebugMode) print('[Main] themeProvider.loadCachedTheme timeout');
+      },
+    );
 
-  // Yazici ayarlarini yukle
-  await printerService.loadSettings();
+    final savedApiUrl = storageService.getApiUrl();
+    if (savedApiUrl != null) {
+      apiService.setBaseUrl(savedApiUrl);
+    }
+    final savedApiKey = storageService.getApiKey();
+    if (savedApiKey != null) {
+      apiService.setApiKey(savedApiKey);
+    }
+
+    // Backend URL (for images/assets)
+    final savedBackendUrl = storageService.getBackendUrl();
+    if (savedBackendUrl != null) {
+      apiService.setBackendUrl(savedBackendUrl);
+    }
+
+    await apiService.initOfflineServices().timeout(
+      const Duration(seconds: 8),
+      onTimeout: () {
+        if (kDebugMode) print('[Main] apiService.initOfflineServices timeout');
+      },
+    );
+
+    // Yazici ayarlarini yukle
+    await printerService.loadSettings().timeout(
+      const Duration(seconds: 3),
+      onTimeout: () {
+        if (kDebugMode) print('[Main] printerService.loadSettings timeout');
+      },
+    );
 
   // Yazici kuyrugu otomatik retry servisini baslat
   final printQueueService = PrintQueueService();
@@ -150,19 +213,26 @@ void main() async {
     }
   };
 
-  runApp(
-    ChangeNotifierProvider.value(
-      value: themeProvider,
-      child: SyncRestoPosApp(
-        storageService: storageService,
-        apiService: apiService,
-        printerService: printerService,
-        soundService: soundService,
-        webSocketService: webSocketService,
-        themeProvider: themeProvider,
+    runApp(
+      ChangeNotifierProvider.value(
+        value: themeProvider,
+        child: SyncRestoPosApp(
+          storageService: storageService,
+          apiService: apiService,
+          printerService: printerService,
+          soundService: soundService,
+          webSocketService: webSocketService,
+          themeProvider: themeProvider,
+        ),
       ),
-    ),
-  );
+    );
+  }, (error, stack) {
+    // 7 May 2026: runZonedGuarded — yakalanmayan exception app'i oldurmesin
+    if (kDebugMode) {
+      print('[FATAL] Yakalanmayan hata: $error');
+      print(stack);
+    }
+  });
 }
 
 class SyncRestoPosApp extends StatelessWidget {

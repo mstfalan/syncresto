@@ -243,11 +243,16 @@ class _PosScreenState extends State<PosScreen> {
 
   Future<void> _addProductDirect(Map<String, dynamic> product, String displayName, double unitPrice) async {
     try {
+      final basePrice = ((product['restaurant_price'] != null && product['restaurant_price'] != 0
+          ? product['restaurant_price']
+          : product['price']) as num).toDouble();
+      final extrasAmount = unitPrice > basePrice ? (unitPrice - basePrice) : 0.0;
       await widget.apiService.addTicketItem(
         ticketId: _currentTicket!['id'],
         productId: product['id'],
         productName: displayName,
         unitPrice: unitPrice,
+        extrasAmount: extrasAmount,
         waiterId: widget.waiter['id'],
       );
 

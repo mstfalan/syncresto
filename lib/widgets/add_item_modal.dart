@@ -345,9 +345,7 @@ class _AddItemModalState extends State<AddItemModal> {
       newNotes = newNotes.isEmpty ? label : '$newNotes, $label';
     }
 
-    // Yeni unit_price
-    final newUnitPrice = basePrice +
-        (selectedVariant != null ? _safeDouble(selectedVariant['price_modifier']) : 0);
+    final variantModifier = selectedVariant != null ? _safeDouble(selectedVariant['price_modifier']) : 0.0;
 
     final itemId = _safeInt(item['id']);
     if (itemId == null) return;
@@ -357,7 +355,7 @@ class _AddItemModalState extends State<AddItemModal> {
         ticketId: widget.ticketId,
         itemId: itemId,
         notes: newNotes.isEmpty ? null : newNotes,
-        unitPrice: newUnitPrice,
+        extrasAmount: variantModifier,
         waiterId: widget.waiterId,
       );
       if (res['success'] == true) {
@@ -434,11 +432,21 @@ class _AddItemModalState extends State<AddItemModal> {
         }
       });
 
+      double basePrice = 0;
+      final prodLookup = _products.where((p) => _safeInt(p['id']) == productId).firstOrNull;
+      if (prodLookup != null) {
+        basePrice = _safeDouble((prodLookup['restaurant_price'] != null && prodLookup['restaurant_price'] != 0)
+            ? prodLookup['restaurant_price']
+            : prodLookup['price']);
+      }
+      final extrasAmount = (basePrice > 0 && price > basePrice) ? (price - basePrice) : 0.0;
+
       widget.apiService.addTicketItem(
         ticketId: widget.ticketId,
         productId: productId,
         productName: name,
         unitPrice: price,
+        extrasAmount: extrasAmount,
         quantity: 1,
         waiterId: widget.waiterId,
         clientTempId: tempId,
@@ -715,28 +723,11 @@ class _AddItemModalState extends State<AddItemModal> {
       final note = result['note'] as String? ?? '';
       final addedPrice = result['extraPrice'] as double? ?? 0;
 
-      // Fiyat hesaplama — her zaman BASE fiyat + addedPrice (not eklendiğinde de
-      // çıkarıldığında da). Eski mantık (currentPrice + addedPrice) varyant
-      // kaldırılınca eski şişmiş fiyatı koruyordu.
-      final productId = item['product_id'];
-      double basePrice = 0;
-      if (productId != null) {
-        final prod = _products.where((p) => p['id'] == productId).firstOrNull;
-        if (prod != null) {
-          basePrice = _safeDouble(prod['restaurant_price'] != null && prod['restaurant_price'] != 0
-              ? prod['restaurant_price']
-              : prod['price']);
-        }
-      }
-      // Fallback — products listesinde bulunamazsa item'in mevcut fiyatından geri hesapla
-      // (önceki addedPrice'ı bilemiyoruz; bu durumda fiyatı değiştirme)
-      final newPrice = basePrice > 0 ? basePrice + addedPrice : null;
-
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         notes: note,
-        unitPrice: newPrice,
+        extrasAmount: addedPrice,
       );
 
       await _loadTicketItems();

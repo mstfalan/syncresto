@@ -128,6 +128,7 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
         productId: productId,
         productName: widget.product['name']?.toString() ?? '',
         unitPrice: _unitPrice,
+        extrasAmount: _extrasTotal,
         quantity: _quantity,
         notes: _buildNotes().isNotEmpty ? _buildNotes() : null,
         waiterId: widget.waiterId,

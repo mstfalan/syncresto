@@ -479,13 +479,16 @@ class ApiService {
     String? portion,
     int? waiterId,
     int? clientTempId,
+    double extrasAmount = 0,
   }) async {
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.post('/api/pos/tickets/$ticketId/items', data: {
           'product_id': productId,
+          'name': productName,
           'product_name': productName,
           'unit_price': unitPrice,
+          'extras_amount': extrasAmount,
           'quantity': quantity,
           if (notes != null) 'notes': notes,
           if (portion != null) 'portion': portion,
@@ -547,6 +550,7 @@ class ApiService {
     String? notes,
     int? waiterId,
     double? unitPrice,
+    double? extrasAmount,
   }) async {
     if (_connectivity.isOnline) {
       try {
@@ -554,7 +558,8 @@ class ApiService {
           if (quantity != null) 'quantity': quantity,
           if (notes != null) 'notes': notes,
           if (waiterId != null) 'waiter_id': waiterId,
-          if (unitPrice != null) 'unit_price': unitPrice,
+          if (extrasAmount != null) 'extras_amount': extrasAmount,
+          if (unitPrice != null && extrasAmount == null) 'unit_price': unitPrice,
         });
         if (response.data['success'] == true) {
           _logService.logAction('Urun guncellendi', details: {

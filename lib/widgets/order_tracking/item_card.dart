@@ -19,14 +19,18 @@ class ItemCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context, listen: false);
-    // Daha fazla urun sigsin diye kompakt boyutlar
-    final h = compact ? 44.0 : 56.0;
+    // Daha fazla urun sigsin diye kompakt boyutlar — meta satiri eklenince yukseklik artti
+    final h = compact ? 56.0 : 72.0;
     final qtyFont = compact ? 14.0 : 18.0;
     final nameFont = compact ? 12.0 : 14.0;
     final qty = item['quantity']?.toString() ?? '1';
     final name = item['product_name']?.toString() ?? '';
     final notes = item['notes']?.toString();
     final printed = item['printed'] == 1 || item['printed'] == true;
+    final addedTime = _formatTime(item['item_created_at']);
+    final addedBy = item['added_by_name']?.toString() ?? '';
+    final deliveredTime = _formatTime(item['delivered_at']);
+    final deliveredBy = item['delivered_by_name']?.toString() ?? '';
 
     return GestureDetector(
       onTap: onTap,
@@ -101,6 +105,20 @@ class ItemCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                // META: ekleyen + saat (isDelivered ise teslim eden + saat)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 2,
+                    children: [
+                      if (addedTime.isNotEmpty)
+                        _metaChip(Icons.access_time, addedTime + (addedBy.isNotEmpty ? ' · $addedBy' : ''), Colors.blueGrey[700]!),
+                      if (isDelivered && deliveredTime.isNotEmpty)
+                        _metaChip(Icons.check, 'Teslim $deliveredTime' + (deliveredBy.isNotEmpty ? ' · $deliveredBy' : ''), Colors.green[700]!),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -117,5 +135,33 @@ class ItemCard extends StatelessWidget {
         ]),
       ),
     );
+  }
+
+  Widget _metaChip(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: color),
+          const SizedBox(width: 3),
+          Text(label, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+  }
+
+  String _formatTime(dynamic iso) {
+    if (iso == null) return '';
+    try {
+      final dt = DateTime.parse(iso.toString()).toLocal();
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return '';
+    }
   }
 }

@@ -32,6 +32,8 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   int? _selectedTableId;
   bool _isLoading = true;
   String? _sectionFilter; // null = tum salonlar
+  // Sidebar siralama: 'table' (varsayilan) veya 'time' (en eski bekleyen ustte)
+  String _sortMode = 'table';
 
   @override
   void initState() {
@@ -132,14 +134,35 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     return int.tryParse(v.toString());
   }
 
+  // Bundle'in en eski bekleyen item'inin item_created_at'i — zamana gore siralama icin.
+  // Bos pending icin DateTime.now() (siralama sonuna at).
+  DateTime _oldestPendingTime(TableBundle b) {
+    DateTime? oldest;
+    for (final it in b.pending) {
+      final s = it['item_created_at']?.toString();
+      if (s == null || s.isEmpty) continue;
+      try {
+        final dt = DateTime.parse(s).toLocal();
+        if (oldest == null || dt.isBefore(oldest)) oldest = dt;
+      } catch (_) {}
+    }
+    return oldest ?? DateTime.now();
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context);
 
-    // Pending olan tum bundle'lar (sirali)
+    // Pending olan tum bundle'lar — kullanicinin sectigi siralama
     final allBundlesWithPending =
         _byTable.values.where((b) => b.pending.isNotEmpty).toList()
           ..sort((a, b) {
+            if (_sortMode == 'time') {
+              // En eski bekleyen item ustte (en acil)
+              final at = _oldestPendingTime(a);
+              final bt = _oldestPendingTime(b);
+              return at.compareTo(bt);
+            }
             final ai = int.tryParse(a.tableNumber) ?? 0;
             final bi = int.tryParse(b.tableNumber) ?? 0;
             return ai.compareTo(bi);
@@ -210,6 +233,44 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
         foregroundColor: Colors.white,
         toolbarHeight: 72,
         actions: [
+          // SIRALAMA — Masaya / Zamana gore
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            child: Container(
+              height: 52,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 4)],
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.sort, color: theme.primaryColor, size: 22),
+                  const SizedBox(width: 8),
+                  DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _sortMode,
+                      icon: Icon(Icons.arrow_drop_down, color: theme.primaryColor),
+                      style: TextStyle(
+                        color: theme.primaryColor,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                      items: const [
+                        DropdownMenuItem(value: 'table', child: Text('Masaya Göre')),
+                        DropdownMenuItem(value: 'time', child: Text('Zamana Göre')),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        setState(() => _sortMode = v);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
           // TUM BEKLEYENLER - dokunmatik icin buyuk buton
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -219,7 +280,7 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                 onPressed: () => _showAllOrdersDialog(theme),
                 icon: const Icon(Icons.list_alt, size: 28),
                 label: const Text(
-                  'TÜM BEKLEYENLER',
+                  'TÜM SİPARİŞLER',
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
                 ),
                 style: ElevatedButton.styleFrom(
@@ -334,14 +395,9 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   }
 
   void _showAllOrdersDialog(ThemeProvider theme) {
-    // Tum item'lari topla (pending + delivered), salon-masa-tarih sirasiyla
-    final allItems = List<Map<String, dynamic>>.from(
-      _raw.map((r) => Map<String, dynamic>.from(r as Map)),
-    );
-    // Sirala: salon, masa, urun olusturma tarihi
-    allItems.sort((a, b) {
-      final s = (a['section_name']?.toString() ?? '')
-          .compareTo(b['section_name']?.toString() ?? '');
+    // Pending + delivered ayri listeler — TabBar ile gosterilir.
+    int sortItems(Map a, Map b) {
+      final s = (a['section_name']?.toString() ?? '').compareTo(b['section_name']?.toString() ?? '');
       if (s != 0) return s;
       final ta = int.tryParse(a['table_number']?.toString() ?? '') ?? 0;
       final tb = int.tryParse(b['table_number']?.toString() ?? '') ?? 0;
@@ -349,143 +405,173 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
       final da = a['item_created_at']?.toString() ?? '';
       final db = b['item_created_at']?.toString() ?? '';
       return da.compareTo(db);
-    });
+    }
+
+    final pendingItems = <Map<String, dynamic>>[];
+    final deliveredItems = <Map<String, dynamic>>[];
+    for (final r in _raw) {
+      final m = Map<String, dynamic>.from(r as Map);
+      if (m['delivered_at'] == null) {
+        pendingItems.add(m);
+      } else {
+        deliveredItems.add(m);
+      }
+    }
+    pendingItems.sort(sortItems);
+    deliveredItems.sort(sortItems);
 
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
         insetPadding: const EdgeInsets.all(24),
-        child: SizedBox(
-          width: MediaQuery.of(ctx).size.width * 0.9,
-          height: MediaQuery.of(ctx).size.height * 0.9,
-          child: Column(children: [
-            // Header
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: theme.primaryColor,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(4),
-                  topRight: Radius.circular(4),
-                ),
-              ),
-              child: Row(children: [
-                const Icon(Icons.list_alt, color: Colors.white, size: 24),
-                const SizedBox(width: 10),
-                const Text(
-                  'TÜM SİPARİŞLER',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
+        child: DefaultTabController(
+          length: 2,
+          child: SizedBox(
+            width: MediaQuery.of(ctx).size.width * 0.9,
+            height: MediaQuery.of(ctx).size.height * 0.9,
+            child: Column(children: [
+              // Header
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: theme.primaryColor,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(4),
+                    topRight: Radius.circular(4),
                   ),
                 ),
-                const Spacer(),
-                Text(
-                  '${allItems.length} kalem',
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                ),
-                const SizedBox(width: 12),
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.pop(ctx),
-                ),
-              ]),
-            ),
-            // Tablo header
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              color: Colors.grey[200],
-              child: Row(children: const [
-                SizedBox(width: 110, child: Text('SALON', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
-                SizedBox(width: 70, child: Text('MASA', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
-                SizedBox(width: 90, child: Text('DURUM', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
-                SizedBox(width: 50, child: Text('ADET', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
-                Expanded(child: Text('ÜRÜN', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
-              ]),
-            ),
-            // Liste
-            Expanded(
-              child: allItems.isEmpty
-                  ? const Center(
-                      child: Text('Hiç sipariş yok',
-                          style: TextStyle(color: Colors.grey, fontSize: 16)))
-                  : ListView.separated(
-                      itemCount: allItems.length,
-                      separatorBuilder: (_, __) =>
-                          Divider(height: 1, color: Colors.grey[200]),
-                      itemBuilder: (_, i) {
-                        final it = allItems[i];
-                        final isDelivered = it['delivered_at'] != null;
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 8),
-                          color: isDelivered
-                              ? const Color(0xFFF0FDF4)
-                              : Colors.white,
-                          child: Row(children: [
-                            SizedBox(
-                              width: 110,
-                              child: Text(
-                                it['section_name']?.toString() ?? '-',
-                                style: const TextStyle(fontSize: 13),
-                              ),
-                            ),
-                            SizedBox(
-                              width: 70,
-                              child: Text(
-                                'Masa ${it['table_number'] ?? '-'}',
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w700),
-                              ),
-                            ),
-                            SizedBox(
-                              width: 90,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: isDelivered
-                                      ? Colors.green[100]
-                                      : Colors.orange[100],
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  isDelivered ? 'GİDEN' : 'BEKLİYOR',
-                                  style: TextStyle(
-                                    color: isDelivered
-                                        ? Colors.green[800]
-                                        : Colors.orange[900],
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: 50,
-                              child: Text(
-                                '${it['quantity'] ?? 1}x',
-                                style: const TextStyle(
-                                    fontSize: 14, fontWeight: FontWeight.w700),
-                              ),
-                            ),
-                            Expanded(
-                              child: Text(
-                                it['product_name']?.toString() ?? '',
-                                style: const TextStyle(fontSize: 13),
-                              ),
-                            ),
-                          ]),
-                        );
-                      },
+                child: Row(children: [
+                  const Icon(Icons.list_alt, color: Colors.white, size: 24),
+                  const SizedBox(width: 10),
+                  const Text(
+                    'TÜM SİPARİŞLER',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ]),
+              ),
+              // Tabs
+              Container(
+                color: Colors.white,
+                child: TabBar(
+                  labelColor: theme.primaryColor,
+                  unselectedLabelColor: Colors.grey[600],
+                  indicatorColor: theme.primaryColor,
+                  indicatorWeight: 3,
+                  labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                  tabs: [
+                    Tab(
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.schedule, size: 18, color: Colors.orange[800]),
+                        const SizedBox(width: 6),
+                        Text('BEKLEYEN (${pendingItems.length})'),
+                      ]),
                     ),
-            ),
-          ]),
+                    Tab(
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.check_circle, size: 18, color: Colors.green[700]),
+                        const SizedBox(width: 6),
+                        Text('GİDEN (${deliveredItems.length})'),
+                      ]),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: TabBarView(children: [
+                  _buildAllOrdersList(pendingItems, false),
+                  _buildAllOrdersList(deliveredItems, true),
+                ]),
+              ),
+            ]),
+          ),
         ),
       ),
     );
+  }
+
+  Widget _buildAllOrdersList(List<Map<String, dynamic>> items, bool isDelivered) {
+    if (items.isEmpty) {
+      return Center(
+        child: Text(
+          isDelivered ? 'Henüz teslim edilen yok' : 'Bekleyen sipariş yok',
+          style: const TextStyle(color: Colors.grey, fontSize: 16),
+        ),
+      );
+    }
+    return Column(children: [
+      // Tablo header
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        color: Colors.grey[200],
+        child: Row(children: [
+          const SizedBox(width: 110, child: Text('SALON', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
+          const SizedBox(width: 70, child: Text('MASA', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
+          const SizedBox(width: 50, child: Text('ADET', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
+          const Expanded(child: Text('ÜRÜN', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
+          SizedBox(width: 130, child: Text(isDelivered ? 'TESLİM' : 'GİRİŞ', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12))),
+        ]),
+      ),
+      Expanded(
+        child: ListView.separated(
+          itemCount: items.length,
+          separatorBuilder: (_, __) => Divider(height: 1, color: Colors.grey[200]),
+          itemBuilder: (_, i) {
+            final it = items[i];
+            final timeStr = isDelivered
+                ? _fmtTime(it['delivered_at'])
+                : _fmtTime(it['item_created_at']);
+            final whoStr = isDelivered
+                ? (it['delivered_by_name']?.toString() ?? '')
+                : (it['added_by_name']?.toString() ?? '');
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              color: isDelivered ? const Color(0xFFF0FDF4) : Colors.white,
+              child: Row(children: [
+                SizedBox(width: 110, child: Text(it['section_name']?.toString() ?? '-', style: const TextStyle(fontSize: 13))),
+                SizedBox(width: 70, child: Text('Masa ${it['table_number'] ?? '-'}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                SizedBox(width: 50, child: Text('${it['quantity'] ?? 1}x', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700))),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(it['product_name']?.toString() ?? '', style: const TextStyle(fontSize: 13)),
+                      if ((it['notes']?.toString() ?? '').isNotEmpty)
+                        Text(it['notes'].toString(), style: TextStyle(fontSize: 11, color: Colors.grey[600], fontStyle: FontStyle.italic)),
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  width: 130,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(timeStr, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                      if (whoStr.isNotEmpty)
+                        Text(whoStr, style: TextStyle(fontSize: 11, color: Colors.grey[700])),
+                    ],
+                  ),
+                ),
+              ]),
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+  String _fmtTime(dynamic iso) {
+    if (iso == null) return '-';
+    try {
+      final dt = DateTime.parse(iso.toString()).toLocal();
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return '-';
+    }
   }
 }
 

@@ -1090,15 +1090,46 @@ class _TablesScreenState extends State<TablesScreen> {
     final unpaidTotal = unpaidRaw is num ? unpaidRaw.toDouble() : double.tryParse(unpaidRaw?.toString() ?? '') ?? 0.0;
     final hasPartialPayment = paidTotal > 0 && unpaidTotal > 0;
 
+    // Bekleme süresi rengi — yeni sipariş gelince sayaç sıfırlansın diye lastItemAt öncelikli
+    // 0-10dk yeşil (taze), 10-20dk sarı (uyarı), 20+ dk kırmızı (geç kaldı)
+    final activityAnchor = (lastItemAt is String && lastItemAt.isNotEmpty) ? lastItemAt : openedAt;
+    final waitMinutes = isOccupied && activityAnchor is String ? _minutesSince(activityAnchor) : 0;
+    Color tableColor;
+    Color tableBorder;
+    Gradient? tableGradient;
+    if (!isOccupied) {
+      tableColor = Colors.white;
+      tableBorder = Colors.grey[300]!;
+      tableGradient = null;
+    } else if (waitMinutes >= 20) {
+      tableColor = const Color(0xFFDC2626);
+      tableBorder = const Color(0xFFB91C1C);
+      tableGradient = const LinearGradient(
+        colors: [Color(0xFFDC2626), Color(0xFFB91C1C)],
+        begin: Alignment.topLeft, end: Alignment.bottomRight,
+      );
+    } else if (waitMinutes >= 10) {
+      tableColor = const Color(0xFFF59E0B);
+      tableBorder = const Color(0xFFD97706);
+      tableGradient = const LinearGradient(
+        colors: [Color(0xFFF59E0B), Color(0xFFD97706)],
+        begin: Alignment.topLeft, end: Alignment.bottomRight,
+      );
+    } else {
+      tableColor = theme.primaryColor;
+      tableBorder = theme.primaryColor;
+      tableGradient = theme.backgroundGradient;
+    }
+
     return GestureDetector(
       onTap: () => _openTable(table),
       child: Container(
           decoration: BoxDecoration(
-            gradient: isOccupied ? theme.backgroundGradient : null,
+            gradient: isOccupied ? tableGradient : null,
             color: isOccupied ? null : Colors.white,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: isOccupied ? theme.primaryColor : Colors.grey[300]!,
+              color: isOccupied ? tableBorder : Colors.grey[300]!,
               width: 2,
             ),
             boxShadow: [
@@ -1256,9 +1287,19 @@ class _TablesScreenState extends State<TablesScreen> {
     }
   }
 
+  // Verilen ISO tarihinden bu yana geçen dakika (UTC parse + lokal compare).
+  // Masa rengi threshold'u (10/20 dk) için kullanılır.
+  int _minutesSince(String iso) {
+    try {
+      return DateTime.now().difference(DateTime.parse(iso).toLocal()).inMinutes;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   String _formatDuration(String openedAt) {
     try {
-      final opened = DateTime.parse(openedAt);
+      final opened = DateTime.parse(openedAt).toLocal();
       final now = DateTime.now();
       final diff = now.difference(opened);
 

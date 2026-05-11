@@ -2052,6 +2052,9 @@ class _AddItemModalState extends State<AddItemModal> {
     final notes = item['notes'] as String?;
     final isPaid = item['payment_status'] == 'paid';
     final payMethod = item['payment_method']?.toString().toUpperCase() ?? '';
+    // Backend'den gelen ekleyen garson + saat (TR lokal)
+    final addedBy = item['added_by_name']?.toString() ?? '';
+    final addedTime = _formatItemTime(item['created_at']);
 
     return GestureDetector(
       onTap: () {
@@ -2101,6 +2104,25 @@ class _AddItemModalState extends State<AddItemModal> {
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
                       child: Text(notes, style: TextStyle(fontSize: 14, color: Colors.grey[600], fontStyle: FontStyle.italic)),
+                    ),
+                  // Ekleyen garson + saat — Omer Bey istegi
+                  if (addedBy.isNotEmpty || addedTime.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(children: [
+                        Icon(Icons.person_outline, size: 12, color: Colors.grey[500]),
+                        const SizedBox(width: 3),
+                        Text(
+                          addedBy.isNotEmpty ? addedBy : 'Bilinmiyor',
+                          style: TextStyle(fontSize: 11, color: Colors.grey[700], fontWeight: FontWeight.w600),
+                        ),
+                        if (addedTime.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Icon(Icons.access_time, size: 12, color: Colors.grey[500]),
+                          const SizedBox(width: 3),
+                          Text(addedTime, style: TextStyle(fontSize: 11, color: Colors.grey[700])),
+                        ],
+                      ]),
                     ),
                   if (isPaid)
                     Container(
@@ -2399,6 +2421,17 @@ class _AddItemModalState extends State<AddItemModal> {
       color: Colors.grey[100],
       child: Center(child: Text(emoji, style: const TextStyle(fontSize: 32))),
     );
+  }
+
+  // ISO timestamp -> "HH:mm" Turkiye lokal saati. Backend UTC dondukten sonra .toLocal().
+  String _formatItemTime(dynamic iso) {
+    if (iso == null) return '';
+    try {
+      final dt = DateTime.parse(iso.toString()).toLocal();
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return '';
+    }
   }
 }
 

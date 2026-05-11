@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'log_service.dart';
 
 /// Versiyon bilgisi modeli
@@ -72,21 +73,25 @@ class UpdateCheckResult {
 class VersionHelper {
   /// İki versiyonu karşılaştırır
   /// Returns: -1 (v1 < v2), 0 (v1 == v2), 1 (v1 > v2)
+  /// Sadece major.minor.patch karsilastirir, '+build' ek kismini yok sayar.
+  /// Hatali parse'da 0 (esit) doner.
   static int compare(String v1, String v2) {
-    final parts1 = v1.split('.').map(int.parse).toList();
-    final parts2 = v2.split('.').map(int.parse).toList();
-
-    final maxLength = parts1.length > parts2.length ? parts1.length : parts2.length;
-
-    for (var i = 0; i < maxLength; i++) {
-      final p1 = i < parts1.length ? parts1[i] : 0;
-      final p2 = i < parts2.length ? parts2[i] : 0;
-
-      if (p1 < p2) return -1;
-      if (p1 > p2) return 1;
+    try {
+      final clean1 = v1.split('+').first.split('-').first;
+      final clean2 = v2.split('+').first.split('-').first;
+      final parts1 = clean1.split('.').map(int.parse).toList();
+      final parts2 = clean2.split('.').map(int.parse).toList();
+      final maxLength = parts1.length > parts2.length ? parts1.length : parts2.length;
+      for (var i = 0; i < maxLength; i++) {
+        final p1 = i < parts1.length ? parts1[i] : 0;
+        final p2 = i < parts2.length ? parts2[i] : 0;
+        if (p1 < p2) return -1;
+        if (p1 > p2) return 1;
+      }
+      return 0;
+    } catch (_) {
+      return 0;
     }
-
-    return 0;
   }
 
   /// v1 < v2 mi?
@@ -206,6 +211,52 @@ class VersionService {
         errorMessage: e.toString(),
       );
     }
+  }
+
+  // ==================== IDEMPOTENT DISMISS (24 saat) ====================
+  // Kullanici 'Sonra' derse o surum icin 24 saat tekrar gosterme.
+  // Zorunlu update'lerde (isUpdateRequired) dismiss yok — modal her zaman acilir.
+
+  static const String _dismissedVersionKey = 'update_dismissed_version';
+  static const String _dismissedAtKey = 'update_dismissed_at';
+  static const Duration _dismissTtl = Duration(hours: 24);
+
+  /// Kullanici bu surumu erteledi — 24 saat goosterme
+  Future<void> dismissUpdate(String version) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_dismissedVersionKey, version);
+      await prefs.setInt(_dismissedAtKey, DateTime.now().millisecondsSinceEpoch);
+      _logService.logUpdate('Guncelleme ertelendi (24 saat)', version: version);
+    } catch (e) {
+      debugPrint('[VersionService] dismissUpdate hata: $e');
+    }
+  }
+
+  /// Bu surum dismiss edildi mi (24 saat icinde)?
+  Future<bool> isVersionDismissed(String version) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final dismissedVersion = prefs.getString(_dismissedVersionKey);
+      final dismissedAtMs = prefs.getInt(_dismissedAtKey);
+      if (dismissedVersion == null || dismissedAtMs == null) return false;
+      if (dismissedVersion != version) return false;
+      final dismissedAt = DateTime.fromMillisecondsSinceEpoch(dismissedAtMs);
+      final age = DateTime.now().difference(dismissedAt);
+      return age < _dismissTtl;
+    } catch (e) {
+      debugPrint('[VersionService] isVersionDismissed hata: $e');
+      return false;
+    }
+  }
+
+  /// Yeni sürüm yüklenince dismissed kayitlari temizle (artik anlamsiz)
+  Future<void> clearDismissed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_dismissedVersionKey);
+      await prefs.remove(_dismissedAtKey);
+    } catch (_) {}
   }
 
   /// Güncellemeyi indir

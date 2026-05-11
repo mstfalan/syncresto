@@ -19,6 +19,8 @@ import '../widgets/ticket_modal.dart';
 import '../widgets/add_item_modal.dart';
 import '../widgets/offline_data_modal.dart';
 import 'order_tracking_screen.dart';
+import '../services/version_service.dart';
+import '../widgets/update_modal.dart';
 
 class TablesScreen extends StatefulWidget {
   final StorageService storageService;
@@ -59,6 +61,9 @@ class _TablesScreenState extends State<TablesScreen> {
   final LogService _logService = LogService();
   final LicenseService _licenseService = LicenseService();
   final SyncService _syncService = SyncService();
+  final VersionService _versionService = VersionService();
+  Timer? _versionCheckTimer;
+  bool _updateModalOpen = false; // Ayni anda 2 modal acilmasin
   bool _isOnline = true;
   StreamSubscription<bool>? _connectivitySubscription;
   Timer? _licenseCheckTimer;
@@ -84,6 +89,49 @@ class _TablesScreenState extends State<TablesScreen> {
     _startAutoRefresh();
     _setupConnectivity();
     _startLicenseCheck();
+    _startVersionCheck();
+  }
+
+  // ==================== UPDATE CHECK (3 saatte bir) ====================
+  // POS uygulamasi acik kalirken yeni sürüm cikinca pop-up göster.
+  // initial_sync_screen sadece ilk acilista kontrol ediyordu, calisma
+  // sirasinda yeni sürüm bildirimi yoktu — bu fix onu çozer.
+  // Idempotent: kullanici 'Sonra' derse 24 saat tekrar gosterme (VersionService).
+  void _startVersionCheck() {
+    // Ilk kontrol 60 saniye sonra (acilis sırasinda zaten initial_sync kontrol etti)
+    Timer(const Duration(seconds: 60), () => _checkVersion());
+    // Sonra her 3 saatte bir
+    _versionCheckTimer = Timer.periodic(const Duration(hours: 3), (_) => _checkVersion());
+  }
+
+  Future<void> _checkVersion() async {
+    if (!_isOnline || !mounted || _updateModalOpen) return;
+    try {
+      final result = await _versionService.checkForUpdates();
+      if (!mounted) return;
+      if (!result.isUpdateRequired && !result.isUpdateAvailable) return;
+      // Idempotent: kullanici bu sürümu erteledi mi (24 saat icinde)?
+      final newVersion = result.versionInfo!.currentVersion;
+      if (!result.isUpdateRequired) {
+        final dismissed = await _versionService.isVersionDismissed(newVersion);
+        if (dismissed) {
+          print('[Version] Surum $newVersion 24 saat icinde ertelendi, modal acilmiyor');
+          return;
+        }
+      }
+      if (!mounted) return;
+      _updateModalOpen = true;
+      await UpdateModal.show(
+        context,
+        result,
+        onLater: () async {
+          await _versionService.dismissUpdate(newVersion);
+        },
+      );
+      _updateModalOpen = false;
+    } catch (e) {
+      print('[Version] Check hata: $e');
+    }
   }
 
   Future<void> _loadVersion() async {
@@ -106,6 +154,7 @@ class _TablesScreenState extends State<TablesScreen> {
     _refreshTimer?.cancel();
     _licenseCheckTimer?.cancel();
     _pendingCountTimer?.cancel();
+    _versionCheckTimer?.cancel();
     _connectivitySubscription?.cancel();
     super.dispose();
   }

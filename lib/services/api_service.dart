@@ -1137,6 +1137,7 @@ class ApiService {
   Future<Map<String, dynamic>> printKitchen({
     required int ticketId,
     int? waiterId,
+    bool dryRun = false,
   }) async {
     // OFFLINE PATH: lokal cache'lerden urun + yazici hesaplamasi yap, ayni format don.
     // - cached_products.printer_id (urun yazicisi)
@@ -1177,7 +1178,10 @@ class ApiService {
     }
 
     try {
-      final response = await _dio.post('/api/pos/tickets/$ticketId/print-kitchen', data: {
+      final url = dryRun
+          ? '/api/pos/tickets/$ticketId/print-kitchen?dry_run=true'
+          : '/api/pos/tickets/$ticketId/print-kitchen';
+      final response = await _dio.post(url, data: {
         if (waiterId != null) 'waiter_id': waiterId,
       });
       if (response.data['success'] == true) {
@@ -1185,6 +1189,7 @@ class ApiService {
         _logService.logAction('Mutfak fisi gonderildi', details: {
           'ticket_id': ticketId,
           'item_count': itemCount,
+          if (dryRun) 'dry_run': true,
         });
       }
       return response.data;
@@ -1226,6 +1231,39 @@ class ApiService {
     } on DioException catch (e) {
       print('[API] markItemsPrinted hatasi: ${e.message}');
       _logService.error(LogType.error, 'mark-items-printed hatasi', error: e, details: {
+        'ticket_id': ticketId,
+        'item_ids': itemIds,
+        'job_ids': jobIds,
+      });
+      return false;
+    }
+  }
+
+  /// Yazici fail olunca printed=1 -> printed=0 rollback + panel_print_jobs.status='failed'.
+  /// printKitchen dryRun=true ile gonderildiyse zaten printed=0; bu cagri idempotent.
+  /// Eski sunucuda endpoint yoksa 404 doner — sessizce false dondurulur, eski Flutter
+  /// davranisi (printKitchen icinde printed=1 hemen set) bozulmaz.
+  Future<bool> unmarkItemsPrinted({
+    required int ticketId,
+    required List<int> itemIds,
+    List<int>? jobIds,
+    String? error,
+  }) async {
+    if (itemIds.isEmpty && (jobIds == null || jobIds.isEmpty)) return true;
+    if (!_connectivity.isOnline) return false;
+    try {
+      final response = await _dio.post(
+        '/api/pos/tickets/$ticketId/unmark-items-printed',
+        data: {
+          'item_ids': itemIds,
+          if (jobIds != null && jobIds.isNotEmpty) 'job_ids': jobIds,
+          if (error != null) 'error': error,
+        },
+      );
+      return response.data['success'] == true;
+    } on DioException catch (e) {
+      print('[API] unmarkItemsPrinted hatasi: ${e.message}');
+      _logService.error(LogType.error, 'unmark-items-printed hatasi', error: e, details: {
         'ticket_id': ticketId,
         'item_ids': itemIds,
         'job_ids': jobIds,

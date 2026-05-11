@@ -872,16 +872,16 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Mutfağa gönder
+  /// Mutfağa gönder — 11 May 2026 incident fix: dry_run + mark/unmark akisi.
+  /// Yazici success ise printed=1, fail ise printed=0 + kullaniciya net hata.
   Future<void> _sendToKitchen() async {
     if (widget.printerService == null) return;
-
-    final hasSummaryPrinter = widget.section?['summary_printer_id'] != null;
 
     try {
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
+        dryRun: true,
       );
       if (result['success'] != true) {
         _showError(result['error'] ?? 'Mutfak fişi alınamadı');
@@ -899,27 +899,75 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
-      // printerGroups ile tüm yazıcılara gönder (özet yazıcı dahil)
+      final Set<int> printedItemIds = {};
+      final Set<int> printedJobIds = {};
+      final Set<int> failedItemIds = {};
+      final Set<int> failedJobIds = {};
+      final List<String> failReasons = [];
+      int successCount = 0;
+      int failCount = 0;
+
       final printerGroups = result['printerGroups'] as List? ?? [];
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
+        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobIdRaw = group['job_id'];
+        final jobId = jobIdRaw is int ? jobIdRaw : int.tryParse('${jobIdRaw ?? ''}');
         if (groupItems.isEmpty) continue;
 
+        bool ok = false;
         if (printerIp != null && printerIp.isNotEmpty) {
-          await widget.printerService!.printKitchenReceiptToIp(
+          ok = await widget.printerService!.printKitchenReceiptToIp(
             ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
           );
         } else {
-          await widget.printerService!.printKitchenReceipt(
+          ok = await widget.printerService!.printKitchenReceipt(
             ticket: ticketInfo, items: groupItems,
           );
         }
+
+        final ids = groupItems.map((it) {
+          final raw = it['id'];
+          return raw is int ? raw : int.tryParse('${raw ?? ''}');
+        }).whereType<int>().toSet();
+
+        if (ok) {
+          printedItemIds.addAll(ids);
+          if (jobId != null) printedJobIds.add(jobId);
+          successCount += groupItems.length;
+        } else {
+          failedItemIds.addAll(ids);
+          if (jobId != null) failedJobIds.add(jobId);
+          failCount += groupItems.length;
+          failReasons.add(printerName);
+        }
       }
 
-      // Masalar ekranına dön (hem AddItemModal'ı hem alttaki TicketModal'ı kapat)
-      widget.onClose();
+      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
+        await widget.apiService.markItemsPrinted(
+          ticketId: widget.ticketId,
+          itemIds: printedItemIds.toList(),
+          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
+        );
+      }
+      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
+        await widget.apiService.unmarkItemsPrinted(
+          ticketId: widget.ticketId,
+          itemIds: failedItemIds.toList(),
+          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
+          error: 'Yazici hatasi: ${failReasons.join(", ")}',
+        );
+      }
+
+      if (failCount > 0 && successCount == 0) {
+        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. URUNLER MUTFAGA GITMEDI! Yazici kontrol et + tekrar dene.');
+      } else if (failCount > 0) {
+        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). Eksikleri tekrar gonder.');
+      } else {
+        widget.onClose();
+      }
     } catch (e) {
       _showError('Mutfağa gönderilemedi: $e');
     }
@@ -1098,23 +1146,69 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
+  /// Sessiz mutfak gonderimi — 11 May 2026 incident fix: dry_run + mark/unmark.
+  /// UI feedback yok ama tracking var (printed flag ve job status dogru sync edilir).
   Future<void> _sendToKitchenSilent() async {
     if (widget.printerService == null) return;
     try {
-      final result = await widget.apiService.printKitchen(ticketId: widget.ticketId, waiterId: widget.waiterId);
+      final result = await widget.apiService.printKitchen(
+        ticketId: widget.ticketId,
+        waiterId: widget.waiterId,
+        dryRun: true,
+      );
       if (result['success'] != true) return;
       final printerGroups = result['printerGroups'] as List? ?? [];
       final ticketInfo = result['ticket'] as Map<String, dynamic>? ?? {};
       ticketInfo['table_number'] = widget.table?['table_number'] ?? '';
       ticketInfo['section_name'] = widget.table?['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter?['name'] ?? '';
+
+      final Set<int> printedItemIds = {};
+      final Set<int> printedJobIds = {};
+      final Set<int> failedItemIds = {};
+      final Set<int> failedJobIds = {};
+      final List<String> failReasons = [];
+
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
+        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobIdRaw = group['job_id'];
+        final jobId = jobIdRaw is int ? jobIdRaw : int.tryParse('${jobIdRaw ?? ''}');
         if (groupItems.isEmpty || printerIp == null) continue;
-        await widget.printerService!.printKitchenReceiptToIp(
+
+        final ok = await widget.printerService!.printKitchenReceiptToIp(
           ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+        );
+        final ids = groupItems.map((it) {
+          final raw = it['id'];
+          return raw is int ? raw : int.tryParse('${raw ?? ''}');
+        }).whereType<int>().toSet();
+
+        if (ok) {
+          printedItemIds.addAll(ids);
+          if (jobId != null) printedJobIds.add(jobId);
+        } else {
+          failedItemIds.addAll(ids);
+          if (jobId != null) failedJobIds.add(jobId);
+          failReasons.add(printerName);
+        }
+      }
+
+      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
+        await widget.apiService.markItemsPrinted(
+          ticketId: widget.ticketId,
+          itemIds: printedItemIds.toList(),
+          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
+        );
+      }
+      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
+        await widget.apiService.unmarkItemsPrinted(
+          ticketId: widget.ticketId,
+          itemIds: failedItemIds.toList(),
+          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
+          error: 'Yazici hatasi (silent): ${failReasons.join(", ")}',
         );
       }
     } catch (_) {}

@@ -981,7 +981,9 @@ class PrinterService {
       final port = config['port'] as int? ?? 9100;
 
       final bytes = await _generateKitchenReceipt(ticket, items);
-      final success = await _sendToPrinter(ip, port, bytes);
+      // 11 May 2026: Pre-check (kapak/kagit) + yazdir + post-check.
+      final result = await sendWithVerification(ip: ip, port: port, bytes: bytes);
+      final success = result['ok'] == true;
 
       if (success) {
         onStatusChange?.call('Mutfak fisi yazdirildi (${items.length} urun)', false);
@@ -992,8 +994,9 @@ class PrinterService {
           'item_count': items.length,
         });
       } else {
-        // Başarısız - kuyruğa ekle
+        // Başarısız - kuyruğa ekle (retry icin)
         final printerName = config['name'] as String? ?? 'Mutfak Yazicisi';
+        final err = result['error']?.toString() ?? 'TCP/health fail';
         await _localDb.addToPrintQueue(
           printType: 'kitchen',
           printerIp: ip,
@@ -1005,11 +1008,14 @@ class PrinterService {
             'printerType': printerType,
           },
         );
-        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+        onStatusChange?.call('Yazici basamadi ($err), kuyruga eklendi', true);
         _logService.warning(LogType.action, 'Mutfak fisi kuyruga eklendi', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
           'item_count': items.length,
+          'error': err,
+          'health_before': result['healthBefore'],
+          'health_after': result['healthAfter'],
         });
       }
 
@@ -1060,9 +1066,13 @@ class PrinterService {
       onStatusChange?.call('Mutfak fisi yazdirilyor ($ip)...', false);
 
       final bytes = await _generateKitchenReceipt(ticket, items);
-      final success = await _sendToPrinter(ip, port, bytes);
+      // 11 May 2026: Pre-check (DLE EOT) + yazdirma + post-check.
+      // Eski yazicilar (PalmX vs.) DLE EOT desteklemese bile pre-check 'online' donerse
+      // yazdirmaya gecer (fallback). Kapak acik / kagit yok pre-check'te yakalanir.
+      final result = await sendWithVerification(ip: ip, port: port, bytes: bytes);
+      final ok = result['ok'] == true;
 
-      if (success) {
+      if (ok) {
         onStatusChange?.call('Mutfak fisi yazdirildi ($ip)', false);
         _logService.logAction('Mutfak fisi yazdirildi (IP)', details: {
           'ticket_number': ticket['ticket_number'],
@@ -1071,15 +1081,19 @@ class PrinterService {
           'item_count': items.length,
         });
       } else {
-        onStatusChange?.call('Mutfak fisi yazdirilamadi ($ip)', true);
+        final err = result['error']?.toString() ?? 'Bilinmeyen hata';
+        onStatusChange?.call('Mutfak fisi yazdirilamadi ($ip): $err', true);
         _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi (IP)', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
           'item_count': items.length,
+          'error': err,
+          'health_before': result['healthBefore'],
+          'health_after': result['healthAfter'],
         });
       }
 
-      return success;
+      return ok;
     } catch (e) {
       print('[Printer] Mutfak fisi yazdirilirken hata ($ip): $e');
       onStatusChange?.call('Hata: $e', true);
@@ -1615,6 +1629,63 @@ class PrinterService {
       // DLE EOT exception'i online'i bozmaz — connect basarili oldu
       return {'id': id, 'status': 'online'};
     }
+  }
+
+  /// Tek bir yaziciyi IP+port ile saglik kontrolu yap (pre-print check icin).
+  /// Donus: {status: online|offline|paper_out|cover_open|unreachable, error?}
+  /// 11 May 2026 incident sonrasi eklendi: yazdırmadan once kapak/kagit/baglanti
+  /// kontrolu — eski yazicilarin sessizce kayit yutmasini engeller.
+  Future<Map<String, dynamic>> probePrinterHealthByIp(String ip, {int port = 9100}) async {
+    return await _probePrinterHealth({'id': 'adhoc', 'ip_address': ip, 'port': port});
+  }
+
+  /// Yazdirma + dogrulama wrapper:
+  ///   1) Pre-check (DLE EOT) — paper_out/cover_open/offline → return false (yazdirma)
+  ///   2) Yazdir (_sendToPrinter)
+  ///   3) Post-check (300ms sonra DLE EOT) — yazdirma sirasinda kagit bitti mi?
+  /// Donus: {ok: bool, healthBefore?, healthAfter?, error?}
+  /// onlyOnPreCheckSuccess: bazi cok eski yazicilar DLE EOT desteklemez. Bu durumda
+  /// pre-check 'online' donerse (cevapsiz da online sayilir) yazdirmaya gec.
+  Future<Map<String, dynamic>> sendWithVerification({
+    required String ip,
+    required int port,
+    required List<int> bytes,
+  }) async {
+    // Pre-check
+    final pre = await probePrinterHealthByIp(ip, port: port);
+    final preStatus = pre['status'] as String? ?? 'unknown';
+    if (preStatus == 'offline' || preStatus == 'unreachable' ||
+        preStatus == 'paper_out' || preStatus == 'cover_open') {
+      _logService.warning(LogType.error, 'Yazdirma iptal: pre-check fail', details: {
+        'ip': ip, 'port': port, 'pre_status': preStatus, 'pre_error': pre['error'],
+      });
+      return {'ok': false, 'healthBefore': pre, 'error': pre['error'] ?? preStatus};
+    }
+
+    // Yazdir
+    final sent = await _sendToPrinter(ip, port, bytes);
+    if (!sent) {
+      return {'ok': false, 'healthBefore': pre, 'error': 'TCP write fail'};
+    }
+
+    // Post-check (300ms grace + DLE EOT) — yazdirma sirasinda kagit bittiyse yakala
+    await Future.delayed(const Duration(milliseconds: 300));
+    final post = await probePrinterHealthByIp(ip, port: port);
+    final postStatus = post['status'] as String? ?? 'unknown';
+
+    // Pre online + post online → KESIN BASARILI
+    // Pre online + post paper_out → yazdirma sirasinda kagit bitti, KISMEN basarili olabilir
+    //   conservatively false dondurelim — fis bolunmus/eksik basilmis olabilir
+    if (postStatus == 'paper_out' || postStatus == 'cover_open') {
+      _logService.error(LogType.error, 'Yazdirma sirasinda yazici durumu degisti', details: {
+        'ip': ip, 'port': port,
+        'pre_status': preStatus, 'post_status': postStatus,
+        'post_error': post['error'],
+      });
+      return {'ok': false, 'healthBefore': pre, 'healthAfter': post, 'error': 'Post-check fail: ${post['error']}'};
+    }
+
+    return {'ok': true, 'healthBefore': pre, 'healthAfter': post};
   }
 
   /// Concurrently probes every active server-side printer and returns a list

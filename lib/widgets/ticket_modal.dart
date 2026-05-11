@@ -256,7 +256,9 @@ class _TicketModalState extends State<TicketModal> {
     }
   }
 
-  /// Mutfağa sessiz gönderim (dialog göstermeden)
+  /// Mutfağa sessiz gönderim (dialog göstermeden) — yazici success/fail tracking ile.
+  /// 11 May 2026 incident fix: dry_run=true + markItemsPrinted/unmarkItemsPrinted akisi.
+  /// Yazici basariyla basarsa printed=1, fail olursa printed=0 (tekrar gonderilebilir).
   Future<void> _sendToKitchenSilent() async {
     if (_ticket == null) return;
 
@@ -267,10 +269,11 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // API'den yazdırılmamış ürünleri al ve printed=1 yap
+      // dry_run=true: backend printed=1 SET ETMEZ. Yazici success sonrasi mark-items-printed
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
+        dryRun: true,
       );
 
       if (result['success'] != true) {
@@ -292,30 +295,58 @@ class _TicketModalState extends State<TicketModal> {
       ticketInfo['section_name'] = widget.table['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter['name'] ?? '';
 
-      // Her yazıcı grubuna ayrı fiş gönder (normal mutfak fişi formatında)
+      final Set<int> printedItemIds = {};
+      final Set<int> printedJobIds = {};
+      final Set<int> failedItemIds = {};
+      final Set<int> failedJobIds = {};
+
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobId = _safeInt(group['job_id']);
 
         if (groupItems.isEmpty || printerIp == null) continue;
 
-        // printKitchenReceiptToIp kullan (_generateKitchenReceipt formatı)
-        await widget.printerService.printKitchenReceiptToIp(
+        final ok = await widget.printerService.printKitchenReceiptToIp(
           ticket: ticketInfo,
           items: groupItems,
           ip: printerIp,
           port: printerPort,
         );
 
-        print('[TicketModal] Silent: $printerName yazicisina ${groupItems.length} urun gonderildi');
+        final ids = groupItems.map((it) => _safeInt(it['id'])).whereType<int>().toSet();
+        if (ok) {
+          printedItemIds.addAll(ids);
+          if (jobId != null) printedJobIds.add(jobId);
+          print('[TicketModal] Silent: $printerName -> ${ids.length} urun BASILDI');
+        } else {
+          failedItemIds.addAll(ids);
+          if (jobId != null) failedJobIds.add(jobId);
+          print('[TicketModal] Silent: $printerName -> BASILAMADI (${ids.length} urun)');
+        }
       }
 
-      print('[TicketModal] Mutfaga gonderildi: ${items.length} urun');
+      // Basarili olan itemlar icin printed=1 isaretle
+      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
+        await widget.apiService.markItemsPrinted(
+          ticketId: ticketId,
+          itemIds: printedItemIds.toList(),
+          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
+        );
+      }
+      // Fail olanlar icin telemetri + dry_run zaten printed=0 birakti, ek aksiyon gerekmiyor
+      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
+        await widget.apiService.unmarkItemsPrinted(
+          ticketId: ticketId,
+          itemIds: failedItemIds.toList(),
+          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
+          error: 'Yazici baglanti hatasi (silent path)',
+        );
+      }
     } catch (e) {
       print('[TicketModal] Mutfaga gonderme hatasi: $e');
-      // Hata olsa da devam et
     }
   }
 
@@ -518,10 +549,12 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // API'den yazdırılmamış ürünleri al ve printed=1 yap
+      // 11 May 2026 incident fix: dry_run=true ile printed=1 SET ETME backend'de.
+      // Yazici basari sonrasi mark-items-printed, fail sonrasi unmark-items-printed.
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
+        dryRun: true,
       );
 
       if (result['success'] != true) {
@@ -543,7 +576,11 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // Her yazıcı grubuna ayrı fiş gönder
+      final Set<int> printedItemIds = {};
+      final Set<int> printedJobIds = {};
+      final Set<int> failedItemIds = {};
+      final Set<int> failedJobIds = {};
+      final List<String> failReasons = [];
       int successCount = 0;
       int failCount = 0;
 
@@ -552,13 +589,13 @@ class _TicketModalState extends State<TicketModal> {
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobId = _safeInt(group['job_id']);
 
         if (groupItems.isEmpty) continue;
 
         bool success = false;
 
         if (printerIp != null && printerIp.isNotEmpty) {
-          // Sunucudan gelen yazıcı bilgileriyle yazdır
           success = await widget.printerService.printKitchenReceiptToIp(
             ticket: ticketInfo,
             items: groupItems,
@@ -566,28 +603,56 @@ class _TicketModalState extends State<TicketModal> {
             port: printerPort,
           );
         } else {
-          // Varsayılan yazıcıya gönder
           success = await widget.printerService.printKitchenReceipt(
             ticket: ticketInfo,
             items: groupItems,
           );
         }
 
+        final ids = groupItems.map((it) => _safeInt(it['id'])).whereType<int>().toSet();
         if (success) {
+          printedItemIds.addAll(ids);
+          if (jobId != null) printedJobIds.add(jobId);
           successCount += groupItems.length;
-          print('[TicketModal] $printerName yazicisina ${groupItems.length} urun gonderildi');
+          print('[TicketModal] $printerName -> ${groupItems.length} urun BASILDI');
         } else {
+          failedItemIds.addAll(ids);
+          if (jobId != null) failedJobIds.add(jobId);
           failCount += groupItems.length;
-          print('[TicketModal] $printerName yazicisina gonderilemedi');
+          failReasons.add(printerName);
+          print('[TicketModal] $printerName -> BASAMADI');
         }
       }
 
-      // API başarılı = ürünler mutfağa gönderildi, masalar ekranına dön
-      // Yazıcı hatası olsa bile DB'de printed=1 olarak işaretlendi
-      if (failCount > 0) {
-        print('[TicketModal] Yazici hatasi: $failCount urun yazdirilamadi');
+      // Basarili olanlar icin printed=1 (sunucu printed_at=NOW + job_status=printed)
+      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
+        await widget.apiService.markItemsPrinted(
+          ticketId: ticketId,
+          itemIds: printedItemIds.toList(),
+          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
+        );
       }
-      widget.onClose();
+
+      // Fail olanlar icin telemetri (printed=0 zaten dry_run sayesinde, sadece job status='failed')
+      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
+        await widget.apiService.unmarkItemsPrinted(
+          ticketId: ticketId,
+          itemIds: failedItemIds.toList(),
+          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
+          error: 'Yazici hatasi: ${failReasons.join(", ")}',
+        );
+      }
+
+      // Kullaniciya net feedback (KRITIK: kayip olmadigindan emin ol)
+      if (failCount > 0 && successCount == 0) {
+        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. URUNLER MUTFAGA GITMEDI! Lutfen yazicilari kontrol edin ve tekrar deneyin.');
+        // Modal kapatma — kullanici tekrar denemeli
+      } else if (failCount > 0) {
+        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). Eksikleri tekrar gonder.');
+      } else {
+        // Tam basarili
+        widget.onClose();
+      }
     } catch (e) {
       print('[TicketModal] Mutfaga gonderme hatasi: $e');
       _showError('Hata: $e');

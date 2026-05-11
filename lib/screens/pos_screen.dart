@@ -328,10 +328,13 @@ class _PosScreenState extends State<PosScreen> {
     }
 
     try {
-      // API'den yazdırılmamış ürünleri al ve printed=1 yap
+      // 11 May 2026: dry_run=true — backend printed=1 SET ETMEZ.
+      // Yazici basari sonrasi mark-items-printed (zaten asagida cagriliyor),
+      // fail durumunda unmark/reportPrintFailed.
       final result = await widget.apiService.printKitchen(
         ticketId: _currentTicket!['id'],
         waiterId: widget.waiter['id'],
+        dryRun: true,
       );
 
       if (result['success'] != true) {

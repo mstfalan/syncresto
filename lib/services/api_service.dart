@@ -1138,9 +1138,42 @@ class ApiService {
     required int ticketId,
     int? waiterId,
   }) async {
+    // OFFLINE PATH: lokal cache'lerden urun + yazici hesaplamasi yap, ayni format don.
+    // - cached_products.printer_id (urun yazicisi)
+    // - cached_sections.summary_printer_id (ozet fis)
+    // - cached_printers (ip+port)
+    // - local_ticket_items.printed=0 (yazdirilmamis urunler)
+    // Yazdirma sonrasi mark_printed sync_queue'ya eklenir, online olunca backend'e printed=1 sync.
     if (!_connectivity.isOnline) {
-      _logService.warning(LogType.action, 'Mutfak fisi gonderilemedi: internet yok', details: {'ticket_id': ticketId});
-      return {'success': false, 'error': 'Çevrimdışı modda mutfak fişi gönderilemez'};
+      try {
+        final result = await _buildOfflineKitchenResult(ticketId);
+        if (result == null) {
+          return {'success': false, 'error': 'Lokal ticket bulunamadi (offline)'};
+        }
+        // Sync queue'ya mark_printed ekle
+        final items = result['items'] as List? ?? [];
+        if (items.isNotEmpty) {
+          final localItemIds = items.map((i) => i['local_id']).whereType<int>().toList();
+          if (localItemIds.isNotEmpty) {
+            await _localDb.markLocalItemsPrinted(localItemIds);
+          }
+          // Online olunca backend'e printed=1 sync icin enqueue
+          await _localDb.enqueueServerTicketAction(
+            action: 'mark_printed',
+            entityType: 'ticket',
+            serverId: ticketId, // server_id resolve sync sirasinda
+            payload: {
+              'item_local_ids': localItemIds,
+              if (waiterId != null) 'waiter_id': waiterId,
+            },
+            description: 'Mutfak fisi offline yazdirildi (#$ticketId)',
+          );
+        }
+        return result;
+      } catch (e) {
+        _logService.error(LogType.error, 'Offline mutfak fisi hesapla hatasi', error: e, details: {'ticket_id': ticketId});
+        return {'success': false, 'error': 'Offline mutfak fisi hatasi: $e'};
+      }
     }
 
     try {
@@ -1279,6 +1312,85 @@ class ApiService {
   /// Tüm hatalı işlemleri temizle
   Future<void> clearFailedSyncItems() async {
     await _syncService.clearFailedItems();
+  }
+
+  // OFFLINE MUTFAK FISI HESABI — backend printKitchen mantigi lokal'de
+  // Cikti formati backend ile birebir ayni ki add_item_modal._sendToKitchen
+  // hem online hem offline ayni kodla calissin.
+  // Format: { success, items, ticket, printerGroups: [{printer_id, printer_name,
+  //          printer_ip, printer_port, items, type}] }
+  Future<Map<String, dynamic>?> _buildOfflineKitchenResult(int ticketId) async {
+    // Lokal ticket cache + section + summary_printer_id
+    final ticketRow = await _localDb.getLocalTicketWithSection(ticketId);
+    if (ticketRow == null) return null;
+    // summary_printer_id JOIN'le geldi (cached_sections.summary_printer_id)
+    int? summaryPrinterId = ticketRow['summary_printer_id'] as int?;
+
+    // Yazdirilmamis itemlar (printed=0 + active)
+    final unprinted = await _localDb.getUnprintedLocalItems(ticketId);
+    if (unprinted.isEmpty) {
+      return {
+        'success': true,
+        'message': 'Yazdirilacak yeni urun yok',
+        'items': [],
+        'ticket': {
+          'ticket_number': ticketRow['ticket_number'],
+          'table_number': ticketRow['table_number'],
+          'section_name': ticketRow['section_name'],
+          'waiter_name': ticketRow['waiter_name'],
+        },
+        'printerGroups': [],
+      };
+    }
+
+    // Yazici gruplari olustur
+    final Map<String, Map<String, dynamic>> printerGroups = {};
+    for (final item in unprinted) {
+      final printerId = item['printer_id'] as int?;
+      final groupKey = printerId != null ? printerId.toString() : 'default';
+      if (!printerGroups.containsKey(groupKey)) {
+        Map<String, dynamic>? printer = printerId != null
+            ? await _localDb.getCachedPrinterById(printerId)
+            : null;
+        printerGroups[groupKey] = {
+          'printer_id': printerId,
+          'printer_name': printer?['name'] ?? 'Varsayilan',
+          'printer_ip': printer?['ip_address'],
+          'printer_port': printer?['port'] ?? 9100,
+          'items': <Map<String, dynamic>>[],
+          'type': 'kitchen',
+        };
+      }
+      (printerGroups[groupKey]!['items'] as List).add(item);
+    }
+
+    // Ozet fis yazicisi (varsa, tum unprinted itemlari icerir)
+    if (summaryPrinterId != null) {
+      final summaryPrinter = await _localDb.getCachedPrinterById(summaryPrinterId);
+      if (summaryPrinter != null) {
+        printerGroups['summary_$summaryPrinterId'] = {
+          'printer_id': summaryPrinterId,
+          'printer_name': summaryPrinter['name'] ?? 'Ozet Fis',
+          'printer_ip': summaryPrinter['ip_address'],
+          'printer_port': summaryPrinter['port'] ?? 9100,
+          'items': unprinted,
+          'type': 'summary',
+        };
+      }
+    }
+
+    return {
+      'success': true,
+      'offline': true,
+      'items': unprinted,
+      'ticket': {
+        'ticket_number': ticketRow['ticket_number'],
+        'table_number': ticketRow['table_number'],
+        'section_name': ticketRow['section_name'],
+        'waiter_name': ticketRow['waiter_name'],
+      },
+      'printerGroups': printerGroups.values.toList(),
+    };
   }
 
   void dispose() {

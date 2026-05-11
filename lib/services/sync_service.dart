@@ -143,7 +143,18 @@ class SyncService {
       _reportProgress('Garsonlar indiriliyor...', 0.8);
       await _cacheAllWaiters();
 
-      // 7. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
+      // 7a. Yazicilar (offline mutfak fisi icin)
+      try {
+        final printersResponse = await _dio!.get('/api/pos/printers');
+        if (printersResponse.data is List) {
+          await _localDb.cachePrinters(List<Map<String, dynamic>>.from(printersResponse.data));
+          print('[Sync] Yazicilar: ${(printersResponse.data as List).length}');
+        }
+      } catch (e) {
+        print('[Sync] Yazicilar alinamadi (opsiyonel): $e');
+      }
+
+      // 7b. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
       // Offline'da iptal popup, urun notu, varyant, ekstra calismasi icin
       _reportProgress('Tanimlamalar indiriliyor...', 0.85);
       try {
@@ -397,6 +408,16 @@ class SyncService {
         }
       } catch (e) {
         print('[Sync] Ayarlar güncellenemedi: $e');
+      }
+
+      // 6b. Yazicilar (offline mutfak fisi icin)
+      try {
+        final printersResponse = await _dio!.get('/api/pos/printers');
+        if (printersResponse.data is List) {
+          await _localDb.cachePrinters(List<Map<String, dynamic>>.from(printersResponse.data));
+        }
+      } catch (e) {
+        print('[Sync] Yazici cache update hatasi: $e');
       }
 
       // 7. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
@@ -713,6 +734,53 @@ class SyncService {
         }
         _logService.logSyncError('Ticket void sync basarisiz', operation: 'ticket_void');
         return false;
+
+      case 'mark_printed':
+        // Offline mutfak fisi yazdirildi -> backend'e printed=1 sync
+        // payload: { item_local_ids: [int], waiter_id?: int }
+        final markServerId = await _resolveServerTicketId(localId, syncId);
+        if (markServerId == null) {
+          print('[Sync] mark_printed: Server ID resolve edilemedi, bekliyor...');
+          return false;
+        }
+        // Lokal item_local_ids -> server_item_id'ye cevir (lokal cache'ten)
+        final localIds = (payload['item_local_ids'] as List?)?.cast<int>() ?? [];
+        if (localIds.isEmpty) {
+          await _localDb.markSyncComplete(syncId);
+          return true;
+        }
+        // Lokal -> server item ID resolve
+        final db = await _localDb.database;
+        final placeholders = List.generate(localIds.length, (i) => '?').join(',');
+        final mapping = await db.rawQuery(
+          'SELECT local_id, server_id FROM local_ticket_items WHERE local_id IN ($placeholders)',
+          localIds,
+        );
+        final serverItemIds = mapping
+            .map((r) => r['server_id'] as int?)
+            .where((id) => id != null)
+            .cast<int>()
+            .toList();
+        if (serverItemIds.isEmpty) {
+          // Item'lar henuz server'a sync olmamis -> bekle
+          print('[Sync] mark_printed: Item\'lar henuz server\'a sync olmamis, bekliyor');
+          return false;
+        }
+        try {
+          final r = await _dio!.post('/api/pos/tickets/$markServerId/mark-items-printed', data: {
+            'item_ids': serverItemIds,
+          });
+          if (r.statusCode == 200) {
+            await _localDb.markSyncComplete(syncId);
+            print('[Sync] mark_printed sync basarili: ${serverItemIds.length} item');
+            _logService.logSync('Mutfak fisi printed=1 sync basarili', operation: 'mark_printed', count: serverItemIds.length);
+            return true;
+          }
+        } catch (e) {
+          print('[Sync] mark_printed sync hatasi: $e');
+          _logService.logSyncError('mark_printed sync hatasi', operation: 'mark_printed', error: e);
+        }
+        return false;
     }
     return false;
   }
@@ -944,6 +1012,115 @@ class SyncService {
       return row.first['server_id'] as int?;
     }
     return null;
+  }
+
+  // ==================== CACHE INVALIDATE (push-based) ====================
+  // Socket.io 'cache:invalidate' event'i geldiginde backend'in degisen tipi
+  // anlik refresh eder. 30dk poll bekleme olmadan fiyat/yazici/menu degisikligi
+  // saniyeler icinde POS'a yansir. Multi-tenant: panel_id event'te.
+  // Type listesi: products, categories, sections, tables, waiters, printers,
+  //                cancel_reasons, product_notes, global_variants, global_extras, settings
+
+  Future<void> refreshCacheType(String type) async {
+    if (!_connectivity.isOnline || _dio == null) {
+      print('[Sync] refreshCacheType skip (offline): $type');
+      return;
+    }
+    try {
+      switch (type) {
+        case 'products':
+          final r = await _dio!.get('/api/pos/products');
+          if (r.data is List) {
+            final products = List<Map<String, dynamic>>.from(r.data);
+            await _localDb.cacheProducts(products);
+            // Yeni gorseller indir
+            final newImageUrls = products.map((p) => p['image']?.toString()).where((u) => u != null && u.isNotEmpty).cast<String>().toList();
+            if (newImageUrls.isNotEmpty) {
+              await _imageCache.downloadMultiple(newImageUrls);
+            }
+            print('[CacheInvalidate] products refresh: ${products.length}');
+          }
+          break;
+        case 'categories':
+          final r = await _dio!.get('/api/pos/categories');
+          if (r.data is List) {
+            await _localDb.cacheCategories(List<Map<String, dynamic>>.from(r.data));
+            print('[CacheInvalidate] categories refresh: ${(r.data as List).length}');
+          }
+          break;
+        case 'sections':
+          final r = await _dio!.get('/api/pos/tables/sections');
+          if (r.data is List) {
+            await _localDb.cacheSections(List<Map<String, dynamic>>.from(r.data));
+            print('[CacheInvalidate] sections refresh: ${(r.data as List).length}');
+          }
+          break;
+        case 'tables':
+          final r = await _dio!.get('/api/pos/tables');
+          if (r.data is List) {
+            await _localDb.cacheTables(List<Map<String, dynamic>>.from(r.data));
+            print('[CacheInvalidate] tables refresh: ${(r.data as List).length}');
+          }
+          break;
+        case 'waiters':
+          await _cacheAllWaiters();
+          break;
+        case 'printers':
+          final r = await _dio!.get('/api/pos/printers');
+          if (r.data is List) {
+            await _localDb.cachePrinters(List<Map<String, dynamic>>.from(r.data));
+            print('[CacheInvalidate] printers refresh: ${(r.data as List).length}');
+          }
+          break;
+        case 'cancel_reasons':
+          final r = await _dio!.get('/api/pos/cancel-reasons');
+          await _localDb.cacheLookups(
+            lookupType: 'cancel_reasons',
+            rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+          break;
+        case 'product_notes':
+          final r = await _dio!.get('/api/pos/product-notes');
+          await _localDb.cacheLookups(
+            lookupType: 'product_notes',
+            rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+          break;
+        case 'global_variants':
+          final r = await _dio!.get('/api/pos/global/variants/active');
+          await _localDb.cacheLookups(
+            lookupType: 'global_variants',
+            rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+          break;
+        case 'global_extras':
+          final r = await _dio!.get('/api/pos/global/extras/active');
+          await _localDb.cacheLookups(
+            lookupType: 'global_extras',
+            rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+          break;
+        case 'settings':
+          final r = await _dio!.get('/api/pos/settings');
+          if (r.data != null) {
+            final settings = Map<String, dynamic>.from(r.data);
+            await _localDb.cacheSettings(settings);
+            onSettingsLoaded?.call(settings);
+          }
+          break;
+        default:
+          print('[CacheInvalidate] Bilinmeyen type: $type');
+      }
+    } catch (e) {
+      print('[CacheInvalidate] $type refresh hatasi: $e');
+    }
+  }
+
+  // Birden fazla type'i paralel refresh
+  Future<void> refreshCacheTypes(List<String> types) async {
+    if (types.isEmpty) return;
+    print('[CacheInvalidate] Bulk refresh: $types');
+    await Future.wait(types.map((t) => refreshCacheType(t)));
   }
 
   // Server'dan masa durumlarını al ve local'i güncelle

@@ -13,6 +13,7 @@ import 'services/printer_service.dart';
 import 'services/sound_service.dart';
 import 'services/websocket_service.dart';
 import 'services/print_queue_service.dart';
+import 'services/sync_service.dart';
 import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
@@ -129,6 +130,18 @@ void main() {
     // Otomatik yazdirma ayarli ise yazdir
     if (printerService.isConfigured) {
       printerService.printOrderReceipt(order, 'MUTFAK');
+    }
+  };
+
+  // Cache invalidate — backend admin paneli ile bir entity degisince
+  // (ornek: urun fiyati, yazici ayari) anlik refresh tetikler.
+  // Multi-tenant: backend io.to('panel_X') ile yalnizca dogru panele gonderir.
+  webSocketService.onCacheInvalidate = (types) async {
+    print('[Main] Cache invalidate: $types');
+    try {
+      await SyncService().refreshCacheTypes(types);
+    } catch (e) {
+      print('[Main] Cache invalidate refresh hata: $e');
     }
   };
 

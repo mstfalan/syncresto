@@ -35,7 +35,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 7, // v7: cached_lookups (cancel_reasons, product_notes, global_variants, global_extras)
+      version: 8, // v8: cached_printers + printer_id (products) + summary_printer_id (sections) — offline mutfak fisi
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -69,6 +69,7 @@ class LocalDbService {
         extras TEXT,
         show_variants_pos INTEGER DEFAULT 0,
         variants TEXT,
+        printer_id INTEGER,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -94,6 +95,20 @@ class LocalDbService {
         name TEXT NOT NULL,
         color TEXT,
         table_count INTEGER DEFAULT 0,
+        summary_printer_id INTEGER,
+        cached_at TEXT NOT NULL
+      )
+    ''');
+
+    // Yazicilar cache (v8) — offline mutfak fisi icin
+    await db.execute('''
+      CREATE TABLE cached_printers (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        ip_address TEXT NOT NULL,
+        port INTEGER DEFAULT 9100,
+        type TEXT,
+        is_active INTEGER DEFAULT 1,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -152,6 +167,7 @@ class LocalDbService {
         status TEXT DEFAULT 'pending',
         synced INTEGER DEFAULT 0,
         synced_at TEXT,
+        printed INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
         FOREIGN KEY (local_ticket_id) REFERENCES local_tickets(local_id)
       )
@@ -339,6 +355,41 @@ class LocalDbService {
         print('[LocalDb] cached_lookups zaten var: $e');
       }
     }
+
+    if (oldVersion < 8) {
+      // v8: Offline mutfak fisi
+      try {
+        await db.execute('ALTER TABLE cached_products ADD COLUMN printer_id INTEGER');
+      } catch (e) {
+        print('[LocalDb] cached_products.printer_id zaten var: $e');
+      }
+      try {
+        await db.execute('ALTER TABLE cached_sections ADD COLUMN summary_printer_id INTEGER');
+      } catch (e) {
+        print('[LocalDb] cached_sections.summary_printer_id zaten var: $e');
+      }
+      try {
+        await db.execute('ALTER TABLE local_ticket_items ADD COLUMN printed INTEGER DEFAULT 0');
+      } catch (e) {
+        print('[LocalDb] local_ticket_items.printed zaten var: $e');
+      }
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS cached_printers (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            ip_address TEXT NOT NULL,
+            port INTEGER DEFAULT 9100,
+            type TEXT,
+            is_active INTEGER DEFAULT 1,
+            cached_at TEXT NOT NULL
+          )
+        ''');
+        print('[LocalDb] v8 cached_printers + printer_id + summary_printer_id + items.printed eklendi');
+      } catch (e) {
+        print('[LocalDb] cached_printers zaten var: $e');
+      }
+    }
   }
 
   // ==================== CACHE İŞLEMLERİ ====================
@@ -390,6 +441,7 @@ class LocalDbService {
           'extras': prod['extras'] is String ? prod['extras'] : (prod['extras'] != null ? prod['extras'].toString() : null),
           'show_variants_pos': prod['show_variants_pos'] ?? 0,
           'variants': prod['variants'] is String ? prod['variants'] : (prod['variants'] != null ? prod['variants'].toString() : null),
+          'printer_id': prod['printer_id'], // v8: offline mutfak fisi icin
           'cached_at': now,
         });
       }
@@ -415,6 +467,7 @@ class LocalDbService {
           'name': sec['name'],
           'color': sec['color'],
           'table_count': sec['table_count'] ?? 0,
+          'summary_printer_id': sec['summary_printer_id'], // v8: ozet fis yazicisi
           'cached_at': now,
         });
       }
@@ -453,6 +506,105 @@ class LocalDbService {
   Future<List<Map<String, dynamic>>> getCachedTables() async {
     final db = await database;
     return await db.query('cached_tables');
+  }
+
+  // ==================== YAZICI CACHE (v8) ====================
+  // Offline mutfak fisi: ip+port lokal'den okunur, ESC/POS direkt TCP yazicaya gider
+
+  Future<void> cachePrinters(List<Map<String, dynamic>> printers) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    await db.transaction((txn) async {
+      await txn.delete('cached_printers');
+      for (final p in printers) {
+        await txn.insert('cached_printers', {
+          'id': p['id'],
+          'name': p['name'] ?? '',
+          'ip_address': p['ip_address'] ?? '',
+          'port': p['port'] ?? 9100,
+          'type': p['type'],
+          'is_active': p['is_active'] == false ? 0 : 1,
+          'cached_at': now,
+        });
+      }
+    });
+    print('[LocalDb] cached_printers: ${printers.length} kayit');
+  }
+
+  Future<List<Map<String, dynamic>>> getCachedPrinters() async {
+    final db = await database;
+    return await db.query('cached_printers', where: 'is_active = 1');
+  }
+
+  Future<Map<String, dynamic>?> getCachedPrinterById(int? id) async {
+    if (id == null) return null;
+    final db = await database;
+    final r = await db.query('cached_printers', where: 'id = ?', whereArgs: [id], limit: 1);
+    return r.isNotEmpty ? r.first : null;
+  }
+
+  // Bir urunun printer_id'sini lokal cache'ten cek (offline mutfak fisi gruplama)
+  Future<int?> getProductPrinterId(int productId) async {
+    final db = await database;
+    final r = await db.query('cached_products',
+        columns: ['printer_id'], where: 'id = ?', whereArgs: [productId], limit: 1);
+    if (r.isEmpty) return null;
+    return r.first['printer_id'] as int?;
+  }
+
+  // Lokal item'lari yazdirildi olarak isaretle (offline mutfak fisi sonrasi)
+  Future<void> markLocalItemsPrinted(List<int> localIds) async {
+    if (localIds.isEmpty) return;
+    final db = await database;
+    final placeholders = List.generate(localIds.length, (i) => '?').join(',');
+    await db.rawUpdate(
+      'UPDATE local_ticket_items SET printed = 1 WHERE local_id IN ($placeholders)',
+      localIds,
+    );
+    print('[LocalDb] markLocalItemsPrinted: ${localIds.length} item');
+  }
+
+  // Lokal ticket'in printed=0 + status='active'/'pending' item'larini cek (offline mutfak fisi)
+  // Format: [{local_id, server_id, product_id, product_name, quantity, unit_price, notes, printer_id}]
+  Future<List<Map<String, dynamic>>> getUnprintedLocalItems(int localTicketId) async {
+    final db = await database;
+    // JOIN cached_products: printer_id'yi de al
+    final r = await db.rawQuery('''
+      SELECT i.local_id, i.server_id, i.product_id, i.product_name, i.quantity,
+             i.unit_price, i.notes,
+             p.printer_id
+        FROM local_ticket_items i
+   LEFT JOIN cached_products p ON p.id = i.product_id
+       WHERE i.local_ticket_id = ?
+         AND i.printed = 0
+         AND (i.status IS NULL OR i.status != 'cancelled')
+       ORDER BY i.created_at
+    ''', [localTicketId]);
+    return r;
+  }
+
+  // Lokal ticket bilgisi + masa + salon — offline mutfak fisi icin
+  Future<Map<String, dynamic>?> getLocalTicketWithSection(int localTicketId) async {
+    final db = await database;
+    final r = await db.rawQuery('''
+      SELECT t.*, s.name as section_name, s.summary_printer_id, w.name as waiter_name
+        FROM local_tickets t
+   LEFT JOIN cached_tables tb ON tb.id = t.table_id
+   LEFT JOIN cached_sections s ON s.id = tb.section_id
+   LEFT JOIN cached_waiters w ON w.id = t.waiter_id
+       WHERE t.local_id = ?
+       LIMIT 1
+    ''', [localTicketId]);
+    return r.isNotEmpty ? r.first : null;
+  }
+
+  // Bir salonun summary_printer_id'sini lokal cache'ten cek
+  Future<int?> getSectionSummaryPrinterId(int sectionId) async {
+    final db = await database;
+    final r = await db.query('cached_sections',
+        columns: ['summary_printer_id'], where: 'id = ?', whereArgs: [sectionId], limit: 1);
+    if (r.isEmpty) return null;
+    return r.first['summary_printer_id'] as int?;
   }
 
   // ==================== LOOKUP CACHE (v7) ====================

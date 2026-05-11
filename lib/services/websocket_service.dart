@@ -16,6 +16,9 @@ class WebSocketService {
   Function(Map<String, dynamic>)? onOrderUpdate;
   Function(Map<String, dynamic>)? onPrintRequest;
   Function(bool)? onConnectionChange;
+  // Cache invalidate — backend bir entity degisince anlik refresh tetikler
+  // payload: { types: ['products', 'printers', ...] }
+  Function(List<String>)? onCacheInvalidate;
 
   bool get isConnected => _isConnected;
   String? _authToken;
@@ -143,6 +146,28 @@ class WebSocketService {
       // Pong for keep-alive
       _socket!.on('pong', (_) {
         // Keep-alive response
+      });
+
+      // Cache invalidate — backend admin paneli ile bir entity degisince emit eder
+      // Payload: { types: ['products', 'printers'] } veya { type: 'products' }
+      _socket!.on('cache:invalidate', (data) {
+        try {
+          List<String> types = [];
+          if (data is Map) {
+            if (data['types'] is List) {
+              types = List<String>.from((data['types'] as List).map((e) => e.toString()));
+            } else if (data['type'] is String) {
+              types = [data['type'] as String];
+            }
+          }
+          if (types.isNotEmpty) {
+            print('[WebSocket] cache:invalidate -> $types');
+            onCacheInvalidate?.call(types);
+            _logService.info(LogType.sync, 'Cache invalidate alindi', details: {'types': types});
+          }
+        } catch (e) {
+          print('[WebSocket] cache:invalidate hata: $e');
+        }
       });
 
     } catch (e) {

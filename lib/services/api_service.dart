@@ -576,11 +576,23 @@ class ApiService {
       }
     }
 
-    _logService.warning(LogType.action, 'Urun guncelleme basarisiz: offline mod', details: {'ticket_id': ticketId, 'item_id': itemId});
-    return {
-      'success': false,
-      'error': 'Offline modda item guncelleme desteklenmiyor',
-    };
+    // OFFLINE — sync queue'ya update_item ekle, server_id resolve sync sirasinda yapilir
+    _logService.logAction('Urun guncellendi (offline-queued)', details: {'ticket_id': ticketId, 'item_id': itemId, 'quantity': quantity});
+    await _localDb.enqueueServerTicketAction(
+      action: 'update_item',
+      entityType: 'ticket_item',
+      serverId: itemId, // backend itemId'yi PUT path'inde kullanacak
+      payload: {
+        'ticket_id': ticketId,
+        if (quantity != null) 'quantity': quantity,
+        if (notes != null) 'notes': notes,
+        if (waiterId != null) 'waiter_id': waiterId,
+        if (extrasAmount != null) 'extras_amount': extrasAmount,
+        if (unitPrice != null && extrasAmount == null) 'unit_price': unitPrice,
+      },
+      description: 'Urun #$itemId offline guncellendi',
+    );
+    return {'success': true, 'offline': true, 'queued': true};
   }
 
   Future<Map<String, dynamic>> deleteTicketItem({
@@ -604,17 +616,26 @@ class ApiService {
         }
         return response.data;
       } on DioException catch (e) {
-        print('[API] Online deleteTicketItem basarisiz: ${e.message}');
-        _logService.error(LogType.error, 'Urun silme hatasi', error: e, details: {'ticket_id': ticketId, 'item_id': itemId});
-        rethrow;
+        print('[API] Online deleteTicketItem basarisiz, offline path: ${e.message}');
+        _logService.warning(LogType.action, 'Online delete basarisiz, offline path', details: {'ticket_id': ticketId, 'item_id': itemId});
+        // Network hatasinda offline yola dus
       }
     }
 
-    _logService.warning(LogType.action, 'Urun silme basarisiz: offline mod', details: {'ticket_id': ticketId, 'item_id': itemId});
-    return {
-      'success': false,
-      'error': 'Offline modda item silme desteklenmiyor',
-    };
+    // OFFLINE — sync queue'ya delete_item (backend cancel_item) ekle
+    _logService.logAction('Urun silindi (offline-queued)', details: {'ticket_id': ticketId, 'item_id': itemId, 'cancel_reason': cancelReason});
+    await _localDb.enqueueServerTicketAction(
+      action: 'delete_item',
+      entityType: 'ticket_item',
+      serverId: itemId,
+      payload: {
+        'ticket_id': ticketId,
+        'cancel_reason': cancelReason ?? 'Musteri istegi',
+        if (waiterId != null) 'waiter_id': waiterId,
+      },
+      description: 'Urun #$itemId offline silindi',
+    );
+    return {'success': true, 'offline': true, 'queued': true};
   }
 
   Future<Map<String, dynamic>> closeTicket({
@@ -624,13 +645,48 @@ class ApiService {
     String? discountType,
     int? waiterId,
   }) async {
-    // Önce local ticket mı kontrol et
+    // Lokal cache'te kayit varsa al
     final localTicket = await _localDb.getLocalTicket(ticketId);
+    final serverId = localTicket != null ? localTicket['server_id'] as int? : null;
 
+    // ONLINE + (saf server ticket VEYA cache'lenmis sync edilmis) -> direkt backend POST
+    if (_connectivity.isOnline && (localTicket == null || serverId != null)) {
+      final realTicketId = serverId ?? ticketId;
+      try {
+        final response = await _dio.post('/api/pos/tickets/$realTicketId/close', data: {
+          'payment_method': paymentMethod,
+          'discount_amount': discountAmount,
+          if (discountType != null) 'discount_type': discountType,
+          if (waiterId != null) 'waiter_id': waiterId,
+        });
+        if (response.data['success'] == true) {
+          _logService.logAction('Adisyon kapatildi (online)', details: {
+            'ticket_id': realTicketId,
+            'payment_method': paymentMethod,
+            'discount_amount': discountAmount,
+          });
+          // Lokal cache'te de kapat (masa anlik bosalsin)
+          if (localTicket != null) {
+            await _localDb.closeLocalTicket(
+              localTicketId: ticketId,
+              paymentMethod: paymentMethod,
+              discountAmount: discountAmount,
+              discountType: discountType,
+              waiterId: waiterId ?? 1,
+            );
+          }
+        }
+        return response.data;
+      } on DioException catch (e) {
+        print('[API] Online closeTicket basarisiz, offline path: ${e.message}');
+        _logService.warning(LogType.action, 'Online close basarisiz, offline path', details: {'ticket_id': realTicketId});
+        // Network hatasinda offline path'e dus
+      }
+    }
+
+    // OFFLINE veya henuz sync olmamis lokal ticket -> lokal kapat + sync queue
     if (localTicket != null) {
-      // LOCAL TICKET - her zaman local'de kapat, sync queue'ya ekle
-      // İnternet olsa da olmasa da aynı mantık: local kaydet, sonra sync
-      print('[API] Local ticket kapatiliyor: $ticketId');
+      print('[API] Local ticket kapatiliyor: $ticketId (server_id=$serverId)');
       await _localDb.closeLocalTicket(
         localTicketId: ticketId,
         paymentMethod: paymentMethod,
@@ -641,6 +697,7 @@ class ApiService {
 
       _logService.logAction('Adisyon kapatildi (local)', details: {
         'local_ticket_id': ticketId,
+        'server_id': serverId,
         'payment_method': paymentMethod,
         'discount_amount': discountAmount,
         'total': localTicket['total'],
@@ -650,35 +707,29 @@ class ApiService {
       if (_connectivity.isOnline) {
         _syncService.syncPendingItems();
       }
-      return {'success': true, 'offline': localTicket['server_id'] == null};
+      return {'success': true, 'offline': true};
     }
 
-    // SERVER TICKET - online ise direkt kapat
-    if (_connectivity.isOnline) {
-      try {
-        final response = await _dio.post('/api/pos/tickets/$ticketId/close', data: {
-          'payment_method': paymentMethod,
-          'discount_amount': discountAmount,
-          if (discountType != null) 'discount_type': discountType,
-          if (waiterId != null) 'waiter_id': waiterId,
-        });
-        if (response.data['success'] == true) {
-          _logService.logAction('Adisyon kapatildi (online)', details: {
-            'ticket_id': ticketId,
-            'payment_method': paymentMethod,
-            'discount_amount': discountAmount,
-          });
-        }
-        return response.data;
-      } on DioException catch (e) {
-        print('[API] Online closeTicket basarisiz: ${e.message}');
-        _logService.error(LogType.error, 'Adisyon kapatma hatasi', error: e, details: {'ticket_id': ticketId});
-        return {'success': false, 'error': e.message};
-      }
-    }
-
-    _logService.warning(LogType.action, 'Adisyon kapatma basarisiz: offline ve server ticket', details: {'ticket_id': ticketId});
-    return {'success': false, 'error': 'Offline ve server ticket'};
+    // SADECE server ticket'i + offline + lokal cache yok -> manuel cache + sync queue (recovery)
+    // Bu nadir senaryo: kullanici online iken masaya bakmadan internet kesildi, masa zaten acik (server'da var)
+    // Bu durumda ticketId'yi server_id olarak kabul et, sync_queue'ya ekle
+    print('[API] Server ticket offline kapama (cache yok, recovery): $ticketId');
+    await _localDb.enqueueServerTicketAction(
+      action: 'close',
+      serverId: ticketId,
+      payload: {
+        'payment_method': paymentMethod,
+        'discount_amount': discountAmount,
+        if (discountType != null) 'discount_type': discountType,
+        if (waiterId != null) 'waiter_id': waiterId,
+      },
+      description: 'Server ticket #$ticketId offline kapatildi',
+    );
+    _logService.logAction('Adisyon kapatildi (offline-recovery)', details: {
+      'server_ticket_id': ticketId,
+      'payment_method': paymentMethod,
+    });
+    return {'success': true, 'offline': true, 'queued': true};
   }
 
   Future<Map<String, dynamic>> voidTicket({
@@ -745,60 +796,119 @@ class ApiService {
       return {'success': true, 'offline': true};
     }
 
-    _logService.warning(LogType.action, 'Adisyon iptal basarisiz: offline ve cache\'te ticket yok', details: {'ticket_id': ticketId});
-    return {'success': false, 'error': 'Offline ve lokal kayit yok'};
+    // SADECE server ticket'i + offline + lokal cache yok -> recovery: sync_queue'ya ekle
+    print('[API] Server ticket offline iptal (cache yok, recovery): $ticketId');
+    await _localDb.enqueueServerTicketAction(
+      action: 'void',
+      serverId: ticketId,
+      payload: {
+        if (reason != null && reason.isNotEmpty) 'reason': reason,
+        if (waiterId != null) 'waiter_id': waiterId,
+      },
+      description: 'Server ticket #$ticketId offline iptal edildi${reason != null ? " ($reason)" : ""}',
+    );
+    _logService.logAction('Adisyon iptal edildi (offline-recovery)', details: {
+      'server_ticket_id': ticketId,
+      'reason': reason,
+    });
+    return {'success': true, 'offline': true, 'queued': true};
   }
 
-  /// İptal sebeplerini getir
+  /// İptal sebeplerini getir — online cache update + offline cache fallback
   Future<List<dynamic>> getCancelReasons() async {
-    if (!_connectivity.isOnline) return [];
-    try {
-      final response = await _dio.get('/api/pos/cancel-reasons');
-      return response.data as List? ?? [];
-    } catch (e) {
-      print('[API] getCancelReasons hatası: $e');
-      return [];
+    if (_connectivity.isOnline) {
+      try {
+        final response = await _dio.get('/api/pos/cancel-reasons');
+        final list = (response.data as List?) ?? [];
+        // Cache update — offline icin
+        try {
+          await _localDb.cacheLookups(
+            lookupType: 'cancel_reasons',
+            rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+        } catch (_) {}
+        return list;
+      } catch (e) {
+        print('[API] getCancelReasons hatası, cache fallback: $e');
+        // Network hatasinda cache fallback
+        return await _localDb.getCachedLookups(lookupType: 'cancel_reasons');
+      }
     }
+    // Offline: direkt cache
+    final cached = await _localDb.getCachedLookups(lookupType: 'cancel_reasons');
+    print('[API] getCancelReasons offline cache: ${cached.length} kayit');
+    return cached;
   }
 
-  /// Ürün notlarını getir
+  /// Ürün notlarını getir — online cache update + offline cache fallback
   Future<List<dynamic>> getProductNotes() async {
-    if (!_connectivity.isOnline) return [];
-    try {
-      final response = await _dio.get('/api/pos/product-notes');
-      return response.data as List? ?? [];
-    } catch (e) {
-      print('[API] getProductNotes hatası: $e');
-      return [];
+    if (_connectivity.isOnline) {
+      try {
+        final response = await _dio.get('/api/pos/product-notes');
+        final list = (response.data as List?) ?? [];
+        try {
+          await _localDb.cacheLookups(
+            lookupType: 'product_notes',
+            rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+        } catch (_) {}
+        return list;
+      } catch (e) {
+        print('[API] getProductNotes hatası, cache fallback: $e');
+        return await _localDb.getCachedLookups(lookupType: 'product_notes');
+      }
     }
+    final cached = await _localDb.getCachedLookups(lookupType: 'product_notes');
+    print('[API] getProductNotes offline cache: ${cached.length} kayit');
+    return cached;
   }
 
   Future<List<dynamic>> getGlobalVariants({int? categoryId}) async {
-    if (!_connectivity.isOnline) return [];
-    try {
-      final url = categoryId != null
-          ? '/api/pos/global/variants/active?category_id=$categoryId'
-          : '/api/pos/global/variants/active';
-      final response = await _dio.get(url);
-      return response.data as List? ?? [];
-    } catch (e) {
-      print('[API] getGlobalVariants error: $e');
-      return [];
+    if (_connectivity.isOnline) {
+      try {
+        final url = categoryId != null
+            ? '/api/pos/global/variants/active?category_id=$categoryId'
+            : '/api/pos/global/variants/active';
+        final response = await _dio.get(url);
+        final list = (response.data as List?) ?? [];
+        try {
+          await _localDb.cacheLookups(
+            lookupType: 'global_variants',
+            categoryId: categoryId,
+            rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+        } catch (_) {}
+        return list;
+      } catch (e) {
+        print('[API] getGlobalVariants error, cache fallback: $e');
+        return await _localDb.getCachedLookups(lookupType: 'global_variants', categoryId: categoryId);
+      }
     }
+    return await _localDb.getCachedLookups(lookupType: 'global_variants', categoryId: categoryId);
   }
 
   Future<List<dynamic>> getGlobalExtras({int? categoryId}) async {
-    if (!_connectivity.isOnline) return [];
-    try {
-      final url = categoryId != null
-          ? '/api/pos/global/extras/active?category_id=$categoryId'
-          : '/api/pos/global/extras/active';
-      final response = await _dio.get(url);
-      return response.data as List? ?? [];
-    } catch (e) {
-      print('[API] getGlobalExtras error: $e');
-      return [];
+    if (_connectivity.isOnline) {
+      try {
+        final url = categoryId != null
+            ? '/api/pos/global/extras/active?category_id=$categoryId'
+            : '/api/pos/global/extras/active';
+        final response = await _dio.get(url);
+        final list = (response.data as List?) ?? [];
+        try {
+          await _localDb.cacheLookups(
+            lookupType: 'global_extras',
+            categoryId: categoryId,
+            rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          );
+        } catch (_) {}
+        return list;
+      } catch (e) {
+        print('[API] getGlobalExtras error, cache fallback: $e');
+        return await _localDb.getCachedLookups(lookupType: 'global_extras', categoryId: categoryId);
+      }
     }
+    return await _localDb.getCachedLookups(lookupType: 'global_extras', categoryId: categoryId);
   }
 
   /// Parçalı ödeme - seçili ürünleri öde

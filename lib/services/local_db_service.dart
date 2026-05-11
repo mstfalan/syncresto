@@ -35,7 +35,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 6, // v6: product variants
+      version: 7, // v7: cached_lookups (cancel_reasons, product_notes, global_variants, global_extras)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -197,6 +197,19 @@ class LocalDbService {
       )
     ''');
 
+    // v7: Lookup cache — cancel_reasons, product_notes, global_variants, global_extras
+    // Tek tablo + lookup_type ile ayrim. Offline'da iptal popup, urun notu, varyant/ekstra hala calisir.
+    // payload: API'den gelen ham JSON (string olarak saklanir, parse edilir)
+    await db.execute('''
+      CREATE TABLE cached_lookups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lookup_type TEXT NOT NULL,
+        category_id INTEGER,
+        payload TEXT NOT NULL,
+        cached_at TEXT NOT NULL
+      )
+    ''');
+
     // İndeksler
     await db.execute('CREATE INDEX idx_products_category ON cached_products(category_id)');
     await db.execute('CREATE INDEX idx_tables_section ON cached_tables(section_id)');
@@ -204,6 +217,7 @@ class LocalDbService {
     await db.execute('CREATE INDEX idx_items_ticket ON local_ticket_items(local_ticket_id)');
     await db.execute('CREATE INDEX idx_sync_status ON sync_queue(status)');
     await db.execute('CREATE INDEX idx_print_queue_status ON print_queue(status)');
+    await db.execute('CREATE INDEX idx_lookups_type ON cached_lookups(lookup_type)');
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -304,6 +318,25 @@ class LocalDbService {
         print('[LocalDb] cached_products variants kolonları eklendi');
       } catch (e) {
         print('[LocalDb] variants kolonları zaten var: $e');
+      }
+    }
+
+    if (oldVersion < 7) {
+      // v7: cached_lookups (cancel_reasons, product_notes, global_variants, global_extras)
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS cached_lookups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lookup_type TEXT NOT NULL,
+            category_id INTEGER,
+            payload TEXT NOT NULL,
+            cached_at TEXT NOT NULL
+          )
+        ''');
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_lookups_type ON cached_lookups(lookup_type)');
+        print('[LocalDb] v7 cached_lookups eklendi');
+      } catch (e) {
+        print('[LocalDb] cached_lookups zaten var: $e');
       }
     }
   }
@@ -420,6 +453,68 @@ class LocalDbService {
   Future<List<Map<String, dynamic>>> getCachedTables() async {
     final db = await database;
     return await db.query('cached_tables');
+  }
+
+  // ==================== LOOKUP CACHE (v7) ====================
+  // cancel_reasons / product_notes / global_variants / global_extras
+  // Tek tablo, lookup_type ile ayrim. Offline'da iptal popup, urun notu,
+  // varyant, ekstra hala calisir.
+
+  Future<void> cacheLookups({
+    required String lookupType,
+    required List<Map<String, dynamic>> rows,
+    int? categoryId,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    await db.transaction((txn) async {
+      // Sadece bu type'i temizle (digerleri korunur)
+      if (categoryId != null) {
+        await txn.delete('cached_lookups',
+            where: 'lookup_type = ? AND category_id = ?',
+            whereArgs: [lookupType, categoryId]);
+      } else {
+        await txn.delete('cached_lookups',
+            where: 'lookup_type = ? AND category_id IS NULL',
+            whereArgs: [lookupType]);
+      }
+      for (final r in rows) {
+        await txn.insert('cached_lookups', {
+          'lookup_type': lookupType,
+          'category_id': categoryId,
+          'payload': jsonEncode(r),
+          'cached_at': now,
+        });
+      }
+    });
+    print('[LocalDb] cached_lookups [$lookupType' + (categoryId != null ? '/cat=$categoryId' : '') + ']: ${rows.length} kayit');
+  }
+
+  Future<List<Map<String, dynamic>>> getCachedLookups({
+    required String lookupType,
+    int? categoryId,
+  }) async {
+    final db = await database;
+    final List<Map<String, dynamic>> rows;
+    if (categoryId != null) {
+      // Once kategori-ozel cache, yoksa global cache'e dus
+      rows = await db.query('cached_lookups',
+          where: 'lookup_type = ? AND category_id = ?',
+          whereArgs: [lookupType, categoryId]);
+      if (rows.isNotEmpty) {
+        return rows.map((r) => Map<String, dynamic>.from(jsonDecode(r['payload'] as String))).toList();
+      }
+      // Fallback: global (categoryId IS NULL)
+      final fallback = await db.query('cached_lookups',
+          where: 'lookup_type = ? AND category_id IS NULL',
+          whereArgs: [lookupType]);
+      return fallback.map((r) => Map<String, dynamic>.from(jsonDecode(r['payload'] as String))).toList();
+    } else {
+      rows = await db.query('cached_lookups',
+          where: 'lookup_type = ? AND category_id IS NULL',
+          whereArgs: [lookupType]);
+      return rows.map((r) => Map<String, dynamic>.from(jsonDecode(r['payload'] as String))).toList();
+    }
   }
 
   // ==================== YEREL ADİSYON İŞLEMLERİ ====================
@@ -775,6 +870,35 @@ class LocalDbService {
       priority: 1,
       description: 'Masa $tableNumber: Adisyon iptal edildi${reason != null ? " ($reason)" : ""}',
       dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
+    );
+  }
+
+  // Server ticket offline aksiyon — lokal cache yokken close/void/cancel_item gibi
+  // sync_queue'ya direkt server_id ile koy. sync_service realTicketId olarak kullanir.
+  // Idempotent — ayni server_id + ayni action + status='pending' varsa eklemez.
+  Future<int?> enqueueServerTicketAction({
+    required String action,        // 'close', 'void', 'cancel_item', 'update_item'
+    required int serverId,         // Server ticket ID (veya item ID)
+    required Map<String, dynamic> payload,
+    String entityType = 'ticket',  // 'ticket' veya 'ticket_item'
+    String? description,
+  }) async {
+    final db = await database;
+    // Duplicate guard
+    final existing = await db.query('sync_queue',
+        where: "action = ? AND entity_type = ? AND server_id = ? AND status IN ('pending', 'in_progress')",
+        whereArgs: [action, entityType, serverId]);
+    if (existing.isNotEmpty) {
+      print('[LocalDb] enqueueServerTicketAction: zaten kuyrukta — $action #$serverId');
+      return (existing.first['id'] as int?);
+    }
+    return await addToSyncQueueWithReturn(
+      action: action,
+      entityType: entityType,
+      serverId: serverId,
+      payload: payload,
+      priority: 1,
+      description: description ?? 'Server $entityType #$serverId offline $action',
     );
   }
 

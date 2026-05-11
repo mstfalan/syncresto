@@ -143,7 +143,46 @@ class SyncService {
       _reportProgress('Garsonlar indiriliyor...', 0.8);
       await _cacheAllWaiters();
 
-      // 7. Ayarlar (varsa)
+      // 7. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
+      // Offline'da iptal popup, urun notu, varyant, ekstra calismasi icin
+      _reportProgress('Tanimlamalar indiriliyor...', 0.85);
+      try {
+        await Future.wait([
+          _dio!.get('/api/pos/cancel-reasons').then((r) async {
+            final list = (r.data as List?) ?? [];
+            await _localDb.cacheLookups(
+              lookupType: 'cancel_reasons',
+              rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+          _dio!.get('/api/pos/product-notes').then((r) async {
+            final list = (r.data as List?) ?? [];
+            await _localDb.cacheLookups(
+              lookupType: 'product_notes',
+              rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+          _dio!.get('/api/pos/global/variants/active').then((r) async {
+            final list = (r.data as List?) ?? [];
+            await _localDb.cacheLookups(
+              lookupType: 'global_variants',
+              rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+          _dio!.get('/api/pos/global/extras/active').then((r) async {
+            final list = (r.data as List?) ?? [];
+            await _localDb.cacheLookups(
+              lookupType: 'global_extras',
+              rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+        ]);
+        print('[Sync] Lookup verileri cache\'lendi');
+      } catch (e) {
+        print('[Sync] Lookup cache hatasi (opsiyonel): $e');
+      }
+
+      // 8. Ayarlar (varsa)
       _reportProgress('Ayarlar indiriliyor...', 0.9);
       try {
         final settingsResponse = await _dio!.get('/api/pos/settings');
@@ -358,6 +397,38 @@ class SyncService {
         }
       } catch (e) {
         print('[Sync] Ayarlar güncellenemedi: $e');
+      }
+
+      // 7. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
+      try {
+        await Future.wait([
+          _dio!.get('/api/pos/cancel-reasons').then((r) async {
+            await _localDb.cacheLookups(
+              lookupType: 'cancel_reasons',
+              rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+          _dio!.get('/api/pos/product-notes').then((r) async {
+            await _localDb.cacheLookups(
+              lookupType: 'product_notes',
+              rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+          _dio!.get('/api/pos/global/variants/active').then((r) async {
+            await _localDb.cacheLookups(
+              lookupType: 'global_variants',
+              rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+          _dio!.get('/api/pos/global/extras/active').then((r) async {
+            await _localDb.cacheLookups(
+              lookupType: 'global_extras',
+              rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            );
+          }),
+        ]);
+      } catch (e) {
+        print('[Sync] Lookup cache update hatasi: $e');
       }
 
       print('[Sync] Arka plan güncelleme tamamlandı');
@@ -600,32 +671,23 @@ class SyncService {
         return false;
 
       case 'close':
-        // Önce local ticket'ın server_id'sini al
-        final ticketClose = await _localDb.getLocalTicket(localId!);
-        if (ticketClose == null) {
-          await _localDb.markSyncComplete(syncId); // Ticket yok, atla
-          print('[Sync] Close: Ticket bulunamadı, atlanıyor');
-          return true;
+        // server_id resolve: payload'tan, lokal ticket'tan veya sync_queue.server_id'den
+        final closeServerId = await _resolveServerTicketId(localId, syncId);
+        if (closeServerId == null) {
+          // Server'da henuz olusturulmamis -> tekrar dene
+          print('[Sync] Close: Server ID resolve edilemedi, bekleniyor...');
+          return false;
         }
-
-        if (ticketClose['server_id'] == null) {
-          // Server'da henüz oluşturulmamış - sonraki döngüde tekrar denenecek
-          print('[Sync] Close: Ticket henüz sunucuda yok, bekleniyor...');
-          return false; // markSyncComplete çağırmıyoruz, tekrar denenecek
-        }
-
-        final serverIdClose = ticketClose['server_id'];
-        final closeResponse = await _dio!.post('/api/pos/tickets/$serverIdClose/close', data: {
+        final closeResponse = await _dio!.post('/api/pos/tickets/$closeServerId/close', data: {
           'payment_method': payload['payment_method'],
           'waiter_id': payload['waiter_id'] ?? 1,
           'discount_amount': payload['discount_amount'] ?? 0,
-          'discount_type': payload['discount_type'],
-          'is_offline': true, // Offline'dan geldiğini bildir - yetki bypass için
+          if (payload['discount_type'] != null) 'discount_type': payload['discount_type'],
+          'is_offline': true, // yetki bypass icin
         });
-
         if (closeResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
-          print('[Sync] Ticket close sync başarılı: server=$serverIdClose');
+          print('[Sync] Ticket close sync başarılı: server=$closeServerId');
           _logService.logSync('Ticket close sync basarili', operation: 'ticket_close', count: 1);
           return true;
         }
@@ -633,28 +695,19 @@ class SyncService {
         return false;
 
       case 'void':
-        final ticketVoid = await _localDb.getLocalTicket(localId!);
-        if (ticketVoid == null) {
-          await _localDb.markSyncComplete(syncId);
-          print('[Sync] Void: Ticket bulunamadı, atlanıyor');
-          return true;
-        }
-
-        if (ticketVoid['server_id'] == null) {
-          // Server'da henüz oluşturulmamış - sonraki döngüde tekrar denenecek
-          print('[Sync] Void: Ticket henüz sunucuda yok, bekleniyor...');
+        final voidServerId = await _resolveServerTicketId(localId, syncId);
+        if (voidServerId == null) {
+          print('[Sync] Void: Server ID resolve edilemedi, bekleniyor...');
           return false;
         }
-
-        final serverIdVoid = ticketVoid['server_id'];
-        final voidResponse = await _dio!.post('/api/pos/tickets/$serverIdVoid/void', data: {
+        final voidResponse = await _dio!.post('/api/pos/tickets/$voidServerId/void', data: {
+          if (payload['reason'] != null) 'reason': payload['reason'],
           'waiter_id': payload['waiter_id'] ?? 1,
-          'is_offline': true, // Offline'dan geldiğini bildir - yetki bypass için
+          'is_offline': true,
         });
-
         if (voidResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
-          print('[Sync] Ticket void sync başarılı: server=$serverIdVoid');
+          print('[Sync] Ticket void sync başarılı: server=$voidServerId');
           _logService.logSync('Ticket void sync basarili', operation: 'ticket_void', count: 1);
           return true;
         }
@@ -662,6 +715,25 @@ class SyncService {
         return false;
     }
     return false;
+  }
+
+  // Server ticket ID resolve: 3 yol — sync_queue.server_id, local cache, depends_on
+  Future<int?> _resolveServerTicketId(int? localId, int syncId) async {
+    final db = await _localDb.database;
+    // 1) sync_queue.server_id direkt set edilmis mi (recovery enqueue)
+    final syncRow = await db.query('sync_queue', where: 'id = ?', whereArgs: [syncId], limit: 1);
+    if (syncRow.isNotEmpty) {
+      final sid = syncRow.first['server_id'] as int?;
+      if (sid != null) return sid;
+    }
+    // 2) Lokal ticket cache'inden
+    if (localId != null) {
+      final ticket = await _localDb.getLocalTicket(localId);
+      if (ticket != null && ticket['server_id'] != null) {
+        return ticket['server_id'] as int;
+      }
+    }
+    return null;
   }
 
   Future<bool> _syncTicketItem(String action, int? localId, Map<String, dynamic> payload, int syncId) async {
@@ -801,8 +873,77 @@ class SyncService {
 
         await _localDb.markSyncComplete(syncId);
         return true;
+
+      case 'update_item':
+        // Server item update (offline'da garson qty/notes/fiyat degistirdi)
+        // payload: {ticket_id, quantity?, notes?, unit_price?, extras_amount?, waiter_id?}
+        // server_id: itemId (sync_queue'da set edildi via enqueueServerTicketAction)
+        final updateItemId = await _resolveServerEntityId(syncId);
+        final updateTicketId = payload['ticket_id'] as int?;
+        if (updateItemId == null || updateTicketId == null) {
+          await _localDb.markSyncFailed(syncId, 'item_id veya ticket_id eksik');
+          return false;
+        }
+        try {
+          final updRes = await _dio!.put('/api/pos/tickets/$updateTicketId/items/$updateItemId', data: {
+            if (payload['quantity'] != null) 'quantity': payload['quantity'],
+            if (payload['notes'] != null) 'notes': payload['notes'],
+            if (payload['unit_price'] != null) 'unit_price': payload['unit_price'],
+            if (payload['extras_amount'] != null) 'extras_amount': payload['extras_amount'],
+            if (payload['waiter_id'] != null) 'waiter_id': payload['waiter_id'],
+            'is_offline': true,
+          });
+          if (updRes.statusCode == 200) {
+            await _localDb.markSyncComplete(syncId);
+            print('[Sync] Item update sync başarılı: item=$updateItemId');
+            _logService.logSync('Item update sync basarili', operation: 'item_update', count: 1);
+            return true;
+          }
+        } catch (e) {
+          print('[Sync] Item update sync hatası: $e');
+          _logService.logSyncError('Item update sync hatasi', operation: 'item_update', error: e);
+        }
+        return false;
+
+      case 'delete_item':
+        // Server item delete (offline iptal)
+        // payload: {ticket_id, cancel_reason, waiter_id?}
+        // server_id: itemId
+        final deleteItemId = await _resolveServerEntityId(syncId);
+        final deleteTicketId = payload['ticket_id'] as int?;
+        if (deleteItemId == null || deleteTicketId == null) {
+          await _localDb.markSyncFailed(syncId, 'item_id veya ticket_id eksik');
+          return false;
+        }
+        try {
+          final delRes = await _dio!.delete('/api/pos/tickets/$deleteTicketId/items/$deleteItemId', data: {
+            'cancel_reason': payload['cancel_reason'] ?? 'Musteri istegi',
+            if (payload['waiter_id'] != null) 'waiter_id': payload['waiter_id'],
+            'is_offline': true,
+          });
+          if (delRes.statusCode == 200) {
+            await _localDb.markSyncComplete(syncId);
+            print('[Sync] Item delete sync başarılı: item=$deleteItemId');
+            _logService.logSync('Item delete sync basarili', operation: 'item_delete', count: 1);
+            return true;
+          }
+        } catch (e) {
+          print('[Sync] Item delete sync hatası: $e');
+          _logService.logSyncError('Item delete sync hatasi', operation: 'item_delete', error: e);
+        }
+        return false;
     }
     return false;
+  }
+
+  // Server entity ID resolve (sync_queue.server_id'den) — update/delete item icin
+  Future<int?> _resolveServerEntityId(int syncId) async {
+    final db = await _localDb.database;
+    final row = await db.query('sync_queue', where: 'id = ?', whereArgs: [syncId], limit: 1);
+    if (row.isNotEmpty) {
+      return row.first['server_id'] as int?;
+    }
+    return null;
   }
 
   // Server'dan masa durumlarını al ve local'i güncelle

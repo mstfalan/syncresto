@@ -70,6 +70,7 @@ class LogService {
   final List<LogEntry> _pendingLogs = [];
   Timer? _flushTimer;
   bool _isInitialized = false;
+  bool _isFlushing = false;
 
   // Ayarlar
   static const int _maxPendingLogs = 50;
@@ -223,10 +224,17 @@ class LogService {
 
   /// Bekleyen logları sunucuya gönder
   Future<void> flush() async {
+    if (_isFlushing) return;
     if (_pendingLogs.isEmpty || _dio == null || _apiKey == null) return;
 
+    _isFlushing = true;
     final logsToSend = List<LogEntry>.from(_pendingLogs);
     _pendingLogs.clear();
+
+    if (logsToSend.isEmpty) {
+      _isFlushing = false;
+      return;
+    }
 
     try {
       final response = await _dio!.post(
@@ -251,18 +259,17 @@ class LogService {
 
       if (response.statusCode == 200) {
         debugPrint('[LogService] ${logsToSend.length} log gönderildi');
-        // Başarılı, local cache'i temizle
         await _clearPendingLogs();
       } else {
-        // Başarısız, logları geri ekle
         _pendingLogs.insertAll(0, logsToSend);
         await _savePendingLogs();
       }
     } catch (e) {
       debugPrint('[LogService] Log gönderme hatası: $e');
-      // Hata, logları geri ekle ve kaydet
       _pendingLogs.insertAll(0, logsToSend);
       await _savePendingLogs();
+    } finally {
+      _isFlushing = false;
     }
   }
 

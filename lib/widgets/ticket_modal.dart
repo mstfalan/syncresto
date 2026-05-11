@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/printer_service.dart';
+import '../services/log_service.dart';
 import '../providers/theme_provider.dart';
 import '../screens/printer_settings_screen.dart';
 import 'add_item_modal.dart';
@@ -345,8 +346,38 @@ class _TicketModalState extends State<TicketModal> {
           error: 'Yazici baglanti hatasi (silent path)',
         );
       }
+
+      // Admin panel POS Loglari icin ozet log
+      final tableLabel = widget.table['table_number']?.toString() ?? 'Masa ${widget.table['id']}';
+      if (failedItemIds.isNotEmpty) {
+        LogService().error(
+          LogType.error,
+          'Mutfak fisi EKSIK basildi (silent): $tableLabel — ${failedItemIds.length} urun MUTFAGA GITMEDI',
+          details: {
+            'ticket_id': ticketId,
+            'table': tableLabel,
+            'printed_count': printedItemIds.length,
+            'failed_count': failedItemIds.length,
+            'failed_item_ids': failedItemIds.toList(),
+          },
+        );
+      } else if (printedItemIds.isNotEmpty) {
+        LogService().logAction(
+          'Mutfak fisi basildi (silent): $tableLabel — ${printedItemIds.length} urun',
+          details: {
+            'ticket_id': ticketId,
+            'table': tableLabel,
+            'printed_count': printedItemIds.length,
+          },
+        );
+      }
     } catch (e) {
       print('[TicketModal] Mutfaga gonderme hatasi: $e');
+      LogService().error(
+        LogType.error,
+        'Mutfak fisi (silent) exception: $e',
+        details: {'ticket_id': _safeInt(_ticket?['id'])},
+      );
     }
   }
 
@@ -643,6 +674,32 @@ class _TicketModalState extends State<TicketModal> {
         );
       }
 
+      // Admin panel POS Loglari icin ozet (manuel buton)
+      final tableLabel = widget.table['table_number']?.toString() ?? 'Masa ${widget.table['id']}';
+      if (failCount > 0) {
+        LogService().error(
+          LogType.error,
+          'Mutfak fisi EKSIK basildi: $tableLabel — $failCount urun MUTFAGA GITMEDI ($successCount basildi)',
+          details: {
+            'ticket_id': ticketId,
+            'table': tableLabel,
+            'printed_count': successCount,
+            'failed_count': failCount,
+            'failed_printers': failReasons,
+            'failed_item_ids': failedItemIds.toList(),
+          },
+        );
+      } else if (successCount > 0) {
+        LogService().logAction(
+          'Mutfak fisi basildi: $tableLabel — $successCount urun',
+          details: {
+            'ticket_id': ticketId,
+            'table': tableLabel,
+            'printed_count': successCount,
+          },
+        );
+      }
+
       // Kullaniciya net feedback (KRITIK: kayip olmadigindan emin ol)
       if (failCount > 0 && successCount == 0) {
         _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. URUNLER MUTFAGA GITMEDI! Lutfen yazicilari kontrol edin ve tekrar deneyin.');
@@ -655,6 +712,11 @@ class _TicketModalState extends State<TicketModal> {
       }
     } catch (e) {
       print('[TicketModal] Mutfaga gonderme hatasi: $e');
+      LogService().error(
+        LogType.error,
+        'Mutfak fisi exception: $e',
+        details: {'ticket_id': _safeInt(_ticket?['id'])},
+      );
       _showError('Hata: $e');
     }
   }

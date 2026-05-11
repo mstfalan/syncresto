@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/printer_service.dart';
+import '../services/log_service.dart';
 import '../services/image_cache_service.dart';
 import '../providers/theme_provider.dart';
 
@@ -961,6 +962,32 @@ class _AddItemModalState extends State<AddItemModal> {
         );
       }
 
+      // Admin panel POS Loglari icin ozet
+      final tableLabel = widget.table?['table_number']?.toString() ?? 'Masa ${widget.table?['id'] ?? ''}';
+      if (failCount > 0) {
+        LogService().error(
+          LogType.error,
+          'Mutfak fisi EKSIK basildi (add): $tableLabel — $failCount urun MUTFAGA GITMEDI ($successCount basildi)',
+          details: {
+            'ticket_id': widget.ticketId,
+            'table': tableLabel,
+            'printed_count': successCount,
+            'failed_count': failCount,
+            'failed_printers': failReasons,
+            'failed_item_ids': failedItemIds.toList(),
+          },
+        );
+      } else if (successCount > 0) {
+        LogService().logAction(
+          'Mutfak fisi basildi (add): $tableLabel — $successCount urun',
+          details: {
+            'ticket_id': widget.ticketId,
+            'table': tableLabel,
+            'printed_count': successCount,
+          },
+        );
+      }
+
       if (failCount > 0 && successCount == 0) {
         _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. URUNLER MUTFAGA GITMEDI! Yazici kontrol et + tekrar dene.');
       } else if (failCount > 0) {
@@ -970,6 +997,11 @@ class _AddItemModalState extends State<AddItemModal> {
       }
     } catch (e) {
       _showError('Mutfağa gönderilemedi: $e');
+      LogService().error(
+        LogType.error,
+        'Mutfak fisi exception (add): $e',
+        details: {'ticket_id': widget.ticketId},
+      );
     }
   }
 
@@ -1211,7 +1243,39 @@ class _AddItemModalState extends State<AddItemModal> {
           error: 'Yazici hatasi (silent): ${failReasons.join(", ")}',
         );
       }
-    } catch (_) {}
+
+      // Admin panel POS Loglari icin ozet
+      final tableLabel = widget.table?['table_number']?.toString() ?? 'Masa ${widget.table?['id'] ?? ''}';
+      if (failedItemIds.isNotEmpty) {
+        LogService().error(
+          LogType.error,
+          'Mutfak fisi EKSIK basildi (add silent): $tableLabel — ${failedItemIds.length} urun MUTFAGA GITMEDI',
+          details: {
+            'ticket_id': widget.ticketId,
+            'table': tableLabel,
+            'printed_count': printedItemIds.length,
+            'failed_count': failedItemIds.length,
+            'failed_printers': failReasons,
+            'failed_item_ids': failedItemIds.toList(),
+          },
+        );
+      } else if (printedItemIds.isNotEmpty) {
+        LogService().logAction(
+          'Mutfak fisi basildi (add silent): $tableLabel — ${printedItemIds.length} urun',
+          details: {
+            'ticket_id': widget.ticketId,
+            'table': tableLabel,
+            'printed_count': printedItemIds.length,
+          },
+        );
+      }
+    } catch (e) {
+      LogService().error(
+        LogType.error,
+        'Mutfak fisi exception (add silent): $e',
+        details: {'ticket_id': widget.ticketId},
+      );
+    }
   }
 
   /// Modal X ile kapatılırken çağrılır.

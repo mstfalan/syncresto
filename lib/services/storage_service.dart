@@ -140,6 +140,16 @@ class StorageService {
     await _prefs.setBool(_showProductImagesKey, value);
   }
 
+  // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
+  // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
+  String getOrderTrackingSort() {
+    return _prefs.getString('order_tracking_sort') ?? 'time_asc';
+  }
+
+  Future<void> setOrderTrackingSort(String mode) async {
+    await _prefs.setString('order_tracking_sort', mode);
+  }
+
   // Clear all
   Future<void> clearAll() async {
     await _prefs.clear();

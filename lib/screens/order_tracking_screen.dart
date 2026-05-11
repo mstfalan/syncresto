@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/theme_provider.dart';
 import '../services/api_service.dart';
+import '../services/storage_service.dart';
 import '../widgets/order_tracking/item_card.dart';
 import '../widgets/order_tracking/table_sidebar.dart';
 
@@ -13,11 +14,13 @@ import '../widgets/order_tracking/table_sidebar.dart';
 ///  - 2 sn'de bir polling + optimistic update + self-heal
 class OrderTrackingScreen extends StatefulWidget {
   final ApiService apiService;
+  final StorageService storageService;
   final Map<String, dynamic> waiter;
 
   const OrderTrackingScreen({
     super.key,
     required this.apiService,
+    required this.storageService,
     required this.waiter,
   });
 
@@ -32,16 +35,24 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   int? _selectedTableId;
   bool _isLoading = true;
   String? _sectionFilter; // null = tum salonlar
-  // Sidebar siralama: 'table' (varsayilan) veya 'time' (en eski bekleyen ustte)
-  String _sortMode = 'table';
+  // Sidebar siralama (kalici tercih StorageService'te). Default: 'time_asc' (en eski bekleyen ustte = en acil)
+  // Degerler: 'time_asc', 'time_desc', 'table_asc', 'table_desc'
+  String _sortMode = 'time_asc';
+
+  // Toggle sirasinda polling pause + ust uste fetch onleme.
+  bool _isFetching = false;
+  // Kullanici son etkilesiminden sonra X ms boyunca polling skip.
+  // Garson hizli teslime cekerken arka plan refresh UI'i bombardiman etmesin.
+  DateTime? _lastUserAction;
 
   @override
   void initState() {
     super.initState();
+    _sortMode = widget.storageService.getOrderTrackingSort();
     _load();
-    // 2 saniye — başka cihazda/ekranda yeni masa açılınca hızlı yakalamak için
+    // 5 saniye — 2sn cok agresifti, donmaya yol aciyordu
     _refreshTimer = Timer.periodic(
-      const Duration(seconds: 2),
+      const Duration(seconds: 5),
       (_) => _load(silent: true),
     );
   }
@@ -53,19 +64,31 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   }
 
   Future<void> _load({bool silent = false}) async {
-    if (!silent && mounted) setState(() => _isLoading = true);
-    final rows = await widget.apiService.getPendingOrders();
     if (!mounted) return;
-    setState(() {
-      _raw = rows;
-      _byTable = _group(rows);
-      // Seçili masa listede yoksa reset (ticket kapandı/void edildi)
-      if (_selectedTableId != null && !_byTable.containsKey(_selectedTableId)) {
-        _selectedTableId = _byTable.keys.isEmpty ? null : _byTable.keys.first;
-      }
-      _selectedTableId ??= _byTable.keys.isEmpty ? null : _byTable.keys.first;
-      _isLoading = false;
-    });
+    // Onceki fetch hala devam ediyorsa bekle (yigilma onleme)
+    if (_isFetching) return;
+    // Kullanici son 1.5sn icinde toggle yaptiysa polling skip — animasyon bitsin
+    if (silent && _lastUserAction != null &&
+        DateTime.now().difference(_lastUserAction!).inMilliseconds < 1500) {
+      return;
+    }
+    _isFetching = true;
+    if (!silent) setState(() => _isLoading = true);
+    try {
+      final rows = await widget.apiService.getPendingOrders();
+      if (!mounted) return;
+      setState(() {
+        _raw = rows;
+        _byTable = _group(rows);
+        if (_selectedTableId != null && !_byTable.containsKey(_selectedTableId)) {
+          _selectedTableId = _byTable.keys.isEmpty ? null : _byTable.keys.first;
+        }
+        _selectedTableId ??= _byTable.keys.isEmpty ? null : _byTable.keys.first;
+        _isLoading = false;
+      });
+    } finally {
+      _isFetching = false;
+    }
   }
 
   Map<int, TableBundle> _group(List<dynamic> rows) {
@@ -94,11 +117,11 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
 
   Future<void> _toggle(Map<String, dynamic> item) async {
     final wasDelivered = item['delivered_at'] != null;
-    // Optimistic update
+    _lastUserAction = DateTime.now(); // polling pause penceresi
+    // Optimistic — item field set + bundle list'leri tasi (full rebuild yok)
     setState(() {
-      item['delivered_at'] =
-          wasDelivered ? null : DateTime.now().toIso8601String();
-      _byTable = _group(_raw);
+      item['delivered_at'] = wasDelivered ? null : DateTime.now().toIso8601String();
+      _moveItemBetweenLists(item, wasDelivered);
     });
 
     final ticketId = _extractInt(item['ticket_id']);
@@ -113,11 +136,10 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
 
     if (!mounted) return;
     if (result['success'] != true) {
-      // Rollback
+      // Rollback — yine sadece tasi
       setState(() {
-        item['delivered_at'] =
-            wasDelivered ? DateTime.now().toIso8601String() : null;
-        _byTable = _group(_raw);
+        item['delivered_at'] = wasDelivered ? DateTime.now().toIso8601String() : null;
+        _moveItemBetweenLists(item, !wasDelivered);
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -125,6 +147,24 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
           backgroundColor: Colors.red[700],
         ),
       );
+    }
+  }
+
+  // Toggle sonrasi item'i pending<->delivered listeleri arasinda tasi.
+  // _byTable'i tum yeniden insa etmek yerine sadece ilgili bundle'i mutate et — UI flicker'i azaltir.
+  // wasDelivered=true => simdi pending'e geri tasi, wasDelivered=false => delivered'a tasi
+  void _moveItemBetweenLists(Map<String, dynamic> item, bool wasDelivered) {
+    final tidRaw = item['table_id'];
+    final tid = tidRaw is int ? tidRaw : int.tryParse(tidRaw?.toString() ?? '');
+    if (tid == null) return;
+    final bundle = _byTable[tid];
+    if (bundle == null) return;
+    if (wasDelivered) {
+      bundle.delivered.removeWhere((it) => it['item_id'] == item['item_id']);
+      bundle.pending.add(item);
+    } else {
+      bundle.pending.removeWhere((it) => it['item_id'] == item['item_id']);
+      bundle.delivered.add(item);
     }
   }
 
@@ -153,19 +193,25 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context);
 
-    // Pending olan tum bundle'lar — kullanicinin sectigi siralama
+    // Pending olan tum bundle'lar — kullanicinin sectigi siralama (4 mod)
     final allBundlesWithPending =
         _byTable.values.where((b) => b.pending.isNotEmpty).toList()
           ..sort((a, b) {
-            if (_sortMode == 'time') {
-              // En eski bekleyen item ustte (en acil)
-              final at = _oldestPendingTime(a);
-              final bt = _oldestPendingTime(b);
-              return at.compareTo(bt);
+            switch (_sortMode) {
+              case 'time_asc': // Zamana Gore - Once (en eski ustte = en acil)
+                return _oldestPendingTime(a).compareTo(_oldestPendingTime(b));
+              case 'time_desc': // Zamana Gore - Sonra (en yeni ustte)
+                return _oldestPendingTime(b).compareTo(_oldestPendingTime(a));
+              case 'table_desc': // Masaya Gore - Buyukten Kucuge
+                final ai = int.tryParse(a.tableNumber) ?? 0;
+                final bi = int.tryParse(b.tableNumber) ?? 0;
+                return bi.compareTo(ai);
+              case 'table_asc': // Masaya Gore - Kucukten Buyuge
+              default:
+                final ai = int.tryParse(a.tableNumber) ?? 0;
+                final bi = int.tryParse(b.tableNumber) ?? 0;
+                return ai.compareTo(bi);
             }
-            final ai = int.tryParse(a.tableNumber) ?? 0;
-            final bi = int.tryParse(b.tableNumber) ?? 0;
-            return ai.compareTo(bi);
           });
 
     // Salon listesi (alfabetik, ucu bos olanlar 'Diger' olarak)
@@ -183,23 +229,13 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
             return sn == _sectionFilter;
           }).toList();
 
-    // Seçili masa filtreli listede yoksa ilk masaya geç
-    if (_selectedTableId != null) {
-      final inFiltered =
-          bundles.any((b) => b.tableId == _selectedTableId);
-      if (!inFiltered) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          setState(() {
-            _selectedTableId = bundles.isEmpty ? null : bundles.first.tableId;
-          });
-        });
-      }
-    } else if (bundles.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        setState(() => _selectedTableId = bundles.first.tableId);
-      });
+    // Secili masa filtrede yoksa anlik direkt assign — addPostFrameCallback +
+    // setState build sirasinda surekli reentrant rebuild ureterek donmaya yol aciyordu.
+    // _selectedTableId state ama mevcut build'de okudugumuz icin assign + sonraki build dogal akisla yansir.
+    if (_selectedTableId != null && !bundles.any((b) => b.tableId == _selectedTableId)) {
+      _selectedTableId = bundles.isEmpty ? null : bundles.first.tableId;
+    } else if (_selectedTableId == null && bundles.isNotEmpty) {
+      _selectedTableId = bundles.first.tableId;
     }
 
     final totalPending = allBundlesWithPending.fold<int>(
@@ -233,11 +269,12 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
         foregroundColor: Colors.white,
         toolbarHeight: 72,
         actions: [
-          // SIRALAMA — Masaya / Zamana gore
+          // SIRALAMA — 4 secenek (kalici tercih)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
             child: Container(
               height: 52,
+              constraints: const BoxConstraints(minWidth: 280),
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
                 color: Colors.white,
@@ -254,16 +291,20 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                       icon: Icon(Icons.arrow_drop_down, color: theme.primaryColor),
                       style: TextStyle(
                         color: theme.primaryColor,
-                        fontSize: 15,
+                        fontSize: 14,
                         fontWeight: FontWeight.w800,
                       ),
                       items: const [
-                        DropdownMenuItem(value: 'table', child: Text('Masaya Göre')),
-                        DropdownMenuItem(value: 'time', child: Text('Zamana Göre')),
+                        DropdownMenuItem(value: 'time_asc', child: Text('Zamana Göre - Önce')),
+                        DropdownMenuItem(value: 'time_desc', child: Text('Zamana Göre - Sonra')),
+                        DropdownMenuItem(value: 'table_asc', child: Text('Masaya Göre - Küçükten Büyüğe')),
+                        DropdownMenuItem(value: 'table_desc', child: Text('Masaya Göre - Büyükten Küçüğe')),
                       ],
                       onChanged: (v) {
                         if (v == null) return;
                         setState(() => _sortMode = v);
+                        // Kalici tercih — garson tekrar tekrar secmesin
+                        widget.storageService.setOrderTrackingSort(v);
                       },
                     ),
                   ),
@@ -315,6 +356,8 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                       const Divider(height: 1),
                       Expanded(
                         child: TableSidebar(
+                          // Sort/filter degisince Flutter ListView'i yeniden insa etsin
+                          key: ValueKey('sidebar-$_sortMode-${_sectionFilter ?? "all"}-${bundles.length}'),
                           bundles: bundles,
                           selectedTableId: _selectedTableId,
                           onSelect: (id) =>
@@ -395,7 +438,16 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   }
 
   void _showAllOrdersDialog(ThemeProvider theme) {
-    // Pending + delivered ayri listeler — TabBar ile gosterilir.
+    // Tum item'lar (pending + delivered) raw kaynaktan
+    final all = _raw.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+    // Salon listesi — bos olanlar 'Diger'
+    final sectionSet = <String>{};
+    for (final m in all) {
+      sectionSet.add((m['section_name']?.toString() ?? '').isEmpty ? 'Diger' : m['section_name'].toString());
+    }
+    final sectionList = sectionSet.toList()..sort();
+    String? popupFilter; // null = Tumu
+
     int sortItems(Map a, Map b) {
       final s = (a['section_name']?.toString() ?? '').compareTo(b['section_name']?.toString() ?? '');
       if (s != 0) return s;
@@ -407,87 +459,138 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
       return da.compareTo(db);
     }
 
-    final pendingItems = <Map<String, dynamic>>[];
-    final deliveredItems = <Map<String, dynamic>>[];
-    for (final r in _raw) {
-      final m = Map<String, dynamic>.from(r as Map);
-      if (m['delivered_at'] == null) {
-        pendingItems.add(m);
-      } else {
-        deliveredItems.add(m);
-      }
-    }
-    pendingItems.sort(sortItems);
-    deliveredItems.sort(sortItems);
-
     showDialog(
       context: context,
-      builder: (ctx) => Dialog(
-        insetPadding: const EdgeInsets.all(24),
-        child: DefaultTabController(
-          length: 2,
-          child: SizedBox(
-            width: MediaQuery.of(ctx).size.width * 0.9,
-            height: MediaQuery.of(ctx).size.height * 0.9,
-            child: Column(children: [
-              // Header
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: theme.primaryColor,
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(4),
-                    topRight: Radius.circular(4),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setStateDialog) {
+          // Filtreli listeler
+          final filtered = popupFilter == null
+              ? all
+              : all.where((m) {
+                  final sn = (m['section_name']?.toString() ?? '').isEmpty ? 'Diger' : m['section_name'].toString();
+                  return sn == popupFilter;
+                }).toList();
+          final pendingItems = filtered.where((m) => m['delivered_at'] == null).toList()..sort(sortItems);
+          final deliveredItems = filtered.where((m) => m['delivered_at'] != null).toList()..sort(sortItems);
+
+          return Dialog(
+            insetPadding: const EdgeInsets.all(24),
+            child: DefaultTabController(
+              length: 2,
+              child: SizedBox(
+                width: MediaQuery.of(ctx).size.width * 0.9,
+                height: MediaQuery.of(ctx).size.height * 0.9,
+                child: Column(children: [
+                  // Header
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: theme.primaryColor,
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(4),
+                        topRight: Radius.circular(4),
+                      ),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.list_alt, color: Colors.white, size: 24),
+                      const SizedBox(width: 10),
+                      const Text(
+                        'TÜM SİPARİŞLER',
+                        style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ]),
                   ),
-                ),
-                child: Row(children: [
-                  const Icon(Icons.list_alt, color: Colors.white, size: 24),
-                  const SizedBox(width: 10),
-                  const Text(
-                    'TÜM SİPARİŞLER',
-                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                  // Salon filtresi — ortada chip'ler (Tumu + dinamik salonlar)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[50],
+                      border: Border(bottom: BorderSide(color: Colors.grey[200]!)),
+                    ),
+                    child: Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        _popupSectionChip('Tüm Salonlar', popupFilter == null, theme,
+                            () => setStateDialog(() => popupFilter = null)),
+                        for (final s in sectionList)
+                          _popupSectionChip(s, popupFilter == s, theme,
+                              () => setStateDialog(() => popupFilter = s)),
+                      ],
+                    ),
                   ),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.pop(ctx),
+                  // Tabs
+                  Container(
+                    color: Colors.white,
+                    child: TabBar(
+                      labelColor: theme.primaryColor,
+                      unselectedLabelColor: Colors.grey[600],
+                      indicatorColor: theme.primaryColor,
+                      indicatorWeight: 3,
+                      labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
+                      tabs: [
+                        Tab(
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.schedule, size: 18, color: Colors.orange[800]),
+                            const SizedBox(width: 6),
+                            Text('BEKLEYEN (${pendingItems.length})'),
+                          ]),
+                        ),
+                        Tab(
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.check_circle, size: 18, color: Colors.green[700]),
+                            const SizedBox(width: 6),
+                            Text('GİDEN (${deliveredItems.length})'),
+                          ]),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: TabBarView(children: [
+                      _buildAllOrdersList(pendingItems, false),
+                      _buildAllOrdersList(deliveredItems, true),
+                    ]),
                   ),
                 ]),
               ),
-              // Tabs
-              Container(
-                color: Colors.white,
-                child: TabBar(
-                  labelColor: theme.primaryColor,
-                  unselectedLabelColor: Colors.grey[600],
-                  indicatorColor: theme.primaryColor,
-                  indicatorWeight: 3,
-                  labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15),
-                  tabs: [
-                    Tab(
-                      child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.schedule, size: 18, color: Colors.orange[800]),
-                        const SizedBox(width: 6),
-                        Text('BEKLEYEN (${pendingItems.length})'),
-                      ]),
-                    ),
-                    Tab(
-                      child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.check_circle, size: 18, color: Colors.green[700]),
-                        const SizedBox(width: 6),
-                        Text('GİDEN (${deliveredItems.length})'),
-                      ]),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: TabBarView(children: [
-                  _buildAllOrdersList(pendingItems, false),
-                  _buildAllOrdersList(deliveredItems, true),
-                ]),
-              ),
-            ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _popupSectionChip(String label, bool selected, ThemeProvider theme, VoidCallback onTap) {
+    return Material(
+      color: selected ? theme.primaryColor : Colors.white,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: selected ? theme.primaryColor : Colors.grey[300]!,
+              width: selected ? 2 : 1,
+            ),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : Colors.grey[800],
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ),
       ),

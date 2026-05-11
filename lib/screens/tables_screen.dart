@@ -50,6 +50,9 @@ class _TablesScreenState extends State<TablesScreen> {
   String _currentTime = '';
   String _currentDate = '';
   int _pendingItemCount = 0; // MASA TAKIP buton badge'i icin
+  // Masa rengi icin: tableId -> en eski bekleyen item'in created_at (UTC ISO).
+  // Tum urunler teslim edildiyse o masa map'te yer almaz -> renk normale doner.
+  Map<int, DateTime> _oldestPendingByTable = {};
 
   // Offline monitoring
   final ConnectivityService _connectivity = ConnectivityService();
@@ -117,9 +120,9 @@ class _TablesScreenState extends State<TablesScreen> {
       }
     });
 
-    // MASA TAKIP badge icin pending count - 15 sn'de bir yeterli (gorsel indicator)
+    // MASA TAKIP badge + masa rengi icin pending data - 5 sn (renk gec kalmasin)
     _refreshPendingCount(); // ilk cagri hemen
-    _pendingCountTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _pendingCountTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (_isOnline && mounted) {
         _refreshPendingCount();
       }
@@ -306,9 +309,28 @@ class _TablesScreenState extends State<TablesScreen> {
   Future<void> _refreshPendingCount() async {
     try {
       final rows = await widget.apiService.getPendingOrders();
-      final c = rows.where((r) => r is Map && r['delivered_at'] == null).length;
-      if (mounted && c != _pendingItemCount) {
-        setState(() => _pendingItemCount = c);
+      // Hem badge sayisi hem masa-bazli en eski bekleyen zamani — masa rengi icin.
+      int total = 0;
+      final Map<int, DateTime> oldest = {};
+      for (final r in rows) {
+        if (r is! Map) continue;
+        if (r['delivered_at'] != null) continue;
+        total++;
+        final tidRaw = r['table_id'];
+        final tid = tidRaw is int ? tidRaw : int.tryParse(tidRaw?.toString() ?? '');
+        final iso = r['item_created_at']?.toString();
+        if (tid == null || iso == null || iso.isEmpty) continue;
+        try {
+          final dt = DateTime.parse(iso).toLocal();
+          final cur = oldest[tid];
+          if (cur == null || dt.isBefore(cur)) oldest[tid] = dt;
+        } catch (_) {}
+      }
+      if (mounted) {
+        setState(() {
+          _pendingItemCount = total;
+          _oldestPendingByTable = oldest;
+        });
       }
     } catch (_) {
       // Sessiz: bu endpoint henuz deploy edilmemis olabilir
@@ -321,6 +343,7 @@ class _TablesScreenState extends State<TablesScreen> {
       MaterialPageRoute(
         builder: (_) => OrderTrackingScreen(
           apiService: widget.apiService,
+          storageService: widget.storageService,
           waiter: widget.waiter,
         ),
       ),
@@ -1090,33 +1113,33 @@ class _TablesScreenState extends State<TablesScreen> {
     final unpaidTotal = unpaidRaw is num ? unpaidRaw.toDouble() : double.tryParse(unpaidRaw?.toString() ?? '') ?? 0.0;
     final hasPartialPayment = paidTotal > 0 && unpaidTotal > 0;
 
-    // Bekleme süresi rengi — yeni sipariş gelince sayaç sıfırlansın diye lastItemAt öncelikli
-    // 0-10dk yeşil (taze), 10-20dk sarı (uyarı), 20+ dk kırmızı (geç kaldı)
-    final activityAnchor = (lastItemAt is String && lastItemAt.isNotEmpty) ? lastItemAt : openedAt;
-    final waitMinutes = isOccupied && activityAnchor is String ? _minutesSince(activityAnchor) : 0;
-    Color tableColor;
+    // Bekleme süresi rengi — masada TESLIM EDILMEMIS bekleyen urun varsa,
+    // o urunun girilis zamanina gore renk degisir. Tum urunler teslimse normal renk.
+    // 0-10 dk yesil (taze), 10-20 dk sari (uyari), 20+ dk kirmizi (gec kaldi).
+    final tableId = table['id'] as int?;
+    final oldestPending = tableId != null ? _oldestPendingByTable[tableId] : null;
+    final hasPending = oldestPending != null;
+    final waitMinutes = hasPending ? DateTime.now().difference(oldestPending).inMinutes : 0;
+
     Color tableBorder;
     Gradient? tableGradient;
     if (!isOccupied) {
-      tableColor = Colors.white;
       tableBorder = Colors.grey[300]!;
       tableGradient = null;
-    } else if (waitMinutes >= 20) {
-      tableColor = const Color(0xFFDC2626);
+    } else if (hasPending && waitMinutes >= 20) {
       tableBorder = const Color(0xFFB91C1C);
       tableGradient = const LinearGradient(
         colors: [Color(0xFFDC2626), Color(0xFFB91C1C)],
         begin: Alignment.topLeft, end: Alignment.bottomRight,
       );
-    } else if (waitMinutes >= 10) {
-      tableColor = const Color(0xFFF59E0B);
+    } else if (hasPending && waitMinutes >= 10) {
       tableBorder = const Color(0xFFD97706);
       tableGradient = const LinearGradient(
         colors: [Color(0xFFF59E0B), Color(0xFFD97706)],
         begin: Alignment.topLeft, end: Alignment.bottomRight,
       );
     } else {
-      tableColor = theme.primaryColor;
+      // Hic bekleyen yok VEYA bekleyen var ama 10dk altinda -> normal tema rengi
       tableBorder = theme.primaryColor;
       tableGradient = theme.backgroundGradient;
     }
@@ -1238,40 +1261,47 @@ class _TablesScreenState extends State<TablesScreen> {
 
 
   Widget _buildStatusLegend(ThemeProvider theme) {
+    // Bekleme threshold'una gore aciklama (0-10 yesil, 10-20 sari, 20+ kirmizi)
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border(top: BorderSide(color: Colors.grey[200]!)),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        spacing: 24,
+        runSpacing: 8,
         children: [
           _buildLegendItem('Bos', _emptyCount, Colors.grey[300]!),
-          const SizedBox(width: 32),
-          _buildLegendItem('Dolu', _occupiedCount, theme.primaryColor),
+          _buildLegendItem('Yeni (0-10dk)', null, theme.primaryColor),
+          _buildLegendItem('Bekliyor (10-20dk)', null, const Color(0xFFF59E0B)),
+          _buildLegendItem('Geç Kaldı (20+dk)', null, const Color(0xFFDC2626)),
+          _buildLegendItem('Dolu Toplam', _occupiedCount, Colors.grey[600]!),
         ],
       ),
     );
   }
 
-  Widget _buildLegendItem(String label, int count, Color color) {
+  Widget _buildLegendItem(String label, int? count, Color color) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 16,
-          height: 16,
+          width: 14,
+          height: 14,
           decoration: BoxDecoration(
             color: color,
             borderRadius: BorderRadius.circular(4),
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 6),
         Text(
-          '$label: $count',
+          count == null ? label : '$label: $count',
           style: TextStyle(
             color: Colors.grey[700],
-            fontSize: 14,
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
           ),
         ),
       ],

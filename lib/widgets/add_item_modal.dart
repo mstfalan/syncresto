@@ -1224,38 +1224,119 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Adisyon iptal
   Future<void> _voidTicket() async {
-    final confirmed = await showDialog<bool>(
+    // Sebep seçtir — admin panelinde tanimlanan iptal sebepleri (panel_pos_cancel_reasons).
+    // Ürün iptali pattern'i ile ayni davranis (line 759 _cancelSelectedItem)
+    final reasons = await widget.apiService.getCancelReasons();
+    if (!mounted) return;
+
+    final selectedReason = await showDialog<String>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Adisyon İptal', style: TextStyle(fontSize: 22, color: Colors.red)),
-        content: const Text('Adisyon iptal edilecek. Bu işlem geri alınamaz. Emin misiniz?', style: TextStyle(fontSize: 16)),
-        actionsAlignment: MainAxisAlignment.spaceEvenly,
-        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        actions: [
-          SizedBox(
-            width: 150, height: 56,
-            child: ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87),
-              child: const Text('Vazgeç', style: TextStyle(fontSize: 18)),
-            ),
-          ),
-          SizedBox(
-            width: 200, height: 56,
-            child: ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-              child: const Text('İptal Et', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
-          ),
-        ],
-      ),
+      builder: (ctx) {
+        String? picked;
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return Material(
+              type: MaterialType.transparency,
+              child: Center(
+                child: Container(
+                  width: 480,
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20)],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: const [
+                          Icon(Icons.delete_forever, color: Colors.red, size: 26),
+                          SizedBox(width: 8),
+                          Expanded(child: Text('Adisyon İptal Sebebi', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text('Adisyonun tamamı iptal edilecek. Lütfen sebep seçin.',
+                          style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                      const SizedBox(height: 16),
+                      if (reasons.isEmpty)
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(color: Colors.amber[50], borderRadius: BorderRadius.circular(8)),
+                          child: Text(
+                            'Tanımlı iptal sebebi yok. Panel > POS > İptal Sebepleri\'nden ekleyin.',
+                            style: TextStyle(color: Colors.amber[900], fontSize: 13),
+                          ),
+                        )
+                      else
+                        Flexible(
+                          child: SingleChildScrollView(
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: reasons.map<Widget>((r) {
+                                final reason = r['reason']?.toString() ?? '';
+                                final isSelected = picked == reason;
+                                return GestureDetector(
+                                  onTap: () => setDialogState(() => picked = reason),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: isSelected ? Colors.red : Colors.grey[100],
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: isSelected ? Colors.red : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                    ),
+                                    child: Text(reason, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ),
+                      const SizedBox(height: 16),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12)),
+                            child: const Text('Vazgeç', style: TextStyle(fontSize: 15)),
+                          ),
+                          const SizedBox(width: 8),
+                          ElevatedButton(
+                            onPressed: picked != null ? () => Navigator.pop(ctx, picked) : null,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                            ),
+                            child: const Text('Adisyonu İptal Et', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
-    if (confirmed != true) return;
+
+    if (selectedReason == null) return; // Kullanıcı vazgeçti
+
     try {
-      await widget.apiService.voidTicket(ticketId: widget.ticketId, waiterId: widget.waiterId);
-      _showSuccess('Adisyon iptal edildi');
+      await widget.apiService.voidTicket(
+        ticketId: widget.ticketId,
+        waiterId: widget.waiterId,
+        reason: selectedReason,
+      );
+      _showSuccess('Adisyon iptal edildi: $selectedReason');
       widget.onItemAdded();
       widget.onClose();
     } catch (e) {

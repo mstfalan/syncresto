@@ -981,9 +981,10 @@ class PrinterService {
       final port = config['port'] as int? ?? 9100;
 
       final bytes = await _generateKitchenReceipt(ticket, items);
-      // 11 May 2026: Pre-check (kapak/kagit) + yazdir + post-check.
-      final result = await sendWithVerification(ip: ip, port: port, bytes: bytes);
-      final success = result['ok'] == true;
+      // 11 May 2026 GERI SARMA: v1.2.0 davranisi — direkt _sendToPrinter.
+      // sendWithVerification (DLE EOT pre-check) bazi yazicilarda 2. TCP connection
+      // refuse edilmesine yol aciyordu; production kesintisine sebep oldu.
+      final success = await _sendToPrinter(ip, port, bytes);
 
       if (success) {
         onStatusChange?.call('Mutfak fisi yazdirildi (${items.length} urun)', false);
@@ -994,9 +995,8 @@ class PrinterService {
           'item_count': items.length,
         });
       } else {
-        // Başarısız - kuyruğa ekle (retry icin)
+        // Başarısız - kuyruğa ekle
         final printerName = config['name'] as String? ?? 'Mutfak Yazicisi';
-        final err = result['error']?.toString() ?? 'TCP/health fail';
         await _localDb.addToPrintQueue(
           printType: 'kitchen',
           printerIp: ip,
@@ -1008,14 +1008,11 @@ class PrinterService {
             'printerType': printerType,
           },
         );
-        onStatusChange?.call('Yazici basamadi ($err), kuyruga eklendi', true);
+        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
         _logService.warning(LogType.action, 'Mutfak fisi kuyruga eklendi', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
           'item_count': items.length,
-          'error': err,
-          'health_before': result['healthBefore'],
-          'health_after': result['healthAfter'],
         });
       }
 
@@ -1066,13 +1063,12 @@ class PrinterService {
       onStatusChange?.call('Mutfak fisi yazdirilyor ($ip)...', false);
 
       final bytes = await _generateKitchenReceipt(ticket, items);
-      // 11 May 2026: Pre-check (DLE EOT) + yazdirma + post-check.
-      // Eski yazicilar (PalmX vs.) DLE EOT desteklemese bile pre-check 'online' donerse
-      // yazdirmaya gecer (fallback). Kapak acik / kagit yok pre-check'te yakalanir.
-      final result = await sendWithVerification(ip: ip, port: port, bytes: bytes);
-      final ok = result['ok'] == true;
+      // 11 May 2026 GERI SARMA: v1.2.0 davranisi — direkt _sendToPrinter.
+      // sendWithVerification (DLE EOT pre-check) bazi yazicilarda 2. TCP connection
+      // refuse edilmesine yol aciyordu; production kesintisine sebep oldu.
+      final success = await _sendToPrinter(ip, port, bytes);
 
-      if (ok) {
+      if (success) {
         onStatusChange?.call('Mutfak fisi yazdirildi ($ip)', false);
         _logService.logAction('Mutfak fisi yazdirildi (IP)', details: {
           'ticket_number': ticket['ticket_number'],
@@ -1081,19 +1077,15 @@ class PrinterService {
           'item_count': items.length,
         });
       } else {
-        final err = result['error']?.toString() ?? 'Bilinmeyen hata';
-        onStatusChange?.call('Mutfak fisi yazdirilamadi ($ip): $err', true);
+        onStatusChange?.call('Mutfak fisi yazdirilamadi ($ip)', true);
         _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi (IP)', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
           'item_count': items.length,
-          'error': err,
-          'health_before': result['healthBefore'],
-          'health_after': result['healthAfter'],
         });
       }
 
-      return ok;
+      return success;
     } catch (e) {
       print('[Printer] Mutfak fisi yazdirilirken hata ($ip): $e');
       onStatusChange?.call('Hata: $e', true);

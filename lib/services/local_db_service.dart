@@ -732,6 +732,7 @@ class LocalDbService {
   Future<void> voidLocalTicket({
     required int localTicketId,
     int waiterId = 1,
+    String? reason,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
@@ -762,13 +763,17 @@ class LocalDbService {
     print('[LocalDb] Masa boşaltıldı (void): ${ticket['table_id']}');
 
     // Sync kuyruğuna ekle - ticket create'e bağımlı
+    // reason artik payload'da: garson sebep secti (panel_pos_cancel_reasons'tan)
     await addToSyncQueue(
       action: 'void',
       entityType: 'ticket',
       localId: localTicketId,
-      payload: {'waiter_id': waiterId},
+      payload: {
+        'waiter_id': waiterId,
+        if (reason != null && reason.isNotEmpty) 'reason': reason,
+      },
       priority: 1,
-      description: 'Masa $tableNumber: Adisyon iptal edildi',
+      description: 'Masa $tableNumber: Adisyon iptal edildi${reason != null ? " ($reason)" : ""}',
       dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
     );
   }

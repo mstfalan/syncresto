@@ -686,15 +686,51 @@ class ApiService {
     String? reason,
     int? waiterId,
   }) async {
-    // Önce local ticket mı kontrol et
+    // Lokal cache'te kayit varsa al — server_id'sine bakacagiz
     final localTicket = await _localDb.getLocalTicket(ticketId);
+    final serverId = localTicket != null ? localTicket['server_id'] as int? : null;
 
+    // ONLINE + (saf server ticket VEYA lokal cache'i sync edilmis ticket) -> direkt backend'e POST
+    // Bu sayede log'a dusuyor, panel anlik gosteriyor, sebep dogru kayit oluyor.
+    if (_connectivity.isOnline && (localTicket == null || serverId != null)) {
+      final realTicketId = serverId ?? ticketId;
+      try {
+        final response = await _dio.post('/api/pos/tickets/$realTicketId/void', data: {
+          'reason': reason ?? 'Iptal',
+          if (waiterId != null) 'waiter_id': waiterId,
+        });
+        if (response.data['success'] == true) {
+          _logService.logAction('Adisyon iptal edildi (online)', details: {
+            'ticket_id': realTicketId,
+            'reason': reason,
+          });
+          // Lokal cache'te de void isaretle ki masa hemen bosalsin
+          if (localTicket != null) {
+            await _localDb.voidLocalTicket(
+              localTicketId: ticketId,
+              waiterId: waiterId ?? 1,
+              reason: reason,
+            );
+            // Lokal sync queue'ya eklenen 'void' action'i temizle (cunku zaten online yaptik)
+            // Not: voidLocalTicket sync_queue'ya 'void' ekledi, ama biz online basardik. Yine kalsin
+            // (sync_service zaten server_id varsa skip eder).
+          }
+        }
+        return response.data;
+      } on DioException catch (e) {
+        print('[API] Online voidTicket basarisiz: ${e.message}');
+        _logService.error(LogType.error, 'Adisyon iptal hatasi', error: e, details: {'ticket_id': realTicketId});
+        return {'success': false, 'error': e.message};
+      }
+    }
+
+    // OFFLINE veya henuz sync olmamis (server_id NULL) lokal ticket -> sadece lokal void + queue
     if (localTicket != null) {
-      // LOCAL TICKET - her zaman local'de iptal et, sync queue'ya ekle
-      print('[API] Local ticket iptal ediliyor: $ticketId');
+      print('[API] Local ticket iptal ediliyor: $ticketId (server_id=$serverId)');
       await _localDb.voidLocalTicket(
         localTicketId: ticketId,
         waiterId: waiterId ?? 1,
+        reason: reason,
       );
 
       _logService.logAction('Adisyon iptal edildi (local)', details: {
@@ -702,36 +738,15 @@ class ApiService {
         'reason': reason,
       });
 
-      // Online ise hemen sync'i tetikle (arka planda)
+      // Online geri gelirse hemen sync tetikle
       if (_connectivity.isOnline) {
         _syncService.syncPendingItems();
       }
-      return {'success': true, 'offline': localTicket['server_id'] == null};
+      return {'success': true, 'offline': true};
     }
 
-    // SERVER TICKET - online ise direkt iptal et
-    if (_connectivity.isOnline) {
-      try {
-        final response = await _dio.post('/api/pos/tickets/$ticketId/void', data: {
-          'reason': reason ?? 'Iptal',
-          if (waiterId != null) 'waiter_id': waiterId,
-        });
-        if (response.data['success'] == true) {
-          _logService.logAction('Adisyon iptal edildi (online)', details: {
-            'ticket_id': ticketId,
-            'reason': reason,
-          });
-        }
-        return response.data;
-      } on DioException catch (e) {
-        print('[API] Online voidTicket basarisiz: ${e.message}');
-        _logService.error(LogType.error, 'Adisyon iptal hatasi', error: e, details: {'ticket_id': ticketId});
-        return {'success': false, 'error': e.message};
-      }
-    }
-
-    _logService.warning(LogType.action, 'Adisyon iptal basarisiz: offline ve server ticket', details: {'ticket_id': ticketId});
-    return {'success': false, 'error': 'Offline ve server ticket'};
+    _logService.warning(LogType.action, 'Adisyon iptal basarisiz: offline ve cache\'te ticket yok', details: {'ticket_id': ticketId});
+    return {'success': false, 'error': 'Offline ve lokal kayit yok'};
   }
 
   /// İptal sebeplerini getir

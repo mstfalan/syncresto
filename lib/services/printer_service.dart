@@ -1640,26 +1640,40 @@ class PrinterService {
   }
 
   /// Yazdirma + dogrulama wrapper:
-  ///   1) Pre-check (DLE EOT) — paper_out/cover_open/offline → return false (yazdirma)
+  ///   1) Pre-check (TCP connect + opsiyonel DLE EOT) — sadece OFFLINE/UNREACHABLE engeller.
+  ///      Kapak/kagit teshisi byte yorumlama icin GUVENILMEZ (farkli yazici modelleri farkli
+  ///      byte format donuyor — false positive cok yuksek). Bu yuzden cover_open/paper_out
+  ///      bilgisi sadece LOGLANIR, yazdirma yine denenir.
   ///   2) Yazdir (_sendToPrinter)
-  ///   3) Post-check (300ms sonra DLE EOT) — yazdirma sirasinda kagit bitti mi?
-  /// Donus: {ok: bool, healthBefore?, healthAfter?, error?}
-  /// onlyOnPreCheckSuccess: bazi cok eski yazicilar DLE EOT desteklemez. Bu durumda
-  /// pre-check 'online' donerse (cevapsiz da online sayilir) yazdirmaya gec.
+  ///   3) Post-check YOK — false positive sebebiyle kaldirildi (11 May 2026 PalmX
+  ///      yazicilarinda "Kapak acik" yanlis teshisi yuzunden uretim kesintisi yasandi).
+  /// Donus: {ok: bool, healthBefore?, error?}
   Future<Map<String, dynamic>> sendWithVerification({
     required String ip,
     required int port,
     required List<int> bytes,
   }) async {
-    // Pre-check
+    // Pre-check — sadece TCP connectivity icin
     final pre = await probePrinterHealthByIp(ip, port: port);
     final preStatus = pre['status'] as String? ?? 'unknown';
-    if (preStatus == 'offline' || preStatus == 'unreachable' ||
-        preStatus == 'paper_out' || preStatus == 'cover_open') {
-      _logService.warning(LogType.error, 'Yazdirma iptal: pre-check fail', details: {
+
+    // SADECE offline/unreachable durumunda yazdirma iptal — TCP bagliti yoksa zaten
+    // yazdirma da fail olur, gereksiz timeout beklemeyelim.
+    if (preStatus == 'offline' || preStatus == 'unreachable') {
+      _logService.warning(LogType.error, 'Yazdirma iptal: yazici TCP unreachable', details: {
         'ip': ip, 'port': port, 'pre_status': preStatus, 'pre_error': pre['error'],
       });
       return {'ok': false, 'healthBefore': pre, 'error': pre['error'] ?? preStatus};
+    }
+
+    // cover_open/paper_out DLE EOT byte yorumu guvenilmez — sadece logla, yazdirmaya devam.
+    // Eger yazici GERCEKTEN kagitsiz/kapak acik ise zaten basamayacak veya TCP write fail olacak.
+    if (preStatus == 'paper_out' || preStatus == 'cover_open') {
+      _logService.warning(LogType.action, 'Pre-check uyari (ama yazdirma deneniyor)', details: {
+        'ip': ip, 'port': port, 'pre_status': preStatus,
+        'note': 'DLE EOT byte yorumu guvenilmez — TCP write sonucu nihai karar',
+      });
+      // FALL THROUGH — yazdirmayi dene
     }
 
     // Yazdir
@@ -1668,24 +1682,8 @@ class PrinterService {
       return {'ok': false, 'healthBefore': pre, 'error': 'TCP write fail'};
     }
 
-    // Post-check (300ms grace + DLE EOT) — yazdirma sirasinda kagit bittiyse yakala
-    await Future.delayed(const Duration(milliseconds: 300));
-    final post = await probePrinterHealthByIp(ip, port: port);
-    final postStatus = post['status'] as String? ?? 'unknown';
-
-    // Pre online + post online → KESIN BASARILI
-    // Pre online + post paper_out → yazdirma sirasinda kagit bitti, KISMEN basarili olabilir
-    //   conservatively false dondurelim — fis bolunmus/eksik basilmis olabilir
-    if (postStatus == 'paper_out' || postStatus == 'cover_open') {
-      _logService.error(LogType.error, 'Yazdirma sirasinda yazici durumu degisti', details: {
-        'ip': ip, 'port': port,
-        'pre_status': preStatus, 'post_status': postStatus,
-        'post_error': post['error'],
-      });
-      return {'ok': false, 'healthBefore': pre, 'healthAfter': post, 'error': 'Post-check fail: ${post['error']}'};
-    }
-
-    return {'ok': true, 'healthBefore': pre, 'healthAfter': post};
+    // TCP write basarili → basarili kabul et. Post-check yapilmaz (false positive riski).
+    return {'ok': true, 'healthBefore': pre};
   }
 
   /// Concurrently probes every active server-side printer and returns a list

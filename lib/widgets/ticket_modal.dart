@@ -257,9 +257,11 @@ class _TicketModalState extends State<TicketModal> {
     }
   }
 
-  /// Mutfağa sessiz gönderim (dialog göstermeden) — yazici success/fail tracking ile.
-  /// 11 May 2026 incident fix: dry_run=true + markItemsPrinted/unmarkItemsPrinted akisi.
-  /// Yazici basariyla basarsa printed=1, fail olursa printed=0 (tekrar gonderilebilir).
+  /// Mutfağa sessiz gönderim (dialog göstermeden) — v1.2.0 atomik akis.
+  /// 12 May 2026: 11 May'da eklenen dry_run + mark/unmark 3-step akisi GERI SARILDI
+  /// (race condition + cift fis sorunu sahada cozulmedi). Backend printKitchen anlik
+  /// printed=1 SET eder. Yazici fail olsa bile DB tutarli (manuel reprint Yazdirma
+  /// Gecmisi'nden yapilir).
   Future<void> _sendToKitchenSilent() async {
     if (_ticket == null) return;
 
@@ -270,11 +272,10 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // dry_run=true: backend printed=1 SET ETMEZ. Yazici success sonrasi mark-items-printed
+      // API'den yazdirilmamis urunleri al, backend HEMEN printed=1 SET eder
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
-        dryRun: true,
       );
 
       if (result['success'] != true) {
@@ -296,17 +297,14 @@ class _TicketModalState extends State<TicketModal> {
       ticketInfo['section_name'] = widget.table['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter['name'] ?? '';
 
-      final Set<int> printedItemIds = {};
-      final Set<int> printedJobIds = {};
-      final Set<int> failedItemIds = {};
-      final Set<int> failedJobIds = {};
+      int successCount = 0;
+      int failCount = 0;
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final jobId = _safeInt(group['job_id']);
 
         if (groupItems.isEmpty || printerIp == null) continue;
 
@@ -317,57 +315,35 @@ class _TicketModalState extends State<TicketModal> {
           port: printerPort,
         );
 
-        final ids = groupItems.map((it) => _safeInt(it['id'])).whereType<int>().toSet();
         if (ok) {
-          printedItemIds.addAll(ids);
-          if (jobId != null) printedJobIds.add(jobId);
-          print('[TicketModal] Silent: $printerName -> ${ids.length} urun BASILDI');
+          successCount += groupItems.length;
+          print('[TicketModal] Silent: $printerName -> ${groupItems.length} urun BASILDI');
         } else {
-          failedItemIds.addAll(ids);
-          if (jobId != null) failedJobIds.add(jobId);
-          print('[TicketModal] Silent: $printerName -> BASILAMADI (${ids.length} urun)');
+          failCount += groupItems.length;
+          print('[TicketModal] Silent: $printerName -> BASILAMADI (${groupItems.length} urun)');
         }
       }
 
-      // Basarili olan itemlar icin printed=1 isaretle
-      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
-        await widget.apiService.markItemsPrinted(
-          ticketId: ticketId,
-          itemIds: printedItemIds.toList(),
-          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
-        );
-      }
-      // Fail olanlar icin telemetri + dry_run zaten printed=0 birakti, ek aksiyon gerekmiyor
-      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
-        await widget.apiService.unmarkItemsPrinted(
-          ticketId: ticketId,
-          itemIds: failedItemIds.toList(),
-          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
-          error: 'Yazici baglanti hatasi (silent path)',
-        );
-      }
-
-      // Admin panel POS Loglari icin ozet log
+      // Telemetri log (admin panel POS Loglari)
       final tableLabel = widget.table['table_number']?.toString() ?? 'Masa ${widget.table['id']}';
-      if (failedItemIds.isNotEmpty) {
+      if (failCount > 0) {
         LogService().error(
           LogType.error,
-          'Mutfak fisi EKSIK basildi (silent): $tableLabel — ${failedItemIds.length} urun MUTFAGA GITMEDI',
+          'Mutfak fisi EKSIK basildi (silent): $tableLabel — $failCount urun yaziciya gitmedi (printed=1 DB)',
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
-            'printed_count': printedItemIds.length,
-            'failed_count': failedItemIds.length,
-            'failed_item_ids': failedItemIds.toList(),
+            'printed_count': successCount,
+            'failed_count': failCount,
           },
         );
-      } else if (printedItemIds.isNotEmpty) {
+      } else if (successCount > 0) {
         LogService().logAction(
-          'Mutfak fisi basildi (silent): $tableLabel — ${printedItemIds.length} urun',
+          'Mutfak fisi basildi (silent): $tableLabel — $successCount urun',
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
-            'printed_count': printedItemIds.length,
+            'printed_count': successCount,
           },
         );
       }
@@ -580,12 +556,13 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // 11 May 2026 incident fix: dry_run=true ile printed=1 SET ETME backend'de.
-      // Yazici basari sonrasi mark-items-printed, fail sonrasi unmark-items-printed.
+      // 12 May 2026: v1.2.0 atomik akisa GERI SARILDI.
+      // Backend printKitchen anlik printed=1 SET eder. Yazici fail olsa bile DB tutarli.
+      // dry_run + mark/unmark 3-step flow KALDIRILDI (race condition + cift fis fix).
+      // Yazici fail olursa kullanici manuel "Yazdirma Gecmisi -> Tekrar Yazdir" kullanir.
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
-        dryRun: true,
       );
 
       if (result['success'] != true) {
@@ -607,10 +584,6 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      final Set<int> printedItemIds = {};
-      final Set<int> printedJobIds = {};
-      final Set<int> failedItemIds = {};
-      final Set<int> failedJobIds = {};
       final List<String> failReasons = [];
       int successCount = 0;
       int failCount = 0;
@@ -620,7 +593,6 @@ class _TicketModalState extends State<TicketModal> {
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final jobId = _safeInt(group['job_id']);
 
         if (groupItems.isEmpty) continue;
 
@@ -640,38 +612,14 @@ class _TicketModalState extends State<TicketModal> {
           );
         }
 
-        final ids = groupItems.map((it) => _safeInt(it['id'])).whereType<int>().toSet();
         if (success) {
-          printedItemIds.addAll(ids);
-          if (jobId != null) printedJobIds.add(jobId);
           successCount += groupItems.length;
           print('[TicketModal] $printerName -> ${groupItems.length} urun BASILDI');
         } else {
-          failedItemIds.addAll(ids);
-          if (jobId != null) failedJobIds.add(jobId);
           failCount += groupItems.length;
           failReasons.add(printerName);
           print('[TicketModal] $printerName -> BASAMADI');
         }
-      }
-
-      // Basarili olanlar icin printed=1 (sunucu printed_at=NOW + job_status=printed)
-      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
-        await widget.apiService.markItemsPrinted(
-          ticketId: ticketId,
-          itemIds: printedItemIds.toList(),
-          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
-        );
-      }
-
-      // Fail olanlar icin telemetri (printed=0 zaten dry_run sayesinde, sadece job status='failed')
-      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
-        await widget.apiService.unmarkItemsPrinted(
-          ticketId: ticketId,
-          itemIds: failedItemIds.toList(),
-          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
-          error: 'Yazici hatasi: ${failReasons.join(", ")}',
-        );
       }
 
       // Admin panel POS Loglari icin ozet (manuel buton)
@@ -679,14 +627,13 @@ class _TicketModalState extends State<TicketModal> {
       if (failCount > 0) {
         LogService().error(
           LogType.error,
-          'Mutfak fisi EKSIK basildi: $tableLabel — $failCount urun MUTFAGA GITMEDI ($successCount basildi)',
+          'Mutfak fisi yazici hatasi: $tableLabel — $failCount urun yaziciya gitmedi (printed=1 DB; manuel reprint gerek)',
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
-            'failed_item_ids': failedItemIds.toList(),
           },
         );
       } else if (successCount > 0) {
@@ -700,12 +647,12 @@ class _TicketModalState extends State<TicketModal> {
         );
       }
 
-      // Kullaniciya net feedback (KRITIK: kayip olmadigindan emin ol)
+      // Kullaniciya net feedback — yazici hatasinda DB printed=1, manuel reprint gerek
       if (failCount > 0 && successCount == 0) {
-        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. URUNLER MUTFAGA GITMEDI! Lutfen yazicilari kontrol edin ve tekrar deneyin.');
-        // Modal kapatma — kullanici tekrar denemeli
+        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. Yazicilari kontrol edin; gerekirse "Yazdirma Gecmisi -> Tekrar Yazdir" kullanin.');
+        // Modal kapali kalsin — kullanici durumu gormeli
       } else if (failCount > 0) {
-        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). Eksikleri tekrar gonder.');
+        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). "Yazdirma Gecmisi -> Tekrar Yazdir" ile basamayanlari yazdirabilirsiniz.');
       } else {
         // Tam basarili
         widget.onClose();

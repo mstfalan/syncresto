@@ -873,8 +873,9 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Mutfağa gönder — 11 May 2026 incident fix: dry_run + mark/unmark akisi.
-  /// Yazici success ise printed=1, fail ise printed=0 + kullaniciya net hata.
+  /// Mutfağa gönder — 12 May 2026: v1.2.0 atomik akisa GERI SARILDI.
+  /// Backend printKitchen anlik printed=1 SET eder. Yazici fail olsa bile DB tutarli.
+  /// (dry_run + mark/unmark 3-step flow: race condition + cift fis fix.)
   Future<void> _sendToKitchen() async {
     if (widget.printerService == null) return;
 
@@ -882,7 +883,6 @@ class _AddItemModalState extends State<AddItemModal> {
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
-        dryRun: true,
       );
       if (result['success'] != true) {
         _showError(result['error'] ?? 'Mutfak fişi alınamadı');
@@ -900,10 +900,6 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
-      final Set<int> printedItemIds = {};
-      final Set<int> printedJobIds = {};
-      final Set<int> failedItemIds = {};
-      final Set<int> failedJobIds = {};
       final List<String> failReasons = [];
       int successCount = 0;
       int failCount = 0;
@@ -914,8 +910,6 @@ class _AddItemModalState extends State<AddItemModal> {
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final jobIdRaw = group['job_id'];
-        final jobId = jobIdRaw is int ? jobIdRaw : int.tryParse('${jobIdRaw ?? ''}');
         if (groupItems.isEmpty) continue;
 
         bool ok = false;
@@ -929,37 +923,12 @@ class _AddItemModalState extends State<AddItemModal> {
           );
         }
 
-        final ids = groupItems.map((it) {
-          final raw = it['id'];
-          return raw is int ? raw : int.tryParse('${raw ?? ''}');
-        }).whereType<int>().toSet();
-
         if (ok) {
-          printedItemIds.addAll(ids);
-          if (jobId != null) printedJobIds.add(jobId);
           successCount += groupItems.length;
         } else {
-          failedItemIds.addAll(ids);
-          if (jobId != null) failedJobIds.add(jobId);
           failCount += groupItems.length;
           failReasons.add(printerName);
         }
-      }
-
-      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
-        await widget.apiService.markItemsPrinted(
-          ticketId: widget.ticketId,
-          itemIds: printedItemIds.toList(),
-          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
-        );
-      }
-      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
-        await widget.apiService.unmarkItemsPrinted(
-          ticketId: widget.ticketId,
-          itemIds: failedItemIds.toList(),
-          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
-          error: 'Yazici hatasi: ${failReasons.join(", ")}',
-        );
       }
 
       // Admin panel POS Loglari icin ozet
@@ -967,14 +936,13 @@ class _AddItemModalState extends State<AddItemModal> {
       if (failCount > 0) {
         LogService().error(
           LogType.error,
-          'Mutfak fisi EKSIK basildi (add): $tableLabel — $failCount urun MUTFAGA GITMEDI ($successCount basildi)',
+          'Mutfak fisi yazici hatasi (add): $tableLabel — $failCount urun yaziciya gitmedi (printed=1 DB; manuel reprint)',
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
-            'failed_item_ids': failedItemIds.toList(),
           },
         );
       } else if (successCount > 0) {
@@ -988,10 +956,11 @@ class _AddItemModalState extends State<AddItemModal> {
         );
       }
 
+      // Kullaniciya net feedback — yazici hatasinda DB printed=1, manuel reprint
       if (failCount > 0 && successCount == 0) {
-        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. URUNLER MUTFAGA GITMEDI! Yazici kontrol et + tekrar dene.');
+        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. Yazicilari kontrol edin; gerekirse "Yazdirma Gecmisi -> Tekrar Yazdir" kullanin.');
       } else if (failCount > 0) {
-        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). Eksikleri tekrar gonder.');
+        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). "Yazdirma Gecmisi -> Tekrar Yazdir" kullanin.');
       } else {
         widget.onClose();
       }
@@ -1178,15 +1147,15 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Sessiz mutfak gonderimi — 11 May 2026 incident fix: dry_run + mark/unmark.
-  /// UI feedback yok ama tracking var (printed flag ve job status dogru sync edilir).
+  /// Sessiz mutfak gonderimi — 12 May 2026: v1.2.0 atomik akisa GERI SARILDI.
+  /// Backend printKitchen anlik printed=1 SET eder. Yazici fail olsa bile DB tutarli.
+  /// UI feedback yok (silent — orn. urun ekledikten sonra otomatik); LogService'e telemetri.
   Future<void> _sendToKitchenSilent() async {
     if (widget.printerService == null) return;
     try {
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
-        dryRun: true,
       );
       if (result['success'] != true) return;
       final printerGroups = result['printerGroups'] as List? ?? [];
@@ -1195,10 +1164,8 @@ class _AddItemModalState extends State<AddItemModal> {
       ticketInfo['section_name'] = widget.table?['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter?['name'] ?? '';
 
-      final Set<int> printedItemIds = {};
-      final Set<int> printedJobIds = {};
-      final Set<int> failedItemIds = {};
-      final Set<int> failedJobIds = {};
+      int successCount = 0;
+      int failCount = 0;
       final List<String> failReasons = [];
 
       for (final group in printerGroups) {
@@ -1206,66 +1173,41 @@ class _AddItemModalState extends State<AddItemModal> {
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final jobIdRaw = group['job_id'];
-        final jobId = jobIdRaw is int ? jobIdRaw : int.tryParse('${jobIdRaw ?? ''}');
         if (groupItems.isEmpty || printerIp == null) continue;
 
         final ok = await widget.printerService!.printKitchenReceiptToIp(
           ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
         );
-        final ids = groupItems.map((it) {
-          final raw = it['id'];
-          return raw is int ? raw : int.tryParse('${raw ?? ''}');
-        }).whereType<int>().toSet();
 
         if (ok) {
-          printedItemIds.addAll(ids);
-          if (jobId != null) printedJobIds.add(jobId);
+          successCount += groupItems.length;
         } else {
-          failedItemIds.addAll(ids);
-          if (jobId != null) failedJobIds.add(jobId);
+          failCount += groupItems.length;
           failReasons.add(printerName);
         }
       }
 
-      if (printedItemIds.isNotEmpty || printedJobIds.isNotEmpty) {
-        await widget.apiService.markItemsPrinted(
-          ticketId: widget.ticketId,
-          itemIds: printedItemIds.toList(),
-          jobIds: printedJobIds.isEmpty ? null : printedJobIds.toList(),
-        );
-      }
-      if (failedItemIds.isNotEmpty || failedJobIds.isNotEmpty) {
-        await widget.apiService.unmarkItemsPrinted(
-          ticketId: widget.ticketId,
-          itemIds: failedItemIds.toList(),
-          jobIds: failedJobIds.isEmpty ? null : failedJobIds.toList(),
-          error: 'Yazici hatasi (silent): ${failReasons.join(", ")}',
-        );
-      }
-
       // Admin panel POS Loglari icin ozet
       final tableLabel = widget.table?['table_number']?.toString() ?? 'Masa ${widget.table?['id'] ?? ''}';
-      if (failedItemIds.isNotEmpty) {
+      if (failCount > 0) {
         LogService().error(
           LogType.error,
-          'Mutfak fisi EKSIK basildi (add silent): $tableLabel — ${failedItemIds.length} urun MUTFAGA GITMEDI',
+          'Mutfak fisi yazici hatasi (add silent): $tableLabel — $failCount urun yaziciya gitmedi (printed=1 DB)',
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
-            'printed_count': printedItemIds.length,
-            'failed_count': failedItemIds.length,
+            'printed_count': successCount,
+            'failed_count': failCount,
             'failed_printers': failReasons,
-            'failed_item_ids': failedItemIds.toList(),
           },
         );
-      } else if (printedItemIds.isNotEmpty) {
+      } else if (successCount > 0) {
         LogService().logAction(
-          'Mutfak fisi basildi (add silent): $tableLabel — ${printedItemIds.length} urun',
+          'Mutfak fisi basildi (add silent): $tableLabel — $successCount urun',
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
-            'printed_count': printedItemIds.length,
+            'printed_count': successCount,
           },
         );
       }

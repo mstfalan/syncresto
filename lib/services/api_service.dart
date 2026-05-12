@@ -1134,10 +1134,13 @@ class ApiService {
     }
   }
 
+  // 12 May 2026: v1.2.0 atomik akisa geri sarildi (race condition fix).
+  // Backend printKitchen anlik printed=1 SET eder. Yazici fail olsa bile DB tutarli.
+  // dryRun + markItemsPrinted/unmarkItemsPrinted 3-step flow KALDIRILDI cunku sahada
+  // partial-failure / race condition cift fis ve "yazdirilacak urun yok" hatasi uretti.
   Future<Map<String, dynamic>> printKitchen({
     required int ticketId,
     int? waiterId,
-    bool dryRun = false,
   }) async {
     // OFFLINE PATH: lokal cache'lerden urun + yazici hesaplamasi yap, ayni format don.
     // - cached_products.printer_id (urun yazicisi)
@@ -1178,10 +1181,8 @@ class ApiService {
     }
 
     try {
-      final url = dryRun
-          ? '/api/pos/tickets/$ticketId/print-kitchen?dry_run=true'
-          : '/api/pos/tickets/$ticketId/print-kitchen';
-      final response = await _dio.post(url, data: {
+      // v1.2.0 davranisi: backend anlik printed=1 SET eder.
+      final response = await _dio.post('/api/pos/tickets/$ticketId/print-kitchen', data: {
         if (waiterId != null) 'waiter_id': waiterId,
       });
       if (response.data['success'] == true) {
@@ -1189,7 +1190,6 @@ class ApiService {
         _logService.logAction('Mutfak fisi gonderildi', details: {
           'ticket_id': ticketId,
           'item_count': itemCount,
-          if (dryRun) 'dry_run': true,
         });
       }
       return response.data;

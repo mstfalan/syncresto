@@ -62,6 +62,7 @@ class _AddItemModalState extends State<AddItemModal> {
     }
     return null;
   }
+
   final TextEditingController _searchController = TextEditingController();
   final ImageCacheService _imageCache = ImageCacheService();
   bool _imageCacheReady = false;
@@ -358,17 +359,14 @@ class _AddItemModalState extends State<AddItemModal> {
     final variantModifier = selectedVariant != null ? _safeDouble(selectedVariant['price_modifier']) : 0.0;
 
     final itemId = _safeInt(item['id']);
-    if (itemId == null || itemId <= 0) {
-      _showError('Lutfen birkac saniye bekleyin — sunucu onayi bekleniyor');
-      return;
-    }
+    if (itemId == null) return;
 
     try {
       final res = await widget.apiService.updateTicketItem(
         ticketId: widget.ticketId,
         itemId: itemId,
         notes: newNotes.isEmpty ? null : newNotes,
-        extrasAmount: variantModifier,
+        unitPrice: basePrice + variantModifier,
         waiterId: widget.waiterId,
       );
       if (res['success'] == true) {
@@ -426,23 +424,17 @@ class _AddItemModalState extends State<AddItemModal> {
 
       final tempId = -DateTime.now().millisecondsSinceEpoch;
       setState(() {
-        final existingIndex = _ticketItems.indexWhere((i) => i['product_id'] == productId && i['status'] != 'cancelled' && (i['notes'] == null || i['notes'] == ''));
-        if (existingIndex >= 0) {
-          _ticketItems[existingIndex] = Map<String, dynamic>.from(_ticketItems[existingIndex])
-            ..['quantity'] = (_ticketItems[existingIndex]['quantity'] ?? 1) + 1;
-        } else {
-          _ticketItems.add({
-            'id': tempId,
-            'product_id': productId,
-            'product_name': name,
-            'unit_price': price,
-            'quantity': 1,
-            'status': 'active',
-            'printed': 0,
-            'notes': null,
-            'extras': [],
-          });
-        }
+        _ticketItems.add({
+          'id': tempId,
+          'product_id': productId,
+          'product_name': name,
+          'unit_price': price,
+          'quantity': 1,
+          'status': 'active',
+          'printed': 0,
+          'notes': null,
+          'extras': [],
+        });
       });
 
       double basePrice = 0;
@@ -466,7 +458,12 @@ class _AddItemModalState extends State<AddItemModal> {
       ).then((response) {
         widget.onItemAdded();
         if (!mounted) return;
-        int? realId = _safeInt(response['new_item_id']) ?? _safeInt(response['id']);
+        int? realId = _safeInt(response['item_id'])
+            ?? _safeInt(response['new_item_id'])
+            ?? _safeInt(response['id']);
+        if (realId == null && response['item'] is Map) {
+          realId = _safeInt((response['item'] as Map)['id']);
+        }
         if (realId == null && response['items'] is List) {
           for (final it in (response['items'] as List).reversed) {
             if (it is Map && _safeInt(it['client_temp_id']) == tempId) {
@@ -740,10 +737,7 @@ class _AddItemModalState extends State<AddItemModal> {
     try {
       final itemId = _safeInt(item['id']);
       final ticketId = widget.ticketId;
-      if (itemId == null || itemId <= 0) {
-        _showError('Lutfen birkac saniye bekleyin — sunucu onayi bekleniyor');
-        return;
-      }
+      if (itemId == null) return;
 
       final note = result['note'] as String? ?? '';
       final addedPrice = result['extraPrice'] as double? ?? 0;
@@ -757,11 +751,12 @@ class _AddItemModalState extends State<AddItemModal> {
         'added_price': addedPrice,
       });
 
+      final currentUnitPrice = _safeDouble(item['unit_price']);
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         notes: note,
-        extrasAmount: addedPrice,
+        unitPrice: addedPrice != 0 ? currentUnitPrice + addedPrice : null,
       );
 
       await _loadTicketItems();
@@ -794,10 +789,7 @@ class _AddItemModalState extends State<AddItemModal> {
     final item = _findSelectedItem();
     if (item == null) return;
     final itemId = _safeInt(item['id']);
-    if (itemId == null || itemId <= 0) {
-      _showError('Lutfen birkac saniye bekleyin — sunucu onayi bekleniyor');
-      return;
-    }
+    if (itemId == null) return;
 
     // İptal sebeplerini API'den çek
     final reasons = await widget.apiService.getCancelReasons();
@@ -916,6 +908,9 @@ class _AddItemModalState extends State<AddItemModal> {
     if (widget.printerService == null) return;
 
     try {
+      // Race condition guard (pending addItem'lar commit olsun)
+      await Future.delayed(const Duration(milliseconds: 500));
+
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
@@ -939,6 +934,8 @@ class _AddItemModalState extends State<AddItemModal> {
       final List<String> failReasons = [];
       int successCount = 0;
       int failCount = 0;
+      final List<int> successJobIds = [];
+      final List<int> failJobIds = [];
 
       final printerGroups = result['printerGroups'] as List? ?? [];
       for (final group in printerGroups) {
@@ -946,6 +943,7 @@ class _AddItemModalState extends State<AddItemModal> {
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobId = _safeInt(group['job_id']);
         if (groupItems.isEmpty) continue;
 
         bool ok = false;
@@ -961,10 +959,24 @@ class _AddItemModalState extends State<AddItemModal> {
 
         if (ok) {
           successCount += groupItems.length;
+          if (jobId != null) successJobIds.add(jobId);
         } else {
           failCount += groupItems.length;
+          if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
         }
+      }
+
+      // Telemetri: print_jobs lifecycle (dashboard "stuck" fix)
+      if (successJobIds.isNotEmpty) {
+        widget.apiService.markItemsPrinted(
+          ticketId: widget.ticketId, itemIds: const [], jobIds: successJobIds,
+        ).catchError((_) => false);
+      }
+      if (failJobIds.isNotEmpty) {
+        widget.apiService.unmarkItemsPrinted(
+          ticketId: widget.ticketId, itemIds: const [], jobIds: failJobIds, error: 'TCP unreachable',
+        ).catchError((_) => false);
       }
 
       // Admin panel POS Loglari icin ozet
@@ -1189,6 +1201,9 @@ class _AddItemModalState extends State<AddItemModal> {
   Future<void> _sendToKitchenSilent() async {
     if (widget.printerService == null) return;
     try {
+      // Race condition guard (pending addItem'lar commit olsun)
+      await Future.delayed(const Duration(milliseconds: 500));
+
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
@@ -1203,12 +1218,15 @@ class _AddItemModalState extends State<AddItemModal> {
       int successCount = 0;
       int failCount = 0;
       final List<String> failReasons = [];
+      final List<int> successJobIds = [];
+      final List<int> failJobIds = [];
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobId = _safeInt(group['job_id']);
         if (groupItems.isEmpty || printerIp == null) continue;
 
         final ok = await widget.printerService!.printKitchenReceiptToIp(
@@ -1217,10 +1235,24 @@ class _AddItemModalState extends State<AddItemModal> {
 
         if (ok) {
           successCount += groupItems.length;
+          if (jobId != null) successJobIds.add(jobId);
         } else {
           failCount += groupItems.length;
+          if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
         }
+      }
+
+      // Telemetri: print_jobs lifecycle (dashboard "stuck" fix)
+      if (successJobIds.isNotEmpty) {
+        widget.apiService.markItemsPrinted(
+          ticketId: widget.ticketId, itemIds: const [], jobIds: successJobIds,
+        ).catchError((_) => false);
+      }
+      if (failJobIds.isNotEmpty) {
+        widget.apiService.unmarkItemsPrinted(
+          ticketId: widget.ticketId, itemIds: const [], jobIds: failJobIds, error: 'TCP unreachable',
+        ).catchError((_) => false);
       }
 
       // Admin panel POS Loglari icin ozet

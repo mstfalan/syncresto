@@ -58,6 +58,44 @@ class TableSidebar extends StatelessWidget {
           final b = bundles[i];
           final selected = b.tableId == selectedTableId;
           final pendingCount = b.pending.length;
+
+          // Masa rengi — en eski bekleyen item'in suresine gore (masalar ekranindakiyle ayni kural)
+          int oldestWaitSeconds = 0;
+          for (final it in b.pending) {
+            final raw = it['item_created_at']?.toString();
+            if (raw == null || raw.isEmpty) continue;
+            final dt = DateTime.tryParse(raw);
+            if (dt == null) continue;
+            final sec = DateTime.now().toUtc().difference(dt.toUtc()).inSeconds;
+            if (sec > oldestWaitSeconds) oldestWaitSeconds = sec;
+          }
+          final isLate = oldestWaitSeconds >= 1200;
+          final isWarning = !isLate && oldestWaitSeconds >= 600;
+
+          final Color? bgColor;
+          final Color leftBarColor;
+          final Color badgeColor;
+          if (selected) {
+            bgColor = theme.primaryColor.withValues(alpha: 0.1);
+            leftBarColor = theme.primaryColor;
+          } else if (isLate) {
+            bgColor = const Color(0xFFFEE2E2);
+            leftBarColor = const Color(0xFFDC2626);
+          } else if (isWarning) {
+            bgColor = const Color(0xFFFEF3C7);
+            leftBarColor = const Color(0xFFF59E0B);
+          } else {
+            bgColor = null;
+            leftBarColor = Colors.transparent;
+          }
+          if (isLate) {
+            badgeColor = const Color(0xFFB91C1C);
+          } else if (isWarning) {
+            badgeColor = const Color(0xFFD97706);
+          } else {
+            badgeColor = Colors.orange[700]!;
+          }
+
           return Material(
             color: Colors.transparent,
             child: InkWell(
@@ -65,12 +103,10 @@ class TableSidebar extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
                 decoration: BoxDecoration(
-                  color: selected
-                      ? theme.primaryColor.withValues(alpha: 0.1)
-                      : null,
+                  color: bgColor,
                   border: Border(
                     left: BorderSide(
-                      color: selected ? theme.primaryColor : Colors.transparent,
+                      color: leftBarColor,
                       width: 4,
                     ),
                     bottom: BorderSide(color: Colors.grey[200]!, width: 0.5),
@@ -108,7 +144,7 @@ class TableSidebar extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 4),
                       decoration: BoxDecoration(
-                        color: Colors.orange[700],
+                        color: badgeColor,
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(

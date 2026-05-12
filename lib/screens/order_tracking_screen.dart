@@ -193,26 +193,38 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context);
 
-    // Pending olan tum bundle'lar — kullanicinin sectigi siralama (4 mod)
-    final allBundlesWithPending =
-        _byTable.values.where((b) => b.pending.isNotEmpty).toList()
-          ..sort((a, b) {
-            switch (_sortMode) {
-              case 'time_asc': // Zamana Gore - Once (en eski ustte = en acil)
-                return _oldestPendingTime(a).compareTo(_oldestPendingTime(b));
-              case 'time_desc': // Zamana Gore - Sonra (en yeni ustte)
-                return _oldestPendingTime(b).compareTo(_oldestPendingTime(a));
-              case 'table_desc': // Masaya Gore - Buyukten Kucuge
-                final ai = int.tryParse(a.tableNumber) ?? 0;
-                final bi = int.tryParse(b.tableNumber) ?? 0;
-                return bi.compareTo(ai);
-              case 'table_asc': // Masaya Gore - Kucukten Buyuge
-              default:
-                final ai = int.tryParse(a.tableNumber) ?? 0;
-                final bi = int.tryParse(b.tableNumber) ?? 0;
-                return ai.compareTo(bi);
-            }
-          });
+    // Pending olan tum bundle'lar — kullanicinin sectigi siralama/filtre
+    int waitSecOf(TableBundle b) =>
+        DateTime.now().difference(_oldestPendingTime(b)).inSeconds;
+    Iterable<TableBundle> baseList = _byTable.values.where((b) => b.pending.isNotEmpty);
+    // Filtre modlari
+    if (_sortMode == 'only_late') {
+      baseList = baseList.where((b) => waitSecOf(b) >= 1200);
+    } else if (_sortMode == 'warning_and_late') {
+      baseList = baseList.where((b) => waitSecOf(b) >= 600);
+    }
+    final allBundlesWithPending = baseList.toList()
+      ..sort((a, b) {
+        switch (_sortMode) {
+          case 'urgency_desc': // Aciliyet — Gec kalanlar ustte
+          case 'only_late':
+          case 'warning_and_late':
+            return waitSecOf(b).compareTo(waitSecOf(a));
+          case 'time_asc': // Zamana Gore - Once (en eski ustte)
+            return _oldestPendingTime(a).compareTo(_oldestPendingTime(b));
+          case 'time_desc': // Zamana Gore - Sonra
+            return _oldestPendingTime(b).compareTo(_oldestPendingTime(a));
+          case 'table_desc':
+            final ai = int.tryParse(a.tableNumber) ?? 0;
+            final bi = int.tryParse(b.tableNumber) ?? 0;
+            return bi.compareTo(ai);
+          case 'table_asc':
+          default:
+            final ai = int.tryParse(a.tableNumber) ?? 0;
+            final bi = int.tryParse(b.tableNumber) ?? 0;
+            return ai.compareTo(bi);
+        }
+      });
 
     // Salon listesi (alfabetik, ucu bos olanlar 'Diger' olarak)
     final sections = <String>{};
@@ -241,6 +253,24 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     final totalPending = allBundlesWithPending.fold<int>(
         0, (sum, b) => sum + b.pending.length);
 
+    // 10-20dk arasi (Bekliyor) + 20+ dk (Gec Kaldi) sayilari — masa renkleriyle ayni esik
+    int warningCount = 0;
+    int lateCount = 0;
+    for (final b in allBundlesWithPending) {
+      for (final it in b.pending) {
+        final raw = it['item_created_at']?.toString();
+        if (raw == null || raw.isEmpty) continue;
+        final dt = DateTime.tryParse(raw);
+        if (dt == null) continue;
+        final sec = DateTime.now().toUtc().difference(dt.toUtc()).inSeconds;
+        if (sec >= 1200) {
+          lateCount++;
+        } else if (sec >= 600) {
+          warningCount++;
+        }
+      }
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Row(children: [
@@ -249,21 +279,15 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
             style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.5),
           ),
           const SizedBox(width: 12),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: Colors.amber[700],
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Text(
-              'Bekleyen: $totalPending',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
+          _summaryBadge('Bekleyen: $totalPending', Colors.amber[700]!),
+          if (warningCount > 0) ...[
+            const SizedBox(width: 6),
+            _summaryBadge('Bekliyor 10-20dk: $warningCount', const Color(0xFFD97706)),
+          ],
+          if (lateCount > 0) ...[
+            const SizedBox(width: 6),
+            _summaryBadge('Gec Kaldi 20+dk: $lateCount', const Color(0xFFB91C1C)),
+          ],
         ]),
         backgroundColor: theme.primaryColor,
         foregroundColor: Colors.white,
@@ -295,6 +319,9 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                         fontWeight: FontWeight.w800,
                       ),
                       items: const [
+                        DropdownMenuItem(value: 'urgency_desc', child: Text('Aciliyet — Geç Kalanlar Önce')),
+                        DropdownMenuItem(value: 'only_late', child: Text('Sadece Geç Kalanlar (20+ dk)')),
+                        DropdownMenuItem(value: 'warning_and_late', child: Text('Bekleyen + Geç (10+ dk)')),
                         DropdownMenuItem(value: 'time_asc', child: Text('Zamana Göre - Önce')),
                         DropdownMenuItem(value: 'time_desc', child: Text('Zamana Göre - Sonra')),
                         DropdownMenuItem(value: 'table_asc', child: Text('Masaya Göre - Küçükten Büyüğe')),
@@ -386,6 +413,24 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                           ),
                   ),
                 ]),
+    );
+  }
+
+  Widget _summaryBadge(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
     );
   }
 

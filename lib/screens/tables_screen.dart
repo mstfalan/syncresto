@@ -1168,20 +1168,20 @@ class _TablesScreenState extends State<TablesScreen> {
     final tableId = table['id'] as int?;
     final oldestPending = tableId != null ? _oldestPendingByTable[tableId] : null;
     final hasPending = oldestPending != null;
-    final waitMinutes = hasPending ? DateTime.now().difference(oldestPending).inMinutes : 0;
+    final waitSeconds = hasPending ? DateTime.now().difference(oldestPending).inSeconds : 0;
 
     Color tableBorder;
     Gradient? tableGradient;
     if (!isOccupied) {
       tableBorder = Colors.grey[300]!;
       tableGradient = null;
-    } else if (hasPending && waitMinutes >= 20) {
+    } else if (hasPending && waitSeconds >= 1200) {
       tableBorder = const Color(0xFFB91C1C);
       tableGradient = const LinearGradient(
         colors: [Color(0xFFDC2626), Color(0xFFB91C1C)],
         begin: Alignment.topLeft, end: Alignment.bottomRight,
       );
-    } else if (hasPending && waitMinutes >= 10) {
+    } else if (hasPending && waitSeconds >= 600) {
       tableBorder = const Color(0xFFD97706);
       tableGradient = const LinearGradient(
         colors: [Color(0xFFF59E0B), Color(0xFFD97706)],

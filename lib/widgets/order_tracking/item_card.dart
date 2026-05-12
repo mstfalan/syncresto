@@ -32,6 +32,38 @@ class ItemCard extends StatelessWidget {
     final deliveredTime = _formatTime(item['delivered_at']);
     final deliveredBy = item['delivered_by_name']?.toString() ?? '';
 
+    // Bekleme suresi rengi (delivered olmayanlar icin) — masalar ekranindaki ile ayni:
+    // 0-10dk normal, 10-20dk sari, 20+dk kirmizi
+    int waitSeconds = 0;
+    if (!isDelivered) {
+      final createdRaw = item['item_created_at']?.toString();
+      if (createdRaw != null && createdRaw.isNotEmpty) {
+        final created = DateTime.tryParse(createdRaw);
+        if (created != null) {
+          waitSeconds = DateTime.now().toUtc().difference(created.toUtc()).inSeconds;
+        }
+      }
+    }
+    final isLate = waitSeconds >= 1200;
+    final isWarning = !isLate && waitSeconds >= 600;
+    final waitMinutes = waitSeconds ~/ 60;
+
+    final Color bgColor;
+    final Color edgeColor;
+    if (isDelivered) {
+      bgColor = const Color(0xFFDCFCE7);
+      edgeColor = const Color(0xFF16A34A);
+    } else if (isLate) {
+      bgColor = const Color(0xFFFEE2E2);
+      edgeColor = const Color(0xFFDC2626);
+    } else if (isWarning) {
+      bgColor = const Color(0xFFFEF3C7);
+      edgeColor = const Color(0xFFF59E0B);
+    } else {
+      bgColor = Colors.white;
+      edgeColor = theme.primaryColor;
+    }
+
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -39,9 +71,9 @@ class ItemCard extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 8),
         height: h,
         decoration: BoxDecoration(
-          color: isDelivered ? const Color(0xFFDCFCE7) : Colors.white,
+          color: bgColor,
           border: Border.all(
-            color: isDelivered ? const Color(0xFF16A34A) : theme.primaryColor,
+            color: edgeColor,
             width: 2,
           ),
           borderRadius: BorderRadius.circular(12),
@@ -58,7 +90,7 @@ class ItemCard extends StatelessWidget {
             width: compact ? 38 : 48,
             height: double.infinity,
             decoration: BoxDecoration(
-              color: isDelivered ? const Color(0xFF16A34A) : theme.primaryColor,
+              color: edgeColor,
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(10),
                 bottomLeft: Radius.circular(10),
@@ -114,6 +146,12 @@ class ItemCard extends StatelessWidget {
                     children: [
                       if (addedTime.isNotEmpty)
                         _metaChip(Icons.access_time, addedTime + (addedBy.isNotEmpty ? ' · $addedBy' : ''), Colors.blueGrey[700]!),
+                      if (!isDelivered && waitMinutes > 0)
+                        _metaChip(
+                          Icons.hourglass_bottom,
+                          isLate ? '$waitMinutes dk — gec' : '$waitMinutes dk',
+                          isLate ? const Color(0xFFB91C1C) : (isWarning ? const Color(0xFFD97706) : Colors.grey[600]!),
+                        ),
                       if (isDelivered && deliveredTime.isNotEmpty)
                         _metaChip(Icons.check, 'Teslim $deliveredTime' + (deliveredBy.isNotEmpty ? ' · $deliveredBy' : ''), Colors.green[700]!),
                     ],

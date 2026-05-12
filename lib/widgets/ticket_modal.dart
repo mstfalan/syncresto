@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/api_service.dart';
@@ -38,11 +39,22 @@ class _TicketModalState extends State<TicketModal> {
   int _customerCount = 1;
   double _localDiscount = 0;
   String _localDiscountType = 'percentage';
+  Timer? _waitTickTimer;
 
   @override
   void initState() {
     super.initState();
     _loadTicket();
+    // 30sn'de bir setState — bekleme rengi/sayaci taze kalsin (ag cagrisi YOK)
+    _waitTickTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _waitTickTimer?.cancel();
+    super.dispose();
   }
 
   int get _tableId {
@@ -272,7 +284,9 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // API'den yazdirilmamis urunleri al, backend HEMEN printed=1 SET eder
+      // Race condition guard (pending addItem'lar commit olsun)
+      await Future.delayed(const Duration(milliseconds: 500));
+
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
@@ -299,12 +313,15 @@ class _TicketModalState extends State<TicketModal> {
 
       int successCount = 0;
       int failCount = 0;
+      final List<int> successJobIds = [];
+      final List<int> failJobIds = [];
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobId = _safeInt(group['job_id']);
 
         if (groupItems.isEmpty || printerIp == null) continue;
 
@@ -317,11 +334,25 @@ class _TicketModalState extends State<TicketModal> {
 
         if (ok) {
           successCount += groupItems.length;
+          if (jobId != null) successJobIds.add(jobId);
           print('[TicketModal] Silent: $printerName -> ${groupItems.length} urun BASILDI');
         } else {
           failCount += groupItems.length;
+          if (jobId != null) failJobIds.add(jobId);
           print('[TicketModal] Silent: $printerName -> BASILAMADI (${groupItems.length} urun)');
         }
+      }
+
+      // Telemetri: print_jobs lifecycle (dashboard "stuck" fix)
+      if (successJobIds.isNotEmpty) {
+        widget.apiService.markItemsPrinted(
+          ticketId: ticketId, itemIds: const [], jobIds: successJobIds,
+        ).catchError((_) => false);
+      }
+      if (failJobIds.isNotEmpty) {
+        widget.apiService.unmarkItemsPrinted(
+          ticketId: ticketId, itemIds: const [], jobIds: failJobIds, error: 'TCP unreachable',
+        ).catchError((_) => false);
       }
 
       // Telemetri log (admin panel POS Loglari)
@@ -556,10 +587,11 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
-      // 12 May 2026: v1.2.0 atomik akisa GERI SARILDI.
-      // Backend printKitchen anlik printed=1 SET eder. Yazici fail olsa bile DB tutarli.
-      // dry_run + mark/unmark 3-step flow KALDIRILDI (race condition + cift fis fix).
-      // Yazici fail olursa kullanici manuel "Yazdirma Gecmisi -> Tekrar Yazdir" kullanir.
+      // Race condition guard: garson son urunu ekleyip hemen mutfak'a basarsa,
+      // optimistic UI'daki item henuz DB'ye INSERT olmamis olabilir → printKitchen
+      // o item'i atlar. 500ms beklemek pending addItem'larin commit olmasini saglar.
+      await Future.delayed(const Duration(milliseconds: 500));
+
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
@@ -587,12 +619,15 @@ class _TicketModalState extends State<TicketModal> {
       final List<String> failReasons = [];
       int successCount = 0;
       int failCount = 0;
+      final List<int> successJobIds = [];
+      final List<int> failJobIds = [];
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
         final printerPort = group['printer_port'] as int? ?? 9100;
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+        final jobId = _safeInt(group['job_id']);
 
         if (groupItems.isEmpty) continue;
 
@@ -614,12 +649,32 @@ class _TicketModalState extends State<TicketModal> {
 
         if (success) {
           successCount += groupItems.length;
+          if (jobId != null) successJobIds.add(jobId);
           print('[TicketModal] $printerName -> ${groupItems.length} urun BASILDI');
         } else {
           failCount += groupItems.length;
+          if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
           print('[TicketModal] $printerName -> BASAMADI');
         }
+      }
+
+      // Telemetri: panel_print_jobs lifecycle'i tamamla (dashboard "stuck" yaniltma fix).
+      // Hata gizle — telemetri kritik degil, asil is yapildi.
+      if (successJobIds.isNotEmpty) {
+        widget.apiService.markItemsPrinted(
+          ticketId: ticketId,
+          itemIds: const [],
+          jobIds: successJobIds,
+        ).catchError((_) => false);
+      }
+      if (failJobIds.isNotEmpty) {
+        widget.apiService.unmarkItemsPrinted(
+          ticketId: ticketId,
+          itemIds: const [],
+          jobIds: failJobIds,
+          error: 'TCP unreachable',
+        ).catchError((_) => false);
       }
 
       // Admin panel POS Loglari icin ozet (manuel buton)
@@ -1098,13 +1153,46 @@ class _TicketModalState extends State<TicketModal> {
     final isCancelled = item['status'] == 'cancelled';
     final notes = item['notes'] as String?;
 
+    // Bekleme sureci rengi — masalar ekranindaki ile ayni kural:
+    // delivered_at NULL + status active + 10-20dk sari, 20+dk kirmizi
+    final isDelivered = item['delivered_at'] != null;
+    int waitSeconds = 0;
+    if (!isCancelled && !isDelivered) {
+      final createdRaw = item['created_at']?.toString();
+      if (createdRaw != null) {
+        final created = DateTime.tryParse(createdRaw);
+        if (created != null) {
+          waitSeconds = DateTime.now().toUtc().difference(created.toUtc()).inSeconds;
+        }
+      }
+    }
+    final waitMinutes = waitSeconds ~/ 60;
+    final isLate = waitSeconds >= 1200; // 20dk
+    final isWarning = !isLate && waitSeconds >= 600; // 10dk
+
+    final Color bgColor;
+    final Color borderColor;
+    if (isCancelled) {
+      bgColor = Colors.red[50]!;
+      borderColor = Colors.red[200]!;
+    } else if (isLate) {
+      bgColor = const Color(0xFFFEE2E2);
+      borderColor = const Color(0xFFDC2626);
+    } else if (isWarning) {
+      bgColor = const Color(0xFFFEF3C7);
+      borderColor = const Color(0xFFF59E0B);
+    } else {
+      bgColor = Colors.grey[50]!;
+      borderColor = Colors.grey[200]!;
+    }
+
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isCancelled ? Colors.red[50] : Colors.grey[50],
+        color: bgColor,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: isCancelled ? Colors.red[200]! : Colors.grey[200]!),
+        border: Border.all(color: borderColor, width: (isLate || isWarning) ? 2 : 1),
       ),
       child: Row(
         children: [
@@ -1145,6 +1233,22 @@ class _TicketModalState extends State<TicketModal> {
                     style: TextStyle(
                       color: Colors.grey[600],
                       fontSize: 12,
+                    ),
+                  ),
+                if (!isCancelled && !isDelivered && waitMinutes > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      isLate
+                          ? '$waitMinutes dk — gec kaldi'
+                          : (isWarning ? '$waitMinutes dk bekliyor' : '$waitMinutes dk'),
+                      style: TextStyle(
+                        color: isLate
+                            ? const Color(0xFFB91C1C)
+                            : (isWarning ? const Color(0xFFD97706) : Colors.grey[500]),
+                        fontSize: 11,
+                        fontWeight: (isLate || isWarning) ? FontWeight.w600 : FontWeight.normal,
+                      ),
                     ),
                   ),
               ],

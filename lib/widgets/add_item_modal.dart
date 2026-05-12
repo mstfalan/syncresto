@@ -358,7 +358,10 @@ class _AddItemModalState extends State<AddItemModal> {
     final variantModifier = selectedVariant != null ? _safeDouble(selectedVariant['price_modifier']) : 0.0;
 
     final itemId = _safeInt(item['id']);
-    if (itemId == null) return;
+    if (itemId == null || itemId <= 0) {
+      _showError('Lutfen birkac saniye bekleyin — sunucu onayi bekleniyor');
+      return;
+    }
 
     try {
       final res = await widget.apiService.updateTicketItem(
@@ -737,7 +740,10 @@ class _AddItemModalState extends State<AddItemModal> {
     try {
       final itemId = _safeInt(item['id']);
       final ticketId = widget.ticketId;
-      if (itemId == null) return;
+      if (itemId == null || itemId <= 0) {
+        _showError('Lutfen birkac saniye bekleyin — sunucu onayi bekleniyor');
+        return;
+      }
 
       final note = result['note'] as String? ?? '';
       final addedPrice = result['extraPrice'] as double? ?? 0;
@@ -788,7 +794,10 @@ class _AddItemModalState extends State<AddItemModal> {
     final item = _findSelectedItem();
     if (item == null) return;
     final itemId = _safeInt(item['id']);
-    if (itemId == null) return;
+    if (itemId == null || itemId <= 0) {
+      _showError('Lutfen birkac saniye bekleyin — sunucu onayi bekleniyor');
+      return;
+    }
 
     // İptal sebeplerini API'den çek
     final reasons = await widget.apiService.getCancelReasons();

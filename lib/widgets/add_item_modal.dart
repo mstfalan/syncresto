@@ -240,6 +240,15 @@ class _AddItemModalState extends State<AddItemModal> {
     if (item == null) return;
     final productId = item['product_id'];
     if (productId == null) return;
+    // 12 May 2026 debug: yanlis ürüne not yazma bug'i tracker
+    LogService().logAction('Varyant dialog acildi', details: {
+      'selected_item_id': _selectedItemId,
+      'item_id': item['id'],
+      'item_product_id': productId,
+      'item_product_name': item['product_name'],
+      'ticket_items_count': _ticketItems.length,
+      'all_items': _ticketItems.map((i) => '${i['id']}:${i['product_name']}').toList(),
+    });
     final prod = _products.where((p) => p['id'] == productId).firstOrNull;
     if (prod == null) return;
 
@@ -484,6 +493,15 @@ class _AddItemModalState extends State<AddItemModal> {
   Future<void> _openNoteDialog() async {
     final item = _findSelectedItem();
     if (item == null) return;
+    // 12 May 2026 debug: yanlis ürüne not yazma bug'i tracker
+    LogService().logAction('Not dialog acildi', details: {
+      'selected_item_id': _selectedItemId,
+      'item_id': item['id'],
+      'item_product_id': item['product_id'],
+      'item_product_name': item['product_name'],
+      'ticket_items_count': _ticketItems.length,
+      'all_items': _ticketItems.map((i) => '${i['id']}:${i['product_name']}').toList(),
+    });
     final currentNote = item['notes']?.toString() ?? '';
     final controller = TextEditingController(text: currentNote);
 
@@ -723,6 +741,15 @@ class _AddItemModalState extends State<AddItemModal> {
 
       final note = result['note'] as String? ?? '';
       final addedPrice = result['extraPrice'] as double? ?? 0;
+
+      // 12 May 2026 debug: hangi item'a not yazildi
+      LogService().logAction('Not API cagirildi', details: {
+        'ticket_id': ticketId,
+        'item_id': itemId,
+        'item_product_name': item['product_name'],
+        'note': note,
+        'added_price': addedPrice,
+      });
 
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,

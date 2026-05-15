@@ -78,13 +78,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   int work_w = work_area.right - work_area.left;
   int work_h = work_area.bottom - work_area.top;
 
-  // POS UI minimum 800x600 isteyebilir, working area'nin %95'i
+  // POS UI ekranin %95'i (kucuk ve buyuk her ekranda dolu gozuksun)
   int win_w = (int)(work_w * 0.95);
   int win_h = (int)(work_h * 0.95);
-  if (win_w > 1280) win_w = 1280;  // Buyuk ekranda max 1280
-  if (win_h > 720)  win_h = 720;   // Buyuk ekranda max 720
-  if (win_w < 800)  win_w = work_w; // Cok kucuk ekranda full kapla
-  if (win_h < 600)  win_h = work_h;
+  // Cok kucuk ekranlarda (800x600 alti — POS tabletleri) tam kapla
+  if (work_w < 1024) win_w = work_w;
+  if (work_h < 768)  win_h = work_h;
+  // Minimum guvenli boyut
+  if (win_w < 800) win_w = 800;
+  if (win_h < 600) win_h = 600;
 
   // Working area'da ortala
   int x = work_area.left + (work_w - win_w) / 2;

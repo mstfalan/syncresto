@@ -11,14 +11,17 @@
 // Cikti: %TEMP%\syncresto_startup.log
 static std::ofstream g_log;
 static void OpenLog() {
-  wchar_t temp[MAX_PATH] = {0};
-  if (::GetTempPathW(MAX_PATH, temp) > 0) {
-    std::wstring path = std::wstring(temp) + L"syncresto_startup.log";
-    g_log.open(std::string(path.begin(), path.end()), std::ios::out | std::ios::app);
+  char temp[MAX_PATH] = {0};
+  if (::GetTempPathA(MAX_PATH, temp) > 0) {
+    std::string path = std::string(temp) + "syncresto_startup.log";
+    g_log.open(path, std::ios::out | std::ios::app);
     if (g_log.is_open()) {
       time_t t = time(nullptr);
-      char buf[64];
-      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
+      struct tm tm_info;
+      char buf[64] = {0};
+      if (localtime_s(&tm_info, &t) == 0) {
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_info);
+      }
       g_log << "\n=== SyncResto POS startup " << buf << " ===\n";
       g_log.flush();
     }

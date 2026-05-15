@@ -70,18 +70,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Log("[7] FlutterWindow object created");
 
-  Win32Window::Size size(1280, 720);
-  int screen_w = ::GetSystemMetrics(SM_CXSCREEN);
-  int screen_h = ::GetSystemMetrics(SM_CYSCREEN);
-  int x = (screen_w - 1280) / 2;
-  int y = (screen_h - 720) / 2;
-  if (x < 0) x = 0;
-  if (y < 0) y = 0;
+  // 15 May 2026 v1.4.3: Pencere ekrana otomatik sigsin
+  // Onceki sorun: 1024x768 ekranda 1280x720 sigmiyordu, beyaz ekran kaliyordu
+  // SystemParametersInfo ile working area al (taskbar haric kullanilabilir alan)
+  RECT work_area = {0};
+  ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+  int work_w = work_area.right - work_area.left;
+  int work_h = work_area.bottom - work_area.top;
+
+  // POS UI minimum 800x600 isteyebilir, working area'nin %95'i
+  int win_w = (int)(work_w * 0.95);
+  int win_h = (int)(work_h * 0.95);
+  if (win_w > 1280) win_w = 1280;  // Buyuk ekranda max 1280
+  if (win_h > 720)  win_h = 720;   // Buyuk ekranda max 720
+  if (win_w < 800)  win_w = work_w; // Cok kucuk ekranda full kapla
+  if (win_h < 600)  win_h = work_h;
+
+  // Working area'da ortala
+  int x = work_area.left + (work_w - win_w) / 2;
+  int y = work_area.top  + (work_h - win_h) / 2;
+  if (x < work_area.left) x = work_area.left;
+  if (y < work_area.top)  y = work_area.top;
+
+  Win32Window::Size size(win_w, win_h);
   Win32Window::Point origin(x, y);
 
   {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "[8] screen=%dx%d window origin=%d,%d size=1280x720", screen_w, screen_h, x, y);
+    char buf[200];
+    snprintf(buf, sizeof(buf), "[8] workarea=%dx%d window=%dx%d origin=%d,%d", work_w, work_h, win_w, win_h, x, y);
     Log(buf);
   }
 

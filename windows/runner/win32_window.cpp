@@ -150,7 +150,13 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
-  return ShowWindow(window_handle_, SW_SHOWNORMAL);
+  // 15 May 2026 fix: bazi Windows kurulumlarinda SW_SHOWNORMAL pencere arka planda
+  // aciliyor (gizli/iconified). SW_RESTORE + SetForegroundWindow ile garantile.
+  ShowWindow(window_handle_, SW_RESTORE);
+  ShowWindow(window_handle_, SW_SHOWNORMAL);
+  ::SetForegroundWindow(window_handle_);
+  ::BringWindowToTop(window_handle_);
+  return true;
 }
 
 // static

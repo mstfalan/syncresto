@@ -1,5 +1,21 @@
 # SyncResto POS - Changelog & Yapılanlar
 
+## v1.4.0+32 (15 May 2026 — KRITIK WINDOWS FIX)
+
+### Eski GPU Donanım Desteği — Software Rendering Default
+- `windows/runner/main.cpp`: Software rendering **VARSAYILAN AÇIK** (`--enable-software-rendering`)
+  - Sebep: Intel HD 2014-2016 model GPU'lar D3D11 ile `flutter_windows.dll` 0xc0000005 ACCESS_VIOLATION crash veriyordu
+  - Process açılıyor ama pencere oluşmuyordu (RAM'de 47MB asılı kalıyordu)
+  - POS UI 3D olmadığı için software rendering performans kaybı yok
+  - Modern PC'lerde GPU rendering isteyenler için: `FLUTTER_DISABLE_SW_RENDER=1` env var ile bypass
+- `windows/runner/main.cpp`: Pencere ekran ortasında açılır (multi-monitor / DPI offscreen sorunu için)
+- `windows/runner/win32_window.cpp::Show()`: SW_RESTORE + SW_SHOWNORMAL + SetForegroundWindow + BringWindowToTop
+
+### Test Edilen Donanım
+- DESKTOP-UAJ9KMI: Intel i5-4300U (2014) + Intel HD 4400 + 4GB RAM + Win10 19045
+- Önceki sürüm v1.3.5+27: hiç açılmıyor (3 kez crash)
+- Önceki sürüm v1.3.9+31: arka planda asılı kalıyor (pencere yok)
+
 ## v1.0.2 (Beklemede)
 
 ### Fiş Formatı Güncellemesi (GreenChef Uyumlu)

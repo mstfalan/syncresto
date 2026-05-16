@@ -771,6 +771,7 @@ class LocalDbService {
       } else {
         // Yeni lokal ticket aç
         final ticketNumber = 'OFFLINE-$targetTableId-${DateTime.now().millisecondsSinceEpoch.toString().substring(8)}';
+        final nowIso = DateTime.now().toIso8601String();
         final localId = await db.insert('local_tickets', {
           'table_id': targetTableId,
           'waiter_id': waiterId,
@@ -778,8 +779,8 @@ class LocalDbService {
           'status': 'open',
           'subtotal': 0,
           'total': 0,
-          'opened_at': DateTime.now().toIso8601String(),
-          'is_offline': 1,
+          'opened_at': nowIso,
+          'created_at': nowIso,
         });
         resolvedTargetLocalId = localId;
         resolvedTargetTicketId = localId;
@@ -797,7 +798,7 @@ class LocalDbService {
     await db.update(
       'local_ticket_items',
       {'local_ticket_id': resolvedTargetLocalId ?? resolvedTargetTicketId},
-      where: 'local_id = ? OR id = ?',
+      where: 'local_id = ? OR server_id = ?',
       whereArgs: [itemId, itemId],
     );
 

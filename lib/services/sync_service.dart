@@ -1000,6 +1000,37 @@ class SyncService {
           _logService.logSyncError('Item delete sync hatasi', operation: 'item_delete', error: e);
         }
         return false;
+
+      // 16 May 2026: Tek ürün taşıma (offline → online sync)
+      // payload: { ticket_id, item_id, new_table_id, waiter_id }
+      case 'move_item':
+        final moveTicketId = payload['ticket_id'] as int?;
+        final moveItemId = payload['item_id'] as int?;
+        final moveNewTableId = payload['new_table_id'] as int?;
+        if (moveTicketId == null || moveItemId == null || moveNewTableId == null) {
+          await _localDb.markSyncFailed(syncId, 'move_item parametreleri eksik');
+          return false;
+        }
+        try {
+          final mvRes = await _dio!.post(
+            '/api/pos/tickets/$moveTicketId/items/$moveItemId/move',
+            data: {
+              'new_table_id': moveNewTableId,
+              if (payload['waiter_id'] != null) 'waiter_id': payload['waiter_id'],
+              'is_offline': true,
+            },
+          );
+          if (mvRes.statusCode == 200 && mvRes.data['success'] == true) {
+            await _localDb.markSyncComplete(syncId, serverId: mvRes.data['target_ticket_id'] as int?);
+            print('[Sync] Move item başarılı: item=$moveItemId → table=$moveNewTableId');
+            _logService.logSync('Item move sync basarili', operation: 'item_move', count: 1);
+            return true;
+          }
+        } catch (e) {
+          print('[Sync] Move item hatası: $e');
+          _logService.logSyncError('Item move sync hatasi', operation: 'item_move', error: e);
+        }
+        return false;
     }
     return false;
   }

@@ -9,6 +9,7 @@ import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'sync_service.dart';
 import 'log_service.dart';
+import 'websocket_service.dart';
 
 class ApiService {
   static const String defaultBaseUrl = 'https://api.syncresto.com';
@@ -38,6 +39,8 @@ class ApiService {
   final ConnectivityService _connectivity = ConnectivityService();
   final SyncService _syncService = SyncService();
   final LogService _logService = LogService();
+  // 16 May 2026: panel socket id'sini almak için (X-Socket-Id header)
+  final WebSocketService _webSocketService = WebSocketService();
 
   bool get isOnline => _connectivity.isOnline;
 
@@ -942,6 +945,78 @@ class ApiService {
     }
   }
 
+  // 16 May 2026: Tek ürün taşı — online + offline
+  // Online: backend POST → lokal DB update
+  // Offline: lokal DB update + sync_queue'ya move_item operation ekle
+  Future<Map<String, dynamic>> moveItem({
+    required int ticketId,
+    required int itemId,
+    required int newTableId,
+    required int waiterId,
+  }) async {
+    if (_connectivity.isOnline) {
+      try {
+        final response = await _dio.post(
+          '/api/pos/tickets/$ticketId/items/$itemId/move',
+          data: {'new_table_id': newTableId, 'waiter_id': waiterId},
+        );
+        if (response.data['success'] == true) {
+          // Lokal DB'yi de güncelle (cache senkron kalsın)
+          try {
+            final targetTicketId = response.data['target_ticket_id'] ?? ticketId;
+            await _localDb.moveLocalItem(
+              itemId: itemId,
+              sourceTicketId: ticketId,
+              targetTicketId: targetTicketId,
+              targetTableId: newTableId,
+              waiterId: waiterId,
+            );
+          } catch (_) {}
+          _logService.logAction('Ürün taşındı', details: {
+            'ticket_id': ticketId, 'item_id': itemId, 'new_table_id': newTableId,
+          });
+        }
+        return response.data;
+      } catch (e) {
+        print('[API] moveItem online error, offline fallback: $e');
+        // Online başarısızsa offline akışa düş
+      }
+    }
+
+    // OFFLINE: Lokal'de taşı + sync_queue'ya ekle
+    try {
+      final result = await _localDb.moveLocalItem(
+        itemId: itemId,
+        sourceTicketId: ticketId,
+        targetTicketId: null,  // hedef ticket varsa local DB bulur
+        targetTableId: newTableId,
+        waiterId: waiterId,
+      );
+      // Sync queue'ya ekle
+      await _localDb.addToSyncQueue(
+        action: 'move_item',
+        entityType: 'ticket_item',
+        serverId: itemId,
+        payload: {
+          'ticket_id': ticketId,
+          'item_id': itemId,
+          'new_table_id': newTableId,
+          'waiter_id': waiterId,
+        },
+      );
+      _logService.logAction('Ürün taşındı (offline)', details: {
+        'ticket_id': ticketId, 'item_id': itemId, 'new_table_id': newTableId,
+      });
+      return {
+        'success': true,
+        'offline': true,
+        'target_ticket_id': result['target_ticket_id'],
+      };
+    } catch (e) {
+      return {'success': false, 'error': e.toString()};
+    }
+  }
+
   Future<Map<String, dynamic>> transferTable({
     required int ticketId,
     required int newTableId,
@@ -1181,10 +1256,19 @@ class ApiService {
     }
 
     try {
+      // 16 May 2026: Backend broadcast'te bu socket'i skip etmek için X-Socket-Id header
+      String? mySocketId;
+      try {
+        mySocketId = _webSocketService.panelSocketId;
+      } catch (_) {}
       // v1.2.0 davranisi: backend anlik printed=1 SET eder.
-      final response = await _dio.post('/api/pos/tickets/$ticketId/print-kitchen', data: {
-        if (waiterId != null) 'waiter_id': waiterId,
-      });
+      final response = await _dio.post(
+        '/api/pos/tickets/$ticketId/print-kitchen',
+        data: { if (waiterId != null) 'waiter_id': waiterId },
+        options: Options(
+          headers: { if (mySocketId != null) 'X-Socket-Id': mySocketId },
+        ),
+      );
       if (response.data['success'] == true) {
         final itemCount = (response.data['items'] as List?)?.length ?? 0;
         _logService.logAction('Mutfak fisi gonderildi', details: {

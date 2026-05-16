@@ -1689,4 +1689,165 @@ class PrinterService {
     final results = await Future.wait(printers.map(_probePrinterHealth));
     return results;
   }
+
+  /// 16 May 2026: İptal edilen mutfak ürünü için "İPTAL ÜRÜN" fişi yazdır.
+  /// Backend cancel_print payload'unu kullanarak — printer_ip/port doğrudan
+  /// gelir (mevcut printKitchenReceiptToIp pattern'i ile aynı).
+  /// Bu sayede products → printers JOIN backend tarafında çözülür.
+  Future<bool> printCancelItem({
+    required String productName,
+    required int quantity,
+    required String tableName,
+    required String waiterName,
+    required String reason,
+    required String timeStr,
+    String notes = '',
+    String? printerIp,
+    int? printerPort,
+  }) async {
+    // 1. Öncelik: payload'tan IP/port (backend'in JOIN ile bulduğu)
+    String? ip = printerIp;
+    int port = printerPort ?? 9100;
+
+    // 2. Yedek: default mutfak yazıcısı config (lokal SharedPreferences)
+    if (ip == null || ip.isEmpty) {
+      final cfg = _getPrinterConfig('kitchen');
+      if (cfg != null && cfg['ip'] != null) {
+        ip = cfg['ip'] as String;
+        port = (cfg['port'] as int?) ?? 9100;
+      }
+    }
+
+    if (ip == null || ip.isEmpty) {
+      print('[Printer] Iptal fisi yazicisi bulunamadi');
+      _logService.warning(LogType.action, 'Iptal fisi yazici yok', details: {
+        'product': productName,
+      });
+      return false;
+    }
+
+    try {
+      final bytes = await _generateCancelReceipt(
+        productName: productName,
+        quantity: quantity,
+        tableName: tableName,
+        waiterName: waiterName,
+        reason: reason,
+        timeStr: timeStr,
+        notes: notes,
+      );
+      final ok = await _sendToPrinter(ip, port, bytes);
+      if (ok) {
+        onStatusChange?.call('Iptal fisi gonderildi ($ip)', false);
+        _logService.logAction('Iptal fisi yazdirildi', details: {
+          'product': productName,
+          'quantity': quantity,
+          'table': tableName,
+          'reason': reason,
+          'printer_ip': ip,
+        });
+      }
+      return ok;
+    } catch (e) {
+      print('[Printer] Iptal fisi yazdirma hatasi: $e');
+      _logService.error(LogType.error, 'Iptal fisi yazdirma hatasi', error: e, details: {
+        'product': productName, 'printer_ip': ip,
+      });
+      return false;
+    }
+  }
+
+  /// İptal fişi ESC/POS formatında üret — Türkçe karakter ASCII translit
+  Future<List<int>> _generateCancelReceipt({
+    required String productName,
+    required int quantity,
+    required String tableName,
+    required String waiterName,
+    required String reason,
+    required String timeStr,
+    String notes = '',
+  }) async {
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm80, profile);
+    List<int> bytes = [];
+
+    // Reset + initial
+    bytes += generator.reset();
+    bytes += generator.feed(1);
+
+    // Başlık — kalın + büyük + ortalı
+    bytes += generator.text(
+      '!!! IPTAL URUN !!!',
+      styles: const PosStyles(
+        align: PosAlign.center,
+        bold: true,
+        height: PosTextSize.size3,
+        width: PosTextSize.size2,
+      ),
+    );
+    bytes += generator.feed(1);
+
+    // Sebep — büyük + ortalı
+    bytes += generator.text(
+      '-- ${_turkishToAscii(reason).toUpperCase()} --',
+      styles: const PosStyles(
+        align: PosAlign.center,
+        bold: true,
+        height: PosTextSize.size2,
+        width: PosTextSize.size1,
+      ),
+    );
+    bytes += generator.feed(1);
+    bytes += generator.hr(ch: '=');
+
+    // Ürün bilgisi — büyük
+    bytes += generator.text(
+      '$quantity X ${_turkishToAscii(productName)}',
+      styles: const PosStyles(
+        align: PosAlign.left,
+        bold: true,
+        height: PosTextSize.size2,
+        width: PosTextSize.size1,
+      ),
+    );
+    if (notes.isNotEmpty) {
+      bytes += generator.text(
+        '   NOT: ${_turkishToAscii(notes)}',
+        styles: const PosStyles(align: PosAlign.left, height: PosTextSize.size1),
+      );
+    }
+    bytes += generator.feed(1);
+    bytes += generator.hr();
+
+    // Masa + garson + saat
+    bytes += generator.text(
+      _turkishToAscii(tableName),
+      styles: const PosStyles(align: PosAlign.left, bold: true, height: PosTextSize.size2),
+    );
+    bytes += generator.text(
+      'Garson: ${_turkishToAscii(waiterName)}',
+      styles: const PosStyles(align: PosAlign.left),
+    );
+    bytes += generator.text(
+      'Saat  : $timeStr',
+      styles: const PosStyles(align: PosAlign.left),
+    );
+    bytes += generator.feed(1);
+    bytes += generator.hr(ch: '=');
+
+    // Alt uyarı
+    bytes += generator.text(
+      'HAZIRLAMAYIN / DURDURUN',
+      styles: const PosStyles(
+        align: PosAlign.center,
+        bold: true,
+        height: PosTextSize.size2,
+        width: PosTextSize.size1,
+      ),
+    );
+    bytes += generator.feed(3);
+    bytes += generator.cut();
+
+    return bytes;
+  }
 }

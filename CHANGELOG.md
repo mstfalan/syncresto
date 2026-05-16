@@ -1,5 +1,26 @@
 # SyncResto POS - Changelog & Yapılanlar
 
+## v1.4.4+36 (16 May 2026)
+
+### Yeni Özellikler
+- **Masa Birleştirme**: Dolu masaya transfer → iki adisyon birleşir (ürünler + ödemeler aktarılır, kaynak adisyon void/merged)
+- **Ürün Taşıma**: Adisyondan tek ürün başka masaya/adisyona taşınabilir (yeni "Ürün Taşı" butonu)
+  - Boş masaya taşırsa otomatik yeni adisyon açılır
+  - Dolu masaya taşırsa mevcut adisyona eklenir
+  - Yeni yetki: `move_item` (panel.syncresto.com/admin#pos-waiters)
+  - Online + offline destek (sync queue ile)
+- **İptal Fişi**: Mutfağa basılmış ürün iptal edilince yazıcıya "!!! IPTAL URUN !!!" bilgilendirme fişi otomatik gider (sebep + masa + garson + saat)
+- **Çapraz POS Mutfak Yazdırma**: Aynı tenant'taki başka POS'ta "Mutfağa Gönder" basıldığında, kendi PC'mizdeki yazıcılara da fiş broadcast olur (Socket.io)
+  - `panel.syncresto.com` ek socket bağlantısı (mevcut tenant WS aynen durur, paralel)
+  - SR_xxx API key ile authentication
+  - Çift baskı önleme: source_socket_id check
+  - Aktif: panel admin → Yazıcılar → "Otomatik Yazdırma — Web POS" toggle
+
+### Bug Fix
+- `cached_tables` UNIQUE constraint violation fix (server duplicate id gönderirse REPLACE)
+- Windows pencere ekrana göre otomatik boyutlanır (working area %95, max 1280x720)
+- DiagnosticleLog: `%TEMP%\syncresto_startup.log` her açılışta adım log'u
+
 ## v1.4.0+32 (15 May 2026 — KRITIK WINDOWS FIX)
 
 ### Eski GPU Donanım Desteği — Software Rendering Default

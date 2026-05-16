@@ -273,6 +273,18 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
       print('[InitialSync] WebSocket API URL\'e bağlanıyor (fallback): $apiUrl');
       widget.webSocketService.connect(apiUrl);
     }
+
+    // 16 May 2026: Panel.syncresto.com'a ek socket (kitchen_print broadcast için)
+    // Mevcut tenant WS aynen durur, paralel 2. bağlantı kurulur.
+    try {
+      final apiKey = widget.storageService.getApiKey();
+      if (apiKey != null && apiKey.isNotEmpty && apiKey.startsWith('SR_')) {
+        print('[InitialSync] Panel socket\'e bağlanıyor (kitchen_print)');
+        widget.webSocketService.connectPanelSocket(apiKey);
+      }
+    } catch (e) {
+      print('[InitialSync] Panel socket bağlantı atlandı: $e');
+    }
   }
 
   void _navigateToLogin() {

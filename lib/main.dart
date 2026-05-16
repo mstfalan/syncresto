@@ -226,6 +226,48 @@ void main() {
     }
   };
 
+  // 16 May 2026: Başka POS'tan gelen "Mutfağa Gönder" event'i
+  // Mevcut local print akışı bozulmaz, sadece YEDEK olarak başka POS basar
+  webSocketService.onKitchenPrint = (payload) async {
+    try {
+      if (!printerService.isConfigured) {
+        print('[KitchenPrint] Yazici ayarlanmamis, skip');
+        return;
+      }
+      final printerGroups = payload['printer_groups'] as List? ?? [];
+      if (printerGroups.isEmpty) return;
+      print('[KitchenPrint] ${printerGroups.length} yazici grubu icin fis basiliyor');
+      soundService.playNewOrderSound();
+
+      final ticket = {
+        'id': payload['ticket_id'],
+        'ticket_number': payload['ticket_number'],
+        'table_number': payload['table_number'],
+        'section_name': payload['section_name'],
+        'waiter_name': payload['waiter_name'],
+      };
+
+      for (final g in printerGroups) {
+        try {
+          final ip = (g['printer_ip'] ?? '') as String;
+          final port = (g['printer_port'] as num?)?.toInt() ?? 9100;
+          final items = (g['items'] as List?) ?? [];
+          if (ip.isEmpty || items.isEmpty) continue;
+          await printerService.printKitchenReceiptToIp(
+            ticket: ticket,
+            items: items,
+            ip: ip,
+            port: port,
+          );
+        } catch (e) {
+          print('[KitchenPrint] grup basilamadi: $e');
+        }
+      }
+    } catch (e) {
+      print('[KitchenPrint] hata: $e');
+    }
+  };
+
     runApp(
       ChangeNotifierProvider.value(
         value: themeProvider,

@@ -487,6 +487,8 @@ class LocalDbService {
 
     await db.transaction((txn) async {
       await txn.delete('cached_tables');
+      // 16 May 2026: server bazen ayni id'de iki kayit gonderirse (panel + auto-created masa)
+      // duplicate'ta REPLACE et, transaction'i koparma
       for (final table in tables) {
         await txn.insert('cached_tables', {
           'id': table['id'],
@@ -497,7 +499,7 @@ class LocalDbService {
           'status': table['status'] ?? 'available',
           'current_ticket_id': table['current_ticket_id'],
           'cached_at': now,
-        });
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
     });
   }
@@ -739,6 +741,70 @@ class LocalDbService {
 
     print('[LocalDb] Offline ticket oluşturuldu: $ticketNumber (local_id: $localId, sync_id: $syncId)');
     return localId;
+  }
+
+  // 16 May 2026: Local item taşıma (offline veya online cache senkron)
+  // Hedef masada open ticket varsa o'na, yoksa yeni lokal ticket olustur, item'i bagla.
+  // returns: { target_ticket_id, target_local_ticket_id }
+  Future<Map<String, dynamic>> moveLocalItem({
+    required int itemId,
+    required int sourceTicketId,
+    int? targetTicketId,
+    required int targetTableId,
+    required int waiterId,
+  }) async {
+    final db = await database;
+    int? resolvedTargetTicketId = targetTicketId;
+    int? resolvedTargetLocalId;
+
+    // Hedef masada open ticket var mı (lokal cache)?
+    if (resolvedTargetTicketId == null) {
+      final existing = await db.query(
+        'local_tickets',
+        where: 'table_id = ? AND status = ?',
+        whereArgs: [targetTableId, 'open'],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) {
+        resolvedTargetLocalId = existing.first['local_id'] as int?;
+        resolvedTargetTicketId = existing.first['server_id'] as int? ?? resolvedTargetLocalId;
+      } else {
+        // Yeni lokal ticket aç
+        final ticketNumber = 'OFFLINE-$targetTableId-${DateTime.now().millisecondsSinceEpoch.toString().substring(8)}';
+        final localId = await db.insert('local_tickets', {
+          'table_id': targetTableId,
+          'waiter_id': waiterId,
+          'ticket_number': ticketNumber,
+          'status': 'open',
+          'subtotal': 0,
+          'total': 0,
+          'opened_at': DateTime.now().toIso8601String(),
+          'is_offline': 1,
+        });
+        resolvedTargetLocalId = localId;
+        resolvedTargetTicketId = localId;
+        // Hedef masayı dolu yap
+        await db.update(
+          'cached_tables',
+          {'status': 'occupied', 'current_ticket_id': localId},
+          where: 'id = ?',
+          whereArgs: [targetTableId],
+        );
+      }
+    }
+
+    // Item'i hedef adisyona taşı (local_ticket_items üzerinden)
+    await db.update(
+      'local_ticket_items',
+      {'local_ticket_id': resolvedTargetLocalId ?? resolvedTargetTicketId},
+      where: 'local_id = ? OR id = ?',
+      whereArgs: [itemId, itemId],
+    );
+
+    return {
+      'target_ticket_id': resolvedTargetTicketId,
+      'target_local_ticket_id': resolvedTargetLocalId,
+    };
   }
 
   // Yerel adisyonu getir

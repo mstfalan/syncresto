@@ -19,9 +19,16 @@ class WebSocketService {
   // Cache invalidate — backend bir entity degisince anlik refresh tetikler
   // payload: { types: ['products', 'printers', ...] }
   Function(List<String>)? onCacheInvalidate;
+  // 16 May 2026: Aynı tenant POS'lar arası kitchen print broadcast
+  // payload: { ticket_id, ticket_number, table_number, printer_groups, source_socket_id, ... }
+  Function(Map<String, dynamic>)? onKitchenPrint;
 
   bool get isConnected => _isConnected;
   String? _authToken;
+
+  // 16 May 2026: panel.syncresto.com'a ek 2. socket (sadece kitchen_print için)
+  IO.Socket? _panelSocket;
+  String? _apiKey;
 
   Future<void> connect(String serverUrl, {String? token}) async {
     var url = serverUrl.replaceAll('/api', '');
@@ -221,9 +228,92 @@ class WebSocketService {
     _socket = null;
     _isConnected = false;
     onConnectionChange?.call(false);
+    // 16 May 2026: panel socket'i de kapat
+    try {
+      _panelSocket?.disconnect();
+      _panelSocket?.dispose();
+      _panelSocket = null;
+    } catch (_) {}
   }
 
   void dispose() {
     disconnect();
   }
+
+  // ============================================================
+  // 16 May 2026 — PANEL.SYNCRESTO.COM EK SOCKET (kitchen_print için)
+  // Mevcut tenant WS bağlantısı bozulmaz, paralel 2. bağlantı kurulur.
+  // SR_xxx API key ile authentication.
+  // ============================================================
+  /// Panel.syncresto.com socket'ine bağlan (sadece kitchen_print event'i için)
+  /// API key SR_xxxxxxxx_xxx... — POS storage'dan alınır.
+  void connectPanelSocket(String apiKey) {
+    if (apiKey.isEmpty || !apiKey.startsWith('SR_')) {
+      print('[PanelSocket] Geçersiz API key, bağlanılmadı');
+      return;
+    }
+    _apiKey = apiKey;
+    // Eski bağlantıyı kapat
+    try {
+      _panelSocket?.disconnect();
+      _panelSocket?.dispose();
+    } catch (_) {}
+
+    const panelUrl = 'https://panel.syncresto.com';
+    try {
+      print('[PanelSocket] Connecting to: $panelUrl');
+      _panelSocket = IO.io(panelUrl, <String, dynamic>{
+        'transports': ['websocket'],
+        'autoConnect': true,
+        'reconnection': true,
+        'reconnectionDelay': 5000,
+        'reconnectionAttempts': 20,
+        'auth': {'api_key': apiKey},
+      });
+
+      _panelSocket!.onConnect((_) {
+        print('[PanelSocket] Connected: ${_panelSocket?.id}');
+        _logService.info(LogType.general, 'Panel socket baglantisi kuruldu');
+      });
+
+      _panelSocket!.onDisconnect((_) {
+        print('[PanelSocket] Disconnected');
+      });
+
+      _panelSocket!.onConnectError((error) {
+        print('[PanelSocket] Connect error: $error');
+      });
+
+      // KITCHEN PRINT — başka POS'tan gelen mutfak fişi
+      _panelSocket!.on('kitchen_print', (data) {
+        print('[PanelSocket] kitchen_print received');
+        if (data == null) return;
+        try {
+          final payload = Map<String, dynamic>.from(data as Map);
+          // Çift baskı önleme: kendi socketsiz değilse skip
+          final srcId = payload['source_socket_id']?.toString();
+          if (srcId != null && srcId == _panelSocket?.id) {
+            print('[PanelSocket] kitchen_print own emit, skip');
+            return;
+          }
+          _logService.logAction('Mutfak fisi broadcast alindi', details: {
+            'ticket_id': payload['ticket_id'],
+            'ticket_number': payload['ticket_number'],
+            'source': srcId,
+          });
+          onKitchenPrint?.call(payload);
+        } catch (e) {
+          print('[PanelSocket] kitchen_print parse error: $e');
+        }
+      });
+    } catch (e) {
+      print('[PanelSocket] connect exception: $e');
+    }
+  }
+
+  /// Outgoing request'lere panel socket id'sini koyar (X-Socket-Id header)
+  /// Böylece backend broadcast'inde "source_socket_id" set edilir,
+  /// kendi POS'umuza geri gelen event skip edilir.
+  String? get panelSocketId => _panelSocket?.id;
+  bool get isPanelConnected => _panelSocket?.connected == true;
 }

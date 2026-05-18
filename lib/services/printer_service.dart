@@ -1421,6 +1421,39 @@ class PrinterService {
 
   // ==================== YAZICI KUYRUĞU İŞLEMLERİ ====================
 
+  /// 18 May 2026: Mutfak fisi TCP fail olunca arka plan kuyruguna ekle.
+  /// PrintQueueService 5sn'de bir otomatik retry yapar — kullanici pop-up kapatsa
+  /// bile kuyrukta calismaya devam eder. UI'daki sag ust badge bu sayilari gosterir.
+  /// Backend printKitchen zaten printed=1 SET ettigi icin bu retransmit sadece TCP'ye
+  /// gider, DB'ye dokunmaz — mukerrer fis riski yoktur.
+  Future<int?> enqueueKitchenForRetry({
+    required String ip,
+    required int port,
+    String? printerName,
+    required Map<String, dynamic> ticketInfo,
+    required List<dynamic> items,
+  }) async {
+    try {
+      final id = await _localDb.addToPrintQueue(
+        printType: 'kitchen',
+        printerIp: ip,
+        printerPort: port,
+        printerName: printerName,
+        receiptData: {'ticket': ticketInfo, 'items': items},
+      );
+      return id;
+    } catch (e) {
+      print('[Printer] Kuyruga ekleme hatasi: $e');
+      return null;
+    }
+  }
+
+  /// 18 May 2026: Pop-up'ta TCP retry basarili olunca kuyruktan temizle —
+  /// arka plan retry'inin ayni isi tekrar yazdirmasini onler.
+  Future<void> markQueueJobCompleted(int queueId) async {
+    try { await _localDb.markPrintCompleted(queueId); } catch (_) {}
+  }
+
   /// Kuyruktan yazdırma işini tekrar dene
   Future<bool> retryPrintJob(int queueId) async {
     final job = await _localDb.getPrintJob(queueId);

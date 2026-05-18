@@ -6,6 +6,7 @@ import '../services/printer_service.dart';
 import '../services/log_service.dart';
 import '../services/image_cache_service.dart';
 import '../providers/theme_provider.dart';
+import 'kitchen_print_retry_modal.dart';
 
 class AddItemModal extends StatefulWidget {
   final ApiService apiService;
@@ -966,6 +967,8 @@ class _AddItemModalState extends State<AddItemModal> {
       int failCount = 0;
       final List<int> successJobIds = [];
       final List<int> failJobIds = [];
+      // 18 May 2026: Failed groups pop-up icin
+      final List<Map<String, dynamic>> failedGroupsForRetry = [];
 
       final printerGroups = result['printerGroups'] as List? ?? [];
       for (final group in printerGroups) {
@@ -994,6 +997,25 @@ class _AddItemModalState extends State<AddItemModal> {
           failCount += groupItems.length;
           if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
+          // Sag ust yazici kuyruguna ekle (arka plan auto-retry baslatir)
+          int? queueJobId;
+          if (printerIp != null && printerIp.isNotEmpty) {
+            queueJobId = await widget.printerService!.enqueueKitchenForRetry(
+              ip: printerIp,
+              port: printerPort,
+              printerName: printerName,
+              ticketInfo: ticketInfo,
+              items: groupItems,
+            );
+          }
+          failedGroupsForRetry.add({
+            'printer_ip': printerIp,
+            'printer_port': printerPort,
+            'printer_name': printerName,
+            'items': groupItems,
+            'job_id': jobId,
+            'queue_job_id': queueJobId,
+          });
         }
       }
 
@@ -1034,11 +1056,22 @@ class _AddItemModalState extends State<AddItemModal> {
         );
       }
 
-      // Kullaniciya net feedback — yazici hatasinda DB printed=1, manuel reprint
-      if (failCount > 0 && successCount == 0) {
-        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. Yazicilari kontrol edin; gerekirse "Yazdirma Gecmisi -> Tekrar Yazdir" kullanin.');
-      } else if (failCount > 0) {
-        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). "Yazdirma Gecmisi -> Tekrar Yazdir" kullanin.');
+      // 18 May 2026: Yazici fail varsa POP-UP ac (snackbar yerine). Backend printed=1
+      // SET ettigi icin pop-up'taki "Tekrar Yazdir" SADECE TCP retry yapar — mukerrer fis riski yok.
+      if (failedGroupsForRetry.isNotEmpty && mounted) {
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => KitchenPrintRetryModal(
+            printerService: widget.printerService!,
+            apiService: widget.apiService,
+            ticketId: widget.ticketId,
+            ticketInfo: ticketInfo,
+            failedGroups: failedGroupsForRetry,
+          ),
+        );
+        // Modal kapandiktan sonra ekrani da kapat — kullanici durumu gordu
+        if (mounted) widget.onClose();
       } else {
         widget.onClose();
       }
@@ -1250,6 +1283,8 @@ class _AddItemModalState extends State<AddItemModal> {
       final List<String> failReasons = [];
       final List<int> successJobIds = [];
       final List<int> failJobIds = [];
+      // 18 May 2026: Silent path da fail varsa pop-up acar
+      final List<Map<String, dynamic>> failedGroupsForRetry = [];
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
@@ -1270,6 +1305,22 @@ class _AddItemModalState extends State<AddItemModal> {
           failCount += groupItems.length;
           if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
+          // Sag ust yazici kuyruguna ekle
+          final queueJobId = await widget.printerService!.enqueueKitchenForRetry(
+            ip: printerIp,
+            port: printerPort,
+            printerName: printerName,
+            ticketInfo: ticketInfo,
+            items: groupItems,
+          );
+          failedGroupsForRetry.add({
+            'printer_ip': printerIp,
+            'printer_port': printerPort,
+            'printer_name': printerName,
+            'items': groupItems,
+            'job_id': jobId,
+            'queue_job_id': queueJobId,
+          });
         }
       }
 
@@ -1307,6 +1358,21 @@ class _AddItemModalState extends State<AddItemModal> {
             'table': tableLabel,
             'printed_count': successCount,
           },
+        );
+      }
+
+      // 18 May 2026: Silent path da fail varsa pop-up (operator hemen tekrar yazdirabilsin)
+      if (failedGroupsForRetry.isNotEmpty && mounted) {
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => KitchenPrintRetryModal(
+            printerService: widget.printerService!,
+            apiService: widget.apiService,
+            ticketId: widget.ticketId,
+            ticketInfo: ticketInfo,
+            failedGroups: failedGroupsForRetry,
+          ),
         );
       }
     } catch (e) {

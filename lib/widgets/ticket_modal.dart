@@ -8,6 +8,7 @@ import '../providers/theme_provider.dart';
 import '../screens/printer_settings_screen.dart';
 import 'add_item_modal.dart';
 import 'discount_modal.dart';
+import 'kitchen_print_retry_modal.dart';
 
 class TicketModal extends StatefulWidget {
   final Map<String, dynamic> table;
@@ -315,6 +316,8 @@ class _TicketModalState extends State<TicketModal> {
       int failCount = 0;
       final List<int> successJobIds = [];
       final List<int> failJobIds = [];
+      // 18 May 2026: Silent path da pop-up icin failed gruplari toplar
+      final List<Map<String, dynamic>> failedGroupsForRetry = [];
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
@@ -339,7 +342,23 @@ class _TicketModalState extends State<TicketModal> {
         } else {
           failCount += groupItems.length;
           if (jobId != null) failJobIds.add(jobId);
-          print('[TicketModal] Silent: $printerName -> BASILAMADI (${groupItems.length} urun)');
+          // Sag ust yazici kuyruguna ekle
+          final queueJobId = await widget.printerService.enqueueKitchenForRetry(
+            ip: printerIp,
+            port: printerPort,
+            printerName: printerName,
+            ticketInfo: ticketInfo,
+            items: groupItems,
+          );
+          failedGroupsForRetry.add({
+            'printer_ip': printerIp,
+            'printer_port': printerPort,
+            'printer_name': printerName,
+            'items': groupItems,
+            'job_id': jobId,
+            'queue_job_id': queueJobId,
+          });
+          print('[TicketModal] Silent: $printerName -> BASILAMADI (${groupItems.length} urun, queue=$queueJobId)');
         }
       }
 
@@ -376,6 +395,21 @@ class _TicketModalState extends State<TicketModal> {
             'table': tableLabel,
             'printed_count': successCount,
           },
+        );
+      }
+
+      // 18 May 2026: Silent path'te de fail varsa pop-up — operator hemen tekrar yazdirabilsin
+      if (failedGroupsForRetry.isNotEmpty && mounted) {
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => KitchenPrintRetryModal(
+            printerService: widget.printerService,
+            apiService: widget.apiService,
+            ticketId: ticketId,
+            ticketInfo: ticketInfo,
+            failedGroups: failedGroupsForRetry,
+          ),
         );
       }
     } catch (e) {
@@ -621,6 +655,8 @@ class _TicketModalState extends State<TicketModal> {
       int failCount = 0;
       final List<int> successJobIds = [];
       final List<int> failJobIds = [];
+      // 18 May 2026: Yaziciya gitmeyenleri pop-up'ta listelemek icin topla
+      final List<Map<String, dynamic>> failedGroupsForRetry = [];
 
       for (final group in printerGroups) {
         final printerIp = group['printer_ip'] as String?;
@@ -655,7 +691,27 @@ class _TicketModalState extends State<TicketModal> {
           failCount += groupItems.length;
           if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
-          print('[TicketModal] $printerName -> BASAMADI');
+          // 18 May 2026: Sag ust yazici kuyruguna ekle — arka plan retry'i baslar, badge artar.
+          // Pop-up'tan elle tekrar yazdirilirsa o queue job markPrintCompleted ile dusurulur.
+          int? queueJobId;
+          if (printerIp != null && printerIp.isNotEmpty) {
+            queueJobId = await widget.printerService.enqueueKitchenForRetry(
+              ip: printerIp,
+              port: printerPort,
+              printerName: printerName,
+              ticketInfo: ticketInfo,
+              items: groupItems,
+            );
+          }
+          failedGroupsForRetry.add({
+            'printer_ip': printerIp,
+            'printer_port': printerPort,
+            'printer_name': printerName,
+            'items': groupItems,
+            'job_id': jobId,
+            'queue_job_id': queueJobId,
+          });
+          print('[TicketModal] $printerName -> BASAMADI (queue_job_id=$queueJobId)');
         }
       }
 
@@ -702,14 +758,25 @@ class _TicketModalState extends State<TicketModal> {
         );
       }
 
-      // Kullaniciya net feedback — yazici hatasinda DB printed=1, manuel reprint gerek
-      if (failCount > 0 && successCount == 0) {
-        _showError('YAZICI HATASI: ${failReasons.join(", ")} basamadi. Yazicilari kontrol edin; gerekirse "Yazdirma Gecmisi -> Tekrar Yazdir" kullanin.');
-        // Modal kapali kalsin — kullanici durumu gormeli
-      } else if (failCount > 0) {
-        _showError('Kismen basarili: $successCount basildi, $failCount basamadi (${failReasons.join(", ")}). "Yazdirma Gecmisi -> Tekrar Yazdir" ile basamayanlari yazdirabilirsiniz.');
+      // 18 May 2026: Yazici fail varsa POP-UP ac (snackbar yerine — operator kolayca tekrar yazdirabilsin).
+      // Modal icinde "Tekrar Yazdir" basildiginda backend printKitchen YENIDEN cagrilmaz (mukerrer fis riski yok),
+      // sadece TCP'ye yeniden gonderim + markItemsPrinted telemetri update yapilir.
+      if (failedGroupsForRetry.isNotEmpty && mounted) {
+        await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => KitchenPrintRetryModal(
+            printerService: widget.printerService,
+            apiService: widget.apiService,
+            ticketId: ticketId,
+            ticketInfo: ticketInfo,
+            failedGroups: failedGroupsForRetry,
+          ),
+        );
+        // Kullanici modal'i kapattiktan sonra ticket modal'i da kapanir (zaten urunler DB'de printed=1)
+        if (mounted) widget.onClose();
       } else {
-        // Tam basarili
+        // Tam basarili — direkt kapat
         widget.onClose();
       }
     } catch (e) {

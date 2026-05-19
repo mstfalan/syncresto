@@ -1,4 +1,4 @@
-# greenchef_pos
+# SyncResto Pos
 
 A new Flutter project.
 

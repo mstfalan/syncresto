@@ -159,11 +159,39 @@ class ApiService {
           'can_force': data?['can_force'] == true,
         };
       }
+      // 19 May 2026: DETAYLI hata bilgisi UI'ya — kullanici sahada ne oldugunu
+      // gorsun. Yoksa "Baglanti hatasi" generic mesaji root cause'u gizliyor.
+      final detail = _formatDioErrorDetail(e);
       return {
         'valid': false,
-        'error': e.response?.data?['error'] ?? 'Baglanti hatasi',
+        'error': e.response?.data?['error'] ?? detail,
+        'detail': detail,
+      };
+    } catch (e, st) {
+      // Dio disi exception (Socket, FormatException vs)
+      if (kDebugMode) print('[API] validate-key exception: $e\n$st');
+      return {
+        'valid': false,
+        'error': 'Beklenmeyen hata: ${e.runtimeType}: $e',
+        'detail': '$e',
       };
     }
+  }
+
+  String _formatDioErrorDetail(DioException e) {
+    final parts = <String>[];
+    parts.add('Dio: ${e.type.name}');
+    if (e.response != null) {
+      parts.add('HTTP ${e.response!.statusCode}');
+    }
+    if (e.error != null) {
+      parts.add('${e.error.runtimeType}: ${e.error}');
+    }
+    if (e.message != null && e.message!.isNotEmpty) {
+      parts.add(e.message!);
+    }
+    final raw = parts.join(' | ');
+    return raw.length > 250 ? raw.substring(0, 250) : raw;
   }
 
   Future<String> _getDeviceId() async {

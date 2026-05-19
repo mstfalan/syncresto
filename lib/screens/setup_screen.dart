@@ -112,13 +112,18 @@ class _SetupScreenState extends State<SetupScreen> {
           if (result['error'] == 'DEVICE_CONFLICT') {
             _errorMessage = 'Bu API key baska bir cihazda kullanilmaktadir: ${result['existing_device'] ?? 'Bilinmeyen Cihaz'}.';
           } else {
-            _errorMessage = result['error'] ?? 'Gecersiz API Key';
+            // 19 May 2026: detail varsa onu goster (root cause analizi)
+            final err = result['error']?.toString() ?? 'Gecersiz API Key';
+            final detail = result['detail']?.toString();
+            _errorMessage = (detail != null && detail.isNotEmpty && detail != err)
+                ? '$err\n\n[Detay] $detail'
+                : err;
           }
         });
       }
-    } catch (e) {
+    } catch (e, st) {
       setState(() {
-        _errorMessage = 'Baglanti hatasi: $e';
+        _errorMessage = 'Beklenmeyen hata: ${e.runtimeType}: $e\n\n${st.toString().split("\n").take(3).join("\n")}';
       });
     } finally {
       if (mounted) {

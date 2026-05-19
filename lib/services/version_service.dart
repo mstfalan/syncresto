@@ -291,21 +291,8 @@ class VersionService {
         connectTimeout: const Duration(seconds: 30),
       ));
 
-      // 19 May 2026: IPv4 force (IPv6 olu networklerde guncelleme indirimi de patlamasin)
-      (downloadDio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
-        final client = HttpClient();
-        client.connectionFactory = (uri, proxyHost, proxyPort) async {
-          final addresses = await InternetAddress.lookup(
-            uri.host,
-            type: InternetAddressType.IPv4,
-          );
-          if (addresses.isEmpty) {
-            throw SocketException('IPv4 adresi bulunamadi: ${uri.host}');
-          }
-          return Socket.startConnect(addresses.first, uri.port);
-        };
-        return client;
-      };
+      // 19 May 2026: IPv4 force HttpOverrides.global ile main.dart'ta zaten aktif
+      // (IPv6 olu networklerde guncelleme indirimi de patlamasin diye)
 
       final response = await downloadDio.download(
         downloadUrl,

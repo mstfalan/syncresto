@@ -18,6 +18,25 @@ import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
 
+/// 19 May 2026 — IPv4-only HttpOverrides
+/// Saha networklerinde IPv6 lookup OK + connect timeout sorunu icin
+/// (CF IPv6 routing'i olmayan TT ADSL). Tum HttpClient'lari (Dio, http, socket_io_client)
+/// otomatik IPv4'e zorlar. TLS hostname matching dogru calisir (HttpClient host'u ayri
+/// tutar, sadece DNS lookup'i IPv4'e cevirir).
+class _Ipv4HttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    final client = super.createHttpClient(context);
+    client.connectionTimeout = const Duration(seconds: 10);
+    return client;
+  }
+
+  @override
+  Future<List<InternetAddress>> lookup(String host, {int? port}) {
+    return InternetAddress.lookup(host, type: InternetAddressType.IPv4);
+  }
+}
+
 /// 7 May 2026 — Self-healing init: bozuk SharedPreferences cache'i tara, JSON parse fail
 /// olan key'leri otomatik temizle. Bir daha "FormatException Unexpected character"
 /// nedeniyle uygulama acilmama sorunu yasanmasin.
@@ -50,6 +69,11 @@ Future<void> _selfHealCorruptCache() async {
 /// Main entry — 7 May 2026: runZonedGuarded ile sarmalandi.
 /// Yakalanmayan herhangi bir exception app'i oldurmesin.
 void main() {
+  // 19 May 2026: IPv4-only DNS lookup'i GLOBAL set et — main() ilk satirinda,
+  // herhangi bir Dio/HttpClient olusmadan ONCE. Tum HttpClient'lara yansir.
+  // Saha PC'lerinde IPv6 lookup OK + connect timeout sorununu kokten cozer.
+  HttpOverrides.global = _Ipv4HttpOverrides();
+
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
 

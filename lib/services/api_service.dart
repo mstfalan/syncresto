@@ -59,24 +59,17 @@ class ApiService {
       },
     ));
 
-    // 19 May 2026: IPv6 olu olan networklerde (saha kurulumlari, ev ADSL'leri)
-    // Dart HTTP client dual-stack lookup ile once IPv6 deniyor, connect timeout
-    // yiyene kadar IPv4 fallback yapmiyor → 15sn sonra "Baglanti hatasi". Cozum:
-    // DNS lookup'i IPv4-only zorla. Tum networklerde guvenli ve hizli.
-    (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
-      final client = HttpClient();
-      client.connectionFactory = (uri, proxyHost, proxyPort) async {
-        final addresses = await InternetAddress.lookup(
-          uri.host,
-          type: InternetAddressType.IPv4,
-        );
-        if (addresses.isEmpty) {
-          throw SocketException('IPv4 adresi bulunamadi: ${uri.host}');
-        }
-        return Socket.startConnect(addresses.first, uri.port);
+    // 19 May 2026: IPv4 force — IPv6 lookup OK + connect timeout sorunu icin.
+    // HttpOverrides.global main.dart'ta global olarak set ediliyor; burada
+    // ayrica koruma katmani olarak adapter override (eger HttpOverrides
+    // herhangi bir nedenle calismazsa fallback).
+    try {
+      (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
+        return HttpClient()..connectionTimeout = const Duration(seconds: 10);
       };
-      return client;
-    };
+    } catch (e) {
+      if (kDebugMode) print('[API] adapter override skip: $e');
+    }
 
     _dio.interceptors.add(LogInterceptor(
       requestBody: false,

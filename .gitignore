@@ -67,3 +67,6 @@ windows/flutter/ephemeral/
 # Credentials
 *.pem
 *.key
+
+# 19 May 2026: Mozilla CA bundle asset olarak commit edilir (CERTIFICATE_VERIFY_FAILED fix)
+!assets/certs/cacert.pem

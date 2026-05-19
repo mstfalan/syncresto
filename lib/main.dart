@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -18,15 +19,37 @@ import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
 
-/// 19 May 2026 — IPv4-only HttpOverrides
-/// Saha networklerinde IPv6 lookup OK + connect timeout sorunu icin
-/// (CF IPv6 routing'i olmayan TT ADSL). Tum HttpClient'lari (Dio, http, socket_io_client)
-/// otomatik IPv4'e zorlar. TLS hostname matching dogru calisir (HttpClient host'u ayri
-/// tutar, sadece DNS lookup'i IPv4'e cevirir).
-class _Ipv4HttpOverrides extends HttpOverrides {
+/// 19 May 2026 — IPv4-only + Mozilla CA bundle HttpOverrides
+///
+/// Iki problemi birden cozer:
+/// 1. IPv4-only DNS lookup — IPv6 lookup OK + connect timeout sorunu
+///    (CF IPv6 routing'i olmayan TT ADSL'lerinde 15sn beklemeden direkt IPv4)
+/// 2. CERTIFICATE_VERIFY_FAILED — Dart boringssl Windows certificate store'una
+///    erismez, kendi root CA listesi yok. Cloudflare/Let's Encrypt cert'lerini
+///    dogrulayamiyor → HandshakeException. Cozum: Mozilla CA bundle'i asset
+///    olarak ekle + SecurityContext'e yukle.
+///
+/// Tum HttpClient'lara (Dio, http, socket_io_client) otomatik yansir.
+class _SyncRestoHttpOverrides extends HttpOverrides {
+  SecurityContext? _ctx;
+
+  Future<void> loadCaBundle() async {
+    try {
+      final bytes = await rootBundle.load('assets/certs/cacert.pem');
+      _ctx = SecurityContext(withTrustedRoots: true);
+      _ctx!.setTrustedCertificatesBytes(bytes.buffer.asUint8List());
+      if (kDebugMode) print('[CA] Mozilla CA bundle yuklendi (${bytes.lengthInBytes} byte)');
+    } catch (e) {
+      if (kDebugMode) print('[CA] CA bundle yukleme HATA: $e — fallback default trust');
+      _ctx = null;
+    }
+  }
+
   @override
   HttpClient createHttpClient(SecurityContext? context) {
-    final client = super.createHttpClient(context);
+    // Bizim Mozilla CA bundle'imiz varsa onu kullan, yoksa default
+    final ctx = _ctx ?? context;
+    final client = super.createHttpClient(ctx);
     client.connectionTimeout = const Duration(seconds: 10);
     return client;
   }
@@ -36,6 +59,9 @@ class _Ipv4HttpOverrides extends HttpOverrides {
     return InternetAddress.lookup(host, type: InternetAddressType.IPv4);
   }
 }
+
+/// Global instance — main()'de loadCaBundle() ile beslenir
+final _syncRestoOverrides = _SyncRestoHttpOverrides();
 
 /// 7 May 2026 — Self-healing init: bozuk SharedPreferences cache'i tara, JSON parse fail
 /// olan key'leri otomatik temizle. Bir daha "FormatException Unexpected character"
@@ -69,13 +95,21 @@ Future<void> _selfHealCorruptCache() async {
 /// Main entry — 7 May 2026: runZonedGuarded ile sarmalandi.
 /// Yakalanmayan herhangi bir exception app'i oldurmesin.
 void main() {
-  // 19 May 2026: IPv4-only DNS lookup'i GLOBAL set et — main() ilk satirinda,
-  // herhangi bir Dio/HttpClient olusmadan ONCE. Tum HttpClient'lara yansir.
-  // Saha PC'lerinde IPv6 lookup OK + connect timeout sorununu kokten cozer.
-  HttpOverrides.global = _Ipv4HttpOverrides();
+  // 19 May 2026: IPv4-only + Mozilla CA bundle override GLOBAL set
+  // main() ilk satirinda, herhangi bir Dio/HttpClient olusmadan ONCE.
+  HttpOverrides.global = _syncRestoOverrides;
 
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+
+    // 19 May 2026: CA bundle'i asset'ten yukle (Cloudflare cert dogrulamasi icin)
+    // WidgetsFlutterBinding.ensureInitialized() SONRASI olmali (rootBundle hazir)
+    await _syncRestoOverrides.loadCaBundle().timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        if (kDebugMode) print('[CA] yukleme timeout — default trust ile devam');
+      },
+    );
 
     // 7 May 2026: Bozuk cache'leri ilk acilista temizle (FormatException onlemi)
     await _selfHealCorruptCache().timeout(

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'local_db_service.dart';
@@ -57,6 +58,25 @@ class ApiService {
         'Content-Type': 'application/json',
       },
     ));
+
+    // 19 May 2026: IPv6 olu olan networklerde (saha kurulumlari, ev ADSL'leri)
+    // Dart HTTP client dual-stack lookup ile once IPv6 deniyor, connect timeout
+    // yiyene kadar IPv4 fallback yapmiyor → 15sn sonra "Baglanti hatasi". Cozum:
+    // DNS lookup'i IPv4-only zorla. Tum networklerde guvenli ve hizli.
+    (_dio.httpClientAdapter as IOHttpClientAdapter).createHttpClient = () {
+      final client = HttpClient();
+      client.connectionFactory = (uri, proxyHost, proxyPort) async {
+        final addresses = await InternetAddress.lookup(
+          uri.host,
+          type: InternetAddressType.IPv4,
+        );
+        if (addresses.isEmpty) {
+          throw SocketException('IPv4 adresi bulunamadi: ${uri.host}');
+        }
+        return Socket.startConnect(addresses.first, uri.port);
+      };
+      return client;
+    };
 
     _dio.interceptors.add(LogInterceptor(
       requestBody: false,

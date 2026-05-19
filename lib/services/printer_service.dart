@@ -21,7 +21,25 @@ class PrinterService {
   final LogService _logService = LogService();
   final LocalDbService _localDb = LocalDbService();
 
-  // Çoklu yazıcı desteği - her tür için ayrı ayar
+  String? _cachedBrandName;
+  Future<String> _getBrandName({String? overrideFromSettings}) async {
+    if (overrideFromSettings != null && overrideFromSettings.trim().isNotEmpty) {
+      return overrideFromSettings;
+    }
+    if (_cachedBrandName != null) return _cachedBrandName!;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _cachedBrandName = prefs.getString('theme_brand_name') ?? 'SyncResto POS';
+    } catch (_) {
+      _cachedBrandName = 'SyncResto POS';
+    }
+    return _cachedBrandName!;
+  }
+
+  void invalidateBrandNameCache() {
+    _cachedBrandName = null;
+  }
+
   Map<String, Map<String, dynamic>> _printers = {};
 
   // Sunucudan gelen yazıcılar (read-only cache)
@@ -284,7 +302,7 @@ class PrinterService {
         printerName: printerName,
         receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
       );
-      onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+      onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
       _logService.warning(LogType.action, 'Fis kuyruga eklendi', details: {
         'ticket_number': ticket['ticket_number'],
         'printer_ip': ip,
@@ -304,15 +322,17 @@ class PrinterService {
           printerName: cfg['name'] as String? ?? 'Yazici',
           receiptData: {'ticket': ticket, 'printerType': printerType ?? 'cashier'},
         );
-        onStatusChange?.call('Hata, kuyruga eklendi', true);
-        _logService.error(LogType.error, 'Fis yazdirma hatasi (kuyruga alindi)', error: e, details: {
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
+        // Gercek error sadece kuyruga bile alinmayan durumlarda atilir.
+        _logService.warning(LogType.action, 'Fis kuyruga alindi (otomatik retry)', details: {
           'ticket_number': ticket['ticket_number'],
+          'error': e.toString(),
         });
         return true;
       }
 
       onStatusChange?.call('Hata: $e', true);
-      _logService.error(LogType.error, 'Fis yazdirma hatasi', error: e, details: {
+      _logService.error(LogType.error, 'Fis yazdirma hatasi (kuyruga eklenemedi)', error: e, details: {
         'ticket_number': ticket['ticket_number'],
       });
       return false;
@@ -385,8 +405,8 @@ class PrinterService {
           printerName: printerName,
           receiptData: {'order': order, 'department': department},
         );
-        onStatusChange?.call('Yazici hatasi, kuyruga eklendi', true);
-        _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', details: {
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
+        _logService.warning(LogType.action, 'Siparis fisi kuyruga alindi (otomatik retry)', details: {
           'order_number': order['order_number'],
           'department': department,
           'printer_ip': ip,
@@ -405,10 +425,11 @@ class PrinterService {
         printerName: printerName,
         receiptData: {'order': order, 'department': department},
       );
-      onStatusChange?.call('Hata, kuyruga eklendi', true);
-      _logService.error(LogType.error, 'Siparis fisi yazdirma hatasi', error: e, details: {
+      onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
+      _logService.warning(LogType.action, 'Siparis fisi kuyruga alindi (exception path)', details: {
         'order_number': order['order_number'],
         'department': department,
+        'error': e.toString(),
       });
       return false;
     }
@@ -525,21 +546,42 @@ class PrinterService {
   }
 
   /// Send bytes to printer via TCP
+  /// 19 May 2026: TCP unreachable hatalarinda inline 1 retry ekledik.
+  /// Wifi paket kaybi / ARP timeout / DHCP yenileme gibi gecici sebepler
+  /// genelde 1-2sn icinde duzeliyor → kuyruga atmadan once 1 kez daha dene.
   Future<bool> _sendToPrinter(String ip, int port, List<int> bytes) async {
-    // Strategy: connect+write+flush is the actual print operation. If those succeed,
-    // the printer has the bytes and will print regardless of whether the TCP close
-    // completes cleanly. Many thermal printers (PalmX etc.) reset the connection
-    // immediately after receiving data, which makes close() throw — but the print
-    // already happened. So we treat the operation as successful as soon as flush
-    // returns, and run close()/destroy() in the background without affecting the
-    // result.
+    // 1. deneme — hizli timeout (4sn). TCP unreachable hızlı patlat, kullaniciyi 10sn bekletme
+    final firstTry = await _attemptSend(ip, port, bytes, timeoutSec: 4);
+    if (firstTry) return true;
+
+    // 2. deneme — kısa bekleme sonrası (wifi paket kaybi / ARP yenileme icin)
+    print('[Printer] 1. deneme basarisiz ($ip:$port), 1.5sn sonra tekrar deniyorum...');
+    await Future.delayed(const Duration(milliseconds: 1500));
+
+    final secondTry = await _attemptSend(ip, port, bytes, timeoutSec: 6);
+    if (secondTry) {
+      print('[Printer] 2. deneme BASARILI ($ip:$port) — inline retry kurtardi');
+      return true;
+    }
+
+    print('[Printer] 2 deneme de basarisiz ($ip:$port) — kuyruga ekleniyor');
+    return false;
+  }
+
+  /// Tek bir gonderim denemesi. _sendToPrinter bunu 2 kez cagiriyor.
+  /// Strategy: connect+write+flush is the actual print operation. If those succeed,
+  /// the printer has the bytes and will print regardless of whether the TCP close
+  /// completes cleanly. Many thermal printers (PalmX etc.) reset the connection
+  /// immediately after receiving data, which makes close() throw — but the print
+  /// already happened.
+  Future<bool> _attemptSend(String ip, int port, List<int> bytes, {int timeoutSec = 4}) async {
     Socket? socket;
     bool wroteSuccessfully = false;
     try {
       socket = await Socket.connect(
         ip,
         port,
-        timeout: const Duration(seconds: 10),
+        timeout: Duration(seconds: timeoutSec),
       );
 
       socket.add(bytes);
@@ -553,7 +595,7 @@ class PrinterService {
 
       // Close in background — don't let close errors override a successful print
       final socketRef = socket;
-      socket = null; // prevent finally from destroying it before close completes
+      socket = null;
       socketRef.close()
         .timeout(const Duration(seconds: 3))
         .catchError((e) {
@@ -566,7 +608,6 @@ class PrinterService {
 
       return true;
     } catch (e) {
-      // If we already wrote+flushed successfully, treat connection-reset on close as success.
       if (wroteSuccessfully) {
         print('[Printer] post-write error ignored ($ip:$port): $e');
         return true;
@@ -574,7 +615,6 @@ class PrinterService {
       print('[Printer] TCP gonderim hatasi ($ip:$port): $e');
       return false;
     } finally {
-      // Only triggered for the failure path before background close
       if (socket != null) {
         try { socket.destroy(); } catch (_) {}
       }
@@ -587,19 +627,17 @@ class PrinterService {
     final generator = Generator(PaperSize.mm80, profile);
     List<int> bytes = [];
 
-    // Header
+    bytes += generator.setGlobalFont(PosFontType.fontA);
+
+    final brandName = _turkishToAscii(await _getBrandName()).toUpperCase();
     bytes += generator.text(
-      'GREEN CHEF',
+      brandName,
       styles: const PosStyles(
         align: PosAlign.center,
         bold: true,
         height: PosTextSize.size2,
         width: PosTextSize.size2,
       ),
-    );
-    bytes += generator.text(
-      'Restoran & Cafe',
-      styles: const PosStyles(align: PosAlign.center),
     );
     bytes += generator.hr();
 
@@ -722,9 +760,11 @@ class PrinterService {
     final generator = Generator(PaperSize.mm80, profile);
     List<int> bytes = [];
 
+    bytes += generator.setGlobalFont(PosFontType.fontA);
+
     // ===== HEADER =====
     final settings = order['_settings'] as Map<String, dynamic>?;
-    final brandName = _turkishToAscii(settings?['brand_name'] ?? 'GREEN CHEF');
+    final brandName = _turkishToAscii(await _getBrandName(overrideFromSettings: settings?['brand_name'] as String?));
     final contactPhone = settings?['contact_phone'] ?? '';
 
     bytes += generator.text(
@@ -1008,7 +1048,7 @@ class PrinterService {
             'printerType': printerType,
           },
         );
-        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
         _logService.warning(LogType.action, 'Mutfak fisi kuyruga eklendi', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
@@ -1034,15 +1074,23 @@ class PrinterService {
             'printerType': printerType,
           },
         );
-        onStatusChange?.call('Hata, kuyruga eklendi', true);
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
       } else {
         onStatusChange?.call('Hata: $e', true);
       }
 
-      _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi', error: e, details: {
-        'ticket_number': ticket['ticket_number'],
-        'item_count': items.length,
-      });
+      if (config != null && config['ip'] != null) {
+        _logService.warning(LogType.action, 'Mutfak fisi kuyruga alindi (otomatik retry)', details: {
+          'ticket_number': ticket['ticket_number'],
+          'item_count': items.length,
+          'error': e.toString(),
+        });
+      } else {
+        _logService.error(LogType.error, 'Mutfak fisi yazdirilamadi (kuyruga alinamadi)', error: e, details: {
+          'ticket_number': ticket['ticket_number'],
+          'item_count': items.length,
+        });
+      }
       return false;
     }
   }
@@ -1077,8 +1125,8 @@ class PrinterService {
           'item_count': items.length,
         });
       } else {
-        onStatusChange?.call('Mutfak fisi yazdirilamadi ($ip)', true);
-        _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi (IP)', details: {
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
+        _logService.warning(LogType.action, 'Mutfak fisi (IP) gonderilemedi, retry edilecek', details: {
           'ticket_number': ticket['ticket_number'],
           'printer_ip': ip,
           'item_count': items.length,
@@ -1088,11 +1136,12 @@ class PrinterService {
       return success;
     } catch (e) {
       print('[Printer] Mutfak fisi yazdirilirken hata ($ip): $e');
-      onStatusChange?.call('Hata: $e', true);
-      _logService.error(LogType.error, 'Mutfak fisi yazdirma hatasi (IP)', error: e, details: {
+      onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
+      _logService.warning(LogType.action, 'Mutfak fisi (IP) exception, retry edilecek', details: {
         'ticket_number': ticket['ticket_number'],
         'printer_ip': ip,
         'item_count': items.length,
+        'error': e.toString(),
       });
       return false;
     }
@@ -1112,6 +1161,8 @@ class PrinterService {
     final profile = await CapabilityProfile.load();
     final generator = Generator(PaperSize.mm80, profile);
     List<int> bytes = [];
+
+    bytes += generator.setGlobalFont(PosFontType.fontA);
 
     // ===== ÜST BOŞLUK (70px ~ 10 satır) =====
     bytes += generator.feed(10);
@@ -1246,7 +1297,7 @@ class PrinterService {
             'brandName': brandName,
           },
         );
-        onStatusChange?.call('Yazici erisilemedi, kuyruga eklendi', true);
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
       }
 
       return success;
@@ -1267,7 +1318,7 @@ class PrinterService {
           'brandName': brandName,
         },
       );
-      onStatusChange?.call('Hata, kuyruga eklendi', true);
+      onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
       return false;
     }
   }
@@ -1286,9 +1337,9 @@ class PrinterService {
     List<int> bytes = [];
 
     bytes += generator.reset();
+    bytes += generator.setGlobalFont(PosFontType.fontA);
 
-    // Marka adı (dinamik)
-    final brand = _turkishToAscii(brandName ?? 'SyncResto');
+    final brand = _turkishToAscii(brandName ?? await _getBrandName());
     bytes += generator.text(
       brand.toUpperCase(),
       styles: const PosStyles(
@@ -1804,8 +1855,8 @@ class PrinterService {
     final generator = Generator(PaperSize.mm80, profile);
     List<int> bytes = [];
 
-    // Reset + initial
     bytes += generator.reset();
+    bytes += generator.setGlobalFont(PosFontType.fontA);
     bytes += generator.feed(1);
 
     // Başlık — kalın + büyük + ortalı

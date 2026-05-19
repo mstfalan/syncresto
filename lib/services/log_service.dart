@@ -228,8 +228,15 @@ class LogService {
     if (_pendingLogs.isEmpty || _dio == null || _apiKey == null) return;
 
     _isFlushing = true;
-    final logsToSend = List<LogEntry>.from(_pendingLogs);
-    _pendingLogs.clear();
+
+    // Max 100 log per batch — 413 Payload Too Large engeli
+    const maxBatchSize = 100;
+    final logsToSend = _pendingLogs.length > maxBatchSize
+        ? _pendingLogs.sublist(0, maxBatchSize)
+        : List<LogEntry>.from(_pendingLogs);
+
+    // Sadece gonderilenleri pending'den dusur (digerleri sonraki flush'a kalir)
+    _pendingLogs.removeRange(0, logsToSend.length);
 
     if (logsToSend.isEmpty) {
       _isFlushing = false;
@@ -246,6 +253,8 @@ class LogService {
             'X-App-Version': _appVersion,
             'X-Platform': _platform,
           },
+          // 413 ve diger 4xx hatalarda exception yerine response'a izin ver
+          validateStatus: (s) => s != null && s < 500,
         ),
         data: {
           'logs': logsToSend.map((l) => l.toJson()).toList(),
@@ -259,13 +268,22 @@ class LogService {
 
       if (response.statusCode == 200) {
         debugPrint('[LogService] ${logsToSend.length} log gönderildi');
-        await _clearPendingLogs();
+      } else if (response.statusCode == 413) {
+        // Payload Too Large — bu log'lari DROP et, geri pending'e ekleme.
+        // Sonsuz dongu engelleyici. Sahada sunucu limiti ayarlanana kadar
+        // log telemetrisi kismi olur ama POS yasamaya devam eder.
+        debugPrint('[LogService] 413 Payload Too Large — ${logsToSend.length} log atildi (sonsuz dongu engellendi)');
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        // Auth hatasi — kucuk batch tekrar denemenin anlami yok, drop
+        debugPrint('[LogService] Auth hatasi (${response.statusCode}) — ${logsToSend.length} log atildi');
       } else {
+        // Diger hatalar (5xx vs) — geri pending'e ekle, sonra retry
         _pendingLogs.insertAll(0, logsToSend);
         await _savePendingLogs();
       }
     } catch (e) {
-      debugPrint('[LogService] Log gönderme hatası: $e');
+      // Network/timeout vs — sadece bunlari retry et
+      debugPrint('[LogService] Log gonderme network hatasi: $e');
       _pendingLogs.insertAll(0, logsToSend);
       await _savePendingLogs();
     } finally {

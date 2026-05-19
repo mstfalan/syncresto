@@ -262,16 +262,20 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
   }
 
   void _connectWebSocket() {
+    // 19 May 2026: WebSocket handshake.auth.token gerek — backend
+    // socket auth middleware "Authentication required" hatasi veriyor token yoksa.
+    // API key'i token olarak gec (backend SR_ prefix'i API key olarak parse eder)
+    final apiKey = widget.storageService.getApiKey();
     // WebSocket için tenant backend URL'ini kullan (Socket.io orada çalışıyor)
     final backendUrl = widget.storageService.getBackendUrl();
     if (backendUrl != null && backendUrl.isNotEmpty) {
       print('[InitialSync] WebSocket tenant backend\'e bağlanıyor: $backendUrl');
-      widget.webSocketService.connect(backendUrl);
+      widget.webSocketService.connect(backendUrl, token: apiKey);
     } else {
       // Fallback: API URL kullan (eski davranış)
       final apiUrl = widget.storageService.getApiUrl() ?? 'https://api.syncresto.com';
       print('[InitialSync] WebSocket API URL\'e bağlanıyor (fallback): $apiUrl');
-      widget.webSocketService.connect(apiUrl);
+      widget.webSocketService.connect(apiUrl, token: apiKey);
     }
 
     // 16 May 2026: Panel.syncresto.com'a ek socket (kitchen_print broadcast için)

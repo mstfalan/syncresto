@@ -45,12 +45,17 @@ class WebSocketService {
     try {
       print('[WebSocket] Connecting to: $_serverUrl');
 
+      final isPosApiKey = _authToken != null && _authToken!.startsWith('SR_');
       _socket = IO.io(_serverUrl!, <String, dynamic>{
         'transports': ['websocket'],
         'autoConnect': true,
         'reconnection': true,
         'reconnectionDelay': 5000,
         'reconnectionAttempts': 10,
+        if (_authToken != null)
+          'auth': isPosApiKey
+              ? {'api_key': _authToken}
+              : {'token': _authToken},
       });
 
       _socket!.onConnect((_) {

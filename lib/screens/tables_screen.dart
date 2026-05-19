@@ -55,6 +55,9 @@ class _TablesScreenState extends State<TablesScreen> {
   // Masa rengi icin: tableId -> en eski bekleyen item'in created_at (UTC ISO).
   // Tum urunler teslim edildiyse o masa map'te yer almaz -> renk normale doner.
   Map<int, DateTime> _oldestPendingByTable = {};
+  // 19 May 2026: Mutfaga gitmemis (printed=0) urun olan masalar. Kart ustunde
+  // kirmizi badge "MUTFAGA GITMEMIS URUN VAR" gosterimi icin.
+  Set<int> _unprintedByTable = {};
 
   // Offline monitoring
   final ConnectivityService _connectivity = ConnectivityService();
@@ -361,12 +364,19 @@ class _TablesScreenState extends State<TablesScreen> {
       // Hem badge sayisi hem masa-bazli en eski bekleyen zamani — masa rengi icin.
       int total = 0;
       final Map<int, DateTime> oldest = {};
+      // 19 May 2026: Mutfaga gitmemis (printed=0) urun olan masalari topla
+      final Set<int> unprintedTables = {};
       for (final r in rows) {
         if (r is! Map) continue;
         if (r['delivered_at'] != null) continue;
         total++;
         final tidRaw = r['table_id'];
         final tid = tidRaw is int ? tidRaw : int.tryParse(tidRaw?.toString() ?? '');
+        // Mutfaga gitmemis (printed=0/false) ise masayi isaretle
+        final isPrinted = r['printed'] == 1 || r['printed'] == true;
+        if (!isPrinted && tid != null) {
+          unprintedTables.add(tid);
+        }
         final iso = r['item_created_at']?.toString();
         if (tid == null || iso == null || iso.isEmpty) continue;
         try {
@@ -379,6 +389,7 @@ class _TablesScreenState extends State<TablesScreen> {
         setState(() {
           _pendingItemCount = total;
           _oldestPendingByTable = oldest;
+          _unprintedByTable = unprintedTables;
         });
       }
     } catch (_) {
@@ -1169,6 +1180,8 @@ class _TablesScreenState extends State<TablesScreen> {
     final oldestPending = tableId != null ? _oldestPendingByTable[tableId] : null;
     final hasPending = oldestPending != null;
     final waitSeconds = hasPending ? DateTime.now().difference(oldestPending).inSeconds : 0;
+    // 19 May 2026: Mutfaga gitmemis urun var mi (printed=0 olan item)
+    final hasUnprinted = tableId != null && _unprintedByTable.contains(tableId);
 
     Color tableBorder;
     Gradient? tableGradient;
@@ -1201,12 +1214,15 @@ class _TablesScreenState extends State<TablesScreen> {
             color: isOccupied ? null : Colors.white,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: isOccupied ? tableBorder : Colors.grey[300]!,
+              // 19 May 2026: hasUnprinted ise kirmizi border (boyut DEGISMEZ, sadece renk)
+              color: hasUnprinted ? const Color(0xFFDC2626) : (isOccupied ? tableBorder : Colors.grey[300]!),
               width: 2,
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
+                color: hasUnprinted
+                    ? const Color(0xFFDC2626).withValues(alpha: 0.4)
+                    : Colors.black.withValues(alpha: 0.05),
                 blurRadius: 4,
                 offset: const Offset(0, 2),
               ),
@@ -1228,19 +1244,21 @@ class _TablesScreenState extends State<TablesScreen> {
 
               SizedBox(height: isOccupied ? 4 : 8),
 
-              // Status
+              // Status — 19 May 2026: mutfaga gitmemis varsa kirmizi vurgulu badge
               Container(
                 padding: EdgeInsets.symmetric(horizontal: isOccupied ? 8 : 12, vertical: isOccupied ? 2 : 4),
                 decoration: BoxDecoration(
-                  color: isOccupied
-                      ? Colors.white.withValues(alpha: 0.2)
-                      : Colors.grey[100],
+                  color: hasUnprinted
+                      ? const Color(0xFFDC2626)
+                      : (isOccupied
+                          ? Colors.white.withValues(alpha: 0.2)
+                          : Colors.grey[100]),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  isOccupied ? 'Dolu' : 'Bos',
+                  hasUnprinted ? 'MUTFAĞA GİTMEDİ' : (isOccupied ? 'Dolu' : 'Bos'),
                   style: TextStyle(
-                    color: isOccupied ? Colors.white : Colors.grey[600],
+                    color: (hasUnprinted || isOccupied) ? Colors.white : Colors.grey[600],
                     fontSize: isOccupied ? 10 : 12,
                     fontWeight: FontWeight.w500,
                   ),

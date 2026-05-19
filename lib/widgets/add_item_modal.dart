@@ -1034,15 +1034,18 @@ class _AddItemModalState extends State<AddItemModal> {
       // Admin panel POS Loglari icin ozet
       final tableLabel = widget.table?['table_number']?.toString() ?? 'Masa ${widget.table?['id'] ?? ''}';
       if (failCount > 0) {
+        // 19 May 2026: Inline retry sonrasi hala fail → kuyruga aliniyor, retry edilecek.
+        // Bu DOGRU bir error — manuel mudahale gerekebilir (ozellikle yazici fiziken kapaliysa).
         LogService().error(
           LogType.error,
-          'Mutfak fisi yazici hatasi (add): $tableLabel — $failCount urun yaziciya gitmedi (printed=1 DB; manuel reprint)',
+          'Mutfak fisi $failCount yaziciya gonderilemedi (kuyrukta retry edilecek): Masa $tableLabel',
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
+            'action': 'queued_for_retry',
           },
         );
       } else if (successCount > 0) {
@@ -1341,13 +1344,15 @@ class _AddItemModalState extends State<AddItemModal> {
       if (failCount > 0) {
         LogService().error(
           LogType.error,
-          'Mutfak fisi yazici hatasi (add silent): $tableLabel — $failCount urun yaziciya gitmedi (printed=1 DB)',
+          'Mutfak fisi $failCount yaziciya gonderilemedi (sessiz mod, kuyrukta retry): Masa $tableLabel',
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
+            'action': 'queued_for_retry',
+            'mode': 'silent',
           },
         );
       } else if (successCount > 0) {
@@ -2663,6 +2668,8 @@ class _AddItemModalState extends State<AddItemModal> {
     // Backend'den gelen ekleyen garson + saat (TR lokal)
     final addedBy = item['added_by_name']?.toString() ?? '';
     final addedTime = _formatItemTime(item['created_at']);
+    // 19 May 2026: Mutfak'a yazdirilmis mi? Backend'den printed=1 veya true geliyor.
+    final isPrinted = item['printed'] == 1 || item['printed'] == true;
 
     return GestureDetector(
       onTap: () {
@@ -2749,13 +2756,47 @@ class _AddItemModalState extends State<AddItemModal> {
               ),
             ),
             const SizedBox(width: 8),
-            Text(
-              '${total.toStringAsFixed(2)}',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
-              ),
+            // 19 May 2026: Mutfaga yazdirildi mi badge'i — Omer Bey istegi
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${total.toStringAsFixed(2)}',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: isPrinted ? const Color(0xFF059669) : const Color(0xFFDC2626),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isPrinted ? Icons.check_circle : Icons.error_outline,
+                        size: 10,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        isPrinted ? 'YAZDIRILDI' : 'YAZDIRILMADI',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ),

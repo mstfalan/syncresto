@@ -38,6 +38,20 @@ class LocalDbService {
       version: 8, // v8: cached_printers + printer_id (products) + summary_printer_id (sections) — offline mutfak fisi
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
+      // Sahada: sync_service + print_queue_service + tables_screen aynı anda
+      // BEGIN IMMEDIATE acinca lock çatisiyor → masalar yuklenemiyor (kirmizi bar).
+      onConfigure: (db) async {
+        // WAL mode: write-ahead logging — bircok reader + 1 writer paralel calisir,
+        // SHARED lock ile EXCLUSIVE lock catismaz. Default DELETE journal modunda
+        // her transaction tum DB'yi locklar → busy hatalari kaciniilmaz.
+        await db.execute('PRAGMA journal_mode = WAL');
+        // busy_timeout: 5sn boyunca lock'un acilmasini bekle (default 0 = anlik fail)
+        await db.execute('PRAGMA busy_timeout = 5000');
+        // synchronous NORMAL: WAL ile uyumlu, hizli + guvenli
+        await db.execute('PRAGMA synchronous = NORMAL');
+        // foreign_keys aktif
+        await db.execute('PRAGMA foreign_keys = ON');
+      },
     );
   }
 
@@ -392,6 +406,50 @@ class LocalDbService {
     }
   }
 
+  // ==================== TRANSACTION RETRY HELPER (19 May 2026) ====================
+
+  /// WAL mode + busy_timeout=5000 sayesinde lock'lar %95 kurtariliyor.
+  /// Yine de cok nadir durumlarda SQLITE_BUSY (code 5) veya LOCKED gelebilir
+  /// (ornek: 2+ writer ayni mikrosaniyede begin acarsa). Bu helper exponential
+  /// backoff ile 3 kez retry eder, sonra exception firlatir.
+  ///
+  /// Kullanim:
+  ///   await _runWithRetry(() => db.transaction((txn) async { ... }));
+  Future<T> _runWithRetry<T>(Future<T> Function() op, {String? opName}) async {
+    const delaysMs = [100, 200, 400]; // exponential backoff
+    Object? lastError;
+    StackTrace? lastSt;
+
+    for (int attempt = 0; attempt <= delaysMs.length; attempt++) {
+      try {
+        return await op();
+      } catch (e, st) {
+        lastError = e;
+        lastSt = st;
+        // Sadece BUSY/LOCKED retry edilebilir, baska hata (constraint vs) anında firlatılır
+        final msg = e.toString().toLowerCase();
+        final isBusy = msg.contains('database is locked') ||
+                       msg.contains('sqlite_busy') ||
+                       msg.contains('database is busy') ||
+                       msg.contains('sqlite_locked');
+        if (!isBusy) {
+          rethrow;
+        }
+        // Son denemeyse — rethrow
+        if (attempt >= delaysMs.length) {
+          print('[DB] ${opName ?? "op"} — ${delaysMs.length + 1} deneme sonrasi hala locked, vazgeciliyor');
+          rethrow;
+        }
+        // Bekle ve tekrar dene
+        final delay = delaysMs[attempt];
+        print('[DB] ${opName ?? "op"} — locked, ${delay}ms sonra retry (${attempt + 1}/${delaysMs.length})');
+        await Future.delayed(Duration(milliseconds: delay));
+      }
+    }
+    // Unreachable ama Dart icin gerekli
+    Error.throwWithStackTrace(lastError ?? StateError('retry exhausted'), lastSt ?? StackTrace.current);
+  }
+
   // ==================== CACHE İŞLEMLERİ ====================
 
   // Kategorileri cache'le
@@ -399,7 +457,7 @@ class LocalDbService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
-    await db.transaction((txn) async {
+    await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_categories');
       for (final cat in categories) {
         await txn.insert('cached_categories', {
@@ -411,7 +469,7 @@ class LocalDbService {
           'cached_at': now,
         });
       }
-    });
+    }), opName: 'cacheCategories');
   }
 
   // Kategorileri getir
@@ -425,7 +483,7 @@ class LocalDbService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
-    await db.transaction((txn) async {
+    await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_products');
       for (final prod in products) {
         await txn.insert('cached_products', {
@@ -445,7 +503,7 @@ class LocalDbService {
           'cached_at': now,
         });
       }
-    });
+    }), opName: 'cacheProducts');
   }
 
   // Ürünleri getir
@@ -459,7 +517,7 @@ class LocalDbService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
-    await db.transaction((txn) async {
+    await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_sections');
       for (final sec in sections) {
         await txn.insert('cached_sections', {
@@ -471,7 +529,7 @@ class LocalDbService {
           'cached_at': now,
         });
       }
-    });
+    }), opName: 'cacheSections');
   }
 
   // Salonları getir
@@ -485,7 +543,7 @@ class LocalDbService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
-    await db.transaction((txn) async {
+    await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_tables');
       // 16 May 2026: server bazen ayni id'de iki kayit gonderirse (panel + auto-created masa)
       // duplicate'ta REPLACE et, transaction'i koparma
@@ -501,7 +559,7 @@ class LocalDbService {
           'cached_at': now,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
-    });
+    }), opName: 'cacheTables');
   }
 
   // Masaları getir
@@ -516,7 +574,7 @@ class LocalDbService {
   Future<void> cachePrinters(List<Map<String, dynamic>> printers) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
-    await db.transaction((txn) async {
+    await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_printers');
       for (final p in printers) {
         await txn.insert('cached_printers', {
@@ -529,7 +587,7 @@ class LocalDbService {
           'cached_at': now,
         });
       }
-    });
+    }), opName: 'cachePrinters');
     print('[LocalDb] cached_printers: ${printers.length} kayit');
   }
 
@@ -621,7 +679,7 @@ class LocalDbService {
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
-    await db.transaction((txn) async {
+    await _runWithRetry(() => db.transaction((txn) async {
       // Sadece bu type'i temizle (digerleri korunur)
       if (categoryId != null) {
         await txn.delete('cached_lookups',
@@ -640,7 +698,7 @@ class LocalDbService {
           'cached_at': now,
         });
       }
-    });
+    }), opName: 'cacheLookups[$lookupType]');
     print('[LocalDb] cached_lookups [$lookupType' + (categoryId != null ? '/cat=$categoryId' : '') + ']: ${rows.length} kayit');
   }
 

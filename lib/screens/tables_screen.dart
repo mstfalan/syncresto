@@ -372,9 +372,12 @@ class _TablesScreenState extends State<TablesScreen> {
         total++;
         final tidRaw = r['table_id'];
         final tid = tidRaw is int ? tidRaw : int.tryParse(tidRaw?.toString() ?? '');
-        // Mutfaga gitmemis (printed=0/false) ise masayi isaretle
+        // Mutfaga gitmemis (printed=0/false) ise masayi isaretle.
+        // skip_pos_print=true (icecek/su gibi) ürünler hic basilmadigi icin
+        // unprinted sayilmaz; aksi halde masa bos yere kirmizi badge alir.
         final isPrinted = r['printed'] == 1 || r['printed'] == true;
-        if (!isPrinted && tid != null) {
+        final isSkip = r['skip_pos_print'] == true;
+        if (!isPrinted && !isSkip && tid != null) {
           unprintedTables.add(tid);
         }
         final iso = r['item_created_at']?.toString();

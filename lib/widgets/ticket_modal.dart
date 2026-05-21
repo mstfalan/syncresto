@@ -861,83 +861,316 @@ class _TicketModalState extends State<TicketModal> {
   Future<void> _openTransferTableModal() async {
     if (_ticket == null) return;
 
-    // Boş masaları getir
-    List<dynamic> emptyTables = [];
+    // Tum masalari getir (bos + dolu, mevcut haric)
+    List<dynamic> candidateTables = [];
     try {
       final tables = await widget.apiService.getTables();
-      emptyTables = tables.where((t) {
-        final status = t['status']?.toString() ?? 'empty';
-        final tableId = _safeInt(t['id']);
-        final currentTableId = _safeInt(widget.table['id']);
-        return status == 'empty' && tableId != currentTableId;
-      }).toList();
+      final currentTableId = _safeInt(widget.table['id']);
+      candidateTables = tables.where((t) => _safeInt(t['id']) != currentTableId).toList();
     } catch (e) {
       _showError('Masalar yuklenemedi');
       return;
     }
 
-    if (emptyTables.isEmpty) {
-      _showError('Bos masa bulunamadi');
+    if (candidateTables.isEmpty) {
+      _showError('Hedef masa bulunamadi');
       return;
     }
 
     if (!mounted) return;
 
-    // Masa seçim dialogu
+    int tableNumKey(dynamic t) {
+      final raw = t['table_number']?.toString() ?? '';
+      return int.tryParse(raw.replaceAll(RegExp(r'[^0-9]'), '')) ?? 999999;
+    }
+    candidateTables.sort((a, b) {
+      final aSec = (a['section_name'] ?? '').toString();
+      final bSec = (b['section_name'] ?? '').toString();
+      if (aSec != bSec) return aSec.compareTo(bSec);
+      return tableNumKey(a).compareTo(tableNumKey(b));
+    });
+
+    final sectionMap = <int, Map<String, dynamic>>{};
+    for (final t in candidateTables) {
+      final sid = _safeInt(t['section_id']);
+      if (sid == null) continue;
+      sectionMap.putIfAbsent(sid, () => {
+        'id': sid,
+        'name': t['section_name'] ?? '',
+        'color': t['section_color'] ?? '#3b82f6',
+      });
+    }
+    final sections = sectionMap.values.toList()
+      ..sort((a, b) => a['name'].toString().compareTo(b['name'].toString()));
+
     final selectedTable = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Masa Degistir'),
-        content: SizedBox(
-          width: 400,
-          height: 400,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Mevcut: ${widget.table['section_name']} - Masa ${widget.table['table_number']}',
-                style: TextStyle(color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 16),
-              const Text('Yeni masa secin:', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: emptyTables.length,
-                  itemBuilder: (context, index) {
-                    final table = emptyTables[index];
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: Color(
-                          int.parse((table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')),
+      barrierDismissible: true,
+      builder: (ctx) {
+        int? selectedSectionId;
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            final filtered = selectedSectionId == null
+                ? candidateTables
+                : candidateTables.where((t) => _safeInt(t['section_id']) == selectedSectionId).toList();
+
+            return Dialog(
+              insetPadding: const EdgeInsets.all(24),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 1100, maxHeight: 780),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(24, 18, 16, 18),
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Color(0xFF0EA5E9), Color(0xFF0284C7)],
+                          begin: Alignment.topLeft, end: Alignment.bottomRight,
                         ),
-                        child: Text(
-                          '${table['table_number']}',
-                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                        ),
+                        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
                       ),
-                      title: Text('Masa ${table['table_number']}'),
-                      subtitle: Text(table['section_name'] ?? ''),
-                      onTap: () => Navigator.pop(context, table),
-                    );
-                  },
+                      child: Row(children: [
+                        const Icon(Icons.swap_horiz, color: Colors.white, size: 28),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text('Masa Değiştir / Birleştir',
+                                  style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700)),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Mevcut: ${widget.table['section_name'] ?? ''} • Masa ${widget.table['table_number'] ?? ''}',
+                                style: const TextStyle(color: Colors.white70, fontSize: 13),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          icon: const Icon(Icons.close, color: Colors.white, size: 26),
+                        ),
+                      ]),
+                    ),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+                      color: Colors.amber.shade50,
+                      child: Row(children: [
+                        Icon(Icons.info_outline, size: 18, color: Colors.amber.shade800),
+                        const SizedBox(width: 8),
+                        const Expanded(
+                          child: Text(
+                            'Dolu masaya transfer ederseniz iki adisyon BİRLEŞTİRİLİR (ürünler tek adisyonda toplanır).',
+                            style: TextStyle(fontSize: 13, color: Color(0xFF78350F)),
+                          ),
+                        ),
+                      ]),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+                      ),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(children: [
+                          _sectionChip(
+                            label: 'TÜMÜ',
+                            count: candidateTables.length,
+                            color: const Color(0xFF6B7280),
+                            selected: selectedSectionId == null,
+                            onTap: () => setDialogState(() => selectedSectionId = null),
+                          ),
+                          const SizedBox(width: 10),
+                          ...sections.map((s) {
+                            final sid = s['id'] as int;
+                            final secCount = candidateTables
+                                .where((t) => _safeInt(t['section_id']) == sid).length;
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 10),
+                              child: _sectionChip(
+                                label: s['name'].toString(),
+                                count: secCount,
+                                color: Color(int.parse((s['color'] as String).replaceAll('#', '0xFF'))),
+                                selected: selectedSectionId == sid,
+                                onTap: () => setDialogState(() => selectedSectionId = sid),
+                              ),
+                            );
+                          }),
+                        ]),
+                      ),
+                    ),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? Center(
+                              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                Icon(Icons.table_restaurant, size: 64, color: Colors.grey.shade300),
+                                const SizedBox(height: 12),
+                                Text('Bu salonda hedef masa yok',
+                                    style: TextStyle(color: Colors.grey.shade500, fontSize: 16)),
+                              ]),
+                            )
+                          : GridView.builder(
+                              padding: const EdgeInsets.all(16),
+                              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                                maxCrossAxisExtent: 160,
+                                mainAxisSpacing: 12,
+                                crossAxisSpacing: 12,
+                                childAspectRatio: 1.0,
+                              ),
+                              itemCount: filtered.length,
+                              itemBuilder: (context, index) {
+                                final table = filtered[index];
+                                final isOccupied = table['status'] == 'occupied';
+                                final color = Color(int.parse(
+                                    (table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')));
+                                return Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(12),
+                                    onTap: () => Navigator.pop(ctx, table),
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: isOccupied ? Colors.red.shade50 : Colors.white,
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(
+                                          color: isOccupied ? Colors.red.shade300 : color,
+                                          width: 2,
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withValues(alpha: 0.05),
+                                            blurRadius: 4,
+                                            offset: const Offset(0, 2),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                            decoration: BoxDecoration(
+                                              color: isOccupied ? Colors.red.shade600 : Colors.green.shade600,
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                              Icon(isOccupied ? Icons.merge_type : Icons.check_circle_outline,
+                                                  size: 12, color: Colors.white),
+                                              const SizedBox(width: 4),
+                                              Text(
+                                                isOccupied ? 'BİRLEŞTİR' : 'BOŞ',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.w800,
+                                                  letterSpacing: 0.5,
+                                                ),
+                                              ),
+                                            ]),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Text(
+                                            '${table['table_number']}',
+                                            style: TextStyle(
+                                              fontSize: 36,
+                                              fontWeight: FontWeight.w900,
+                                              color: isOccupied ? Colors.red.shade900 : Colors.grey.shade800,
+                                              height: 1,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                                            child: Text(
+                                              table['section_name']?.toString() ?? '',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: Colors.grey.shade600,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                              textAlign: TextAlign.center,
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        border: Border(top: BorderSide(color: Colors.grey.shade200)),
+                      ),
+                      child: Row(children: [
+                        _legendDot(Colors.green.shade600, 'BOŞ (transfer)'),
+                        const SizedBox(width: 16),
+                        _legendDot(Colors.red.shade600, 'DOLU (birleştir)'),
+                        const Spacer(),
+                        SizedBox(
+                          height: 44,
+                          child: ElevatedButton.icon(
+                            onPressed: () => Navigator.pop(ctx),
+                            icon: const Icon(Icons.close),
+                            label: const Text('İptal', style: TextStyle(fontSize: 15)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.grey.shade200,
+                              foregroundColor: Colors.black87,
+                              padding: const EdgeInsets.symmetric(horizontal: 22),
+                            ),
+                          ),
+                        ),
+                      ]),
+                    ),
+                  ],
                 ),
               ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Iptal'),
-          ),
-        ],
-      ),
+            );
+          },
+        );
+      },
     );
 
     if (selectedTable == null) return;
 
-    // Masa değiştir
+    // Dolu masa secildi → birlestirme onayi
+    final isMerge = selectedTable['status'] == 'occupied';
+    if (isMerge && mounted) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Row(children: [
+            Icon(Icons.merge_type, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('Adisyon Birleştir', style: TextStyle(fontSize: 20)),
+          ]),
+          content: Text(
+            'Mevcut adisyondaki ürünler "Masa ${selectedTable['table_number']}" adisyonuna aktarılacak. '
+            'İki adisyon birleşip TEK adisyon haline gelecek. Devam edilsin mi?',
+            style: const TextStyle(fontSize: 14),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('İptal')),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
+              child: const Text('Evet, Birleştir'),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
     try {
       final ticketId = _safeInt(_ticket!['id']);
       final newTableId = _safeInt(selectedTable['id']);
@@ -952,11 +1185,74 @@ class _TicketModalState extends State<TicketModal> {
         waiterId: _waiterId,
       );
 
-      _showSuccess('Masa degistirildi: ${selectedTable['section_name']} - Masa ${selectedTable['table_number']}');
+      _showSuccess(isMerge
+          ? 'Adisyonlar birleştirildi: ${selectedTable['section_name']} - Masa ${selectedTable['table_number']}'
+          : 'Masa degistirildi: ${selectedTable['section_name']} - Masa ${selectedTable['table_number']}');
       widget.onClose();
     } catch (e) {
       _showError('Masa degistirilemedi: $e');
     }
+  }
+
+  Widget _sectionChip({
+    required String label,
+    required int count,
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          decoration: BoxDecoration(
+            color: selected ? color : Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: selected ? color : Colors.grey.shade300, width: 2),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : Colors.grey.shade700,
+                fontWeight: FontWeight.w700,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: selected ? Colors.white.withValues(alpha: 0.22) : Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '$count',
+                style: TextStyle(
+                  color: selected ? Colors.white : Colors.grey.shade600,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+        width: 12, height: 12,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+      const SizedBox(width: 6),
+      Text(label, style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+    ]);
   }
 
   double get _calculatedDiscount {

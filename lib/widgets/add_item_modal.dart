@@ -424,6 +424,11 @@ class _AddItemModalState extends State<AddItemModal> {
       final name = displayName;
 
       final tempId = -DateTime.now().millisecondsSinceEpoch;
+      // Optimistic add — product cache'inden skip_pos_print kopyala ki badge YAZDIRILMADI cikmasin
+      final skipPosPrint = product['skip_pos_print'] == true
+          || product['skip_pos_print'] == 1
+          || product['skip_pos_print'] == '1'
+          || product['skip_pos_print'] == 'true';
       setState(() {
         _ticketItems.add({
           'id': tempId,
@@ -435,6 +440,7 @@ class _AddItemModalState extends State<AddItemModal> {
           'printed': 0,
           'notes': null,
           'extras': [],
+          'skip_pos_print': skipPosPrint,
         });
       });
 
@@ -956,6 +962,21 @@ class _AddItemModalState extends State<AddItemModal> {
       ticketInfo['table_number'] = widget.table?['table_number'] ?? 'Masa ${widget.table?['id'] ?? ''}';
       ticketInfo['section_name'] = widget.table?['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter?['name'] ?? '';
+
+      // 21 May 2026: Yazıcı atanmamış ürünler için uyarı (backend response).
+      // Backend printKitchen artık unassigned_items: [{id, product_name}] döner —
+      // yönetici ürün ayarlarından düzeltir, garson görsel uyarı alır (4 sn turuncu snackbar).
+      final unassigned = result['unassigned_items'] as List? ?? [];
+      if (unassigned.isNotEmpty && mounted) {
+        final names = unassigned.map((u) => u is Map ? (u['product_name'] ?? '?') : '?').join(', ');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('⚠ ${unassigned.length} ürün yazıcısız basılmadı: $names'),
+            backgroundColor: Colors.orange.shade700,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
 
       if (items.isEmpty) {
         _showSuccess('Yazdırılacak yeni ürün yok');
@@ -1776,119 +1797,276 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
-      // Bos masalar once, dolu masalar altta (gorsel ayrim)
+      // Numerik sırayla (Masa 1, 2, 3 ... 10, 11)
+      int tableNumKey(dynamic t) {
+        final raw = t['table_number']?.toString() ?? '';
+        return int.tryParse(raw.replaceAll(RegExp(r'[^0-9]'), '')) ?? 999999;
+      }
       candidateTables.sort((a, b) {
-        final aOccupied = a['status'] == 'occupied' ? 1 : 0;
-        final bOccupied = b['status'] == 'occupied' ? 1 : 0;
-        if (aOccupied != bOccupied) return aOccupied - bOccupied;
         final aSec = (a['section_name'] ?? '').toString();
         final bSec = (b['section_name'] ?? '').toString();
         if (aSec != bSec) return aSec.compareTo(bSec);
-        return (a['table_number'] ?? 0).toString().compareTo((b['table_number'] ?? 0).toString());
+        return tableNumKey(a).compareTo(tableNumKey(b));
       });
+
+      // Salon listesi (TÜMÜ + her unique section)
+      final sectionMap = <int, Map<String, dynamic>>{};
+      for (final t in candidateTables) {
+        final sid = (t['section_id'] as num?)?.toInt();
+        if (sid == null) continue;
+        sectionMap.putIfAbsent(sid, () => {
+          'id': sid,
+          'name': t['section_name'] ?? '',
+          'color': t['section_color'] ?? '#3b82f6',
+        });
+      }
+      final sections = sectionMap.values.toList()
+        ..sort((a, b) => a['name'].toString().compareTo(b['name'].toString()));
 
       final selectedTable = await showDialog<Map<String, dynamic>>(
         context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Masa Değiştir / Birleştir', style: TextStyle(fontSize: 22)),
-          content: SizedBox(
-            width: 460,
-            height: 460,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Mevcut: ${widget.table?['section_name'] ?? ''} - Masa ${widget.table?['table_number'] ?? ''}',
-                    style: TextStyle(color: Colors.grey[600], fontSize: 14)),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.amber.shade50,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.amber.shade200),
-                  ),
-                  child: const Text(
-                    'Dolu masaya transfer ederseniz iki adisyon BİRLEŞTİRİLİR (ürünler tek adisyonda toplanır).',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF78350F)),
+        barrierDismissible: true,
+        builder: (ctx) {
+          int? selectedSectionId; // null = TÜMÜ
+          return StatefulBuilder(
+            builder: (ctx, setDialogState) {
+              final filtered = selectedSectionId == null
+                  ? candidateTables
+                  : candidateTables.where((t) => (t['section_id'] as num?)?.toInt() == selectedSectionId).toList();
+
+              return Dialog(
+                insetPadding: const EdgeInsets.all(24),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1100, maxHeight: 780),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // HEADER
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(24, 18, 16, 18),
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Color(0xFF0EA5E9), Color(0xFF0284C7)],
+                            begin: Alignment.topLeft, end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                        ),
+                        child: Row(children: [
+                          const Icon(Icons.swap_horiz, color: Colors.white, size: 28),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text('Masa Değiştir / Birleştir',
+                                    style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700)),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Mevcut: ${widget.table?['section_name'] ?? ''} • Masa ${widget.table?['table_number'] ?? ''}',
+                                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            icon: const Icon(Icons.close, color: Colors.white, size: 26),
+                          ),
+                        ]),
+                      ),
+                      // BİLGİ BANDI
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+                        color: Colors.amber.shade50,
+                        child: Row(children: [
+                          Icon(Icons.info_outline, size: 18, color: Colors.amber.shade800),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Dolu masaya transfer ederseniz iki adisyon BİRLEŞTİRİLİR (ürünler tek adisyonda toplanır).',
+                              style: TextStyle(fontSize: 13, color: Color(0xFF78350F)),
+                            ),
+                          ),
+                        ]),
+                      ),
+                      // SALON FİLTRE
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        decoration: BoxDecoration(
+                          border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+                        ),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(children: [
+                            // TÜMÜ chip
+                            _sectionChip(
+                              label: 'TÜMÜ',
+                              count: candidateTables.length,
+                              color: const Color(0xFF6B7280),
+                              selected: selectedSectionId == null,
+                              onTap: () => setDialogState(() => selectedSectionId = null),
+                            ),
+                            const SizedBox(width: 10),
+                            ...sections.map((s) {
+                              final sid = s['id'] as int;
+                              final secCount = candidateTables
+                                  .where((t) => (t['section_id'] as num?)?.toInt() == sid).length;
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 10),
+                                child: _sectionChip(
+                                  label: s['name'].toString(),
+                                  count: secCount,
+                                  color: Color(int.parse((s['color'] as String).replaceAll('#', '0xFF'))),
+                                  selected: selectedSectionId == sid,
+                                  onTap: () => setDialogState(() => selectedSectionId = sid),
+                                ),
+                              );
+                            }),
+                          ]),
+                        ),
+                      ),
+                      // MASA GRID
+                      Expanded(
+                        child: filtered.isEmpty
+                            ? Center(
+                                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                  Icon(Icons.table_restaurant, size: 64, color: Colors.grey.shade300),
+                                  const SizedBox(height: 12),
+                                  Text('Bu salonda hedef masa yok',
+                                      style: TextStyle(color: Colors.grey.shade500, fontSize: 16)),
+                                ]),
+                              )
+                            : GridView.builder(
+                                padding: const EdgeInsets.all(16),
+                                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: 160,
+                                  mainAxisSpacing: 12,
+                                  crossAxisSpacing: 12,
+                                  childAspectRatio: 1.0,
+                                ),
+                                itemCount: filtered.length,
+                                itemBuilder: (context, index) {
+                                  final table = filtered[index];
+                                  final isOccupied = table['status'] == 'occupied';
+                                  final color = Color(int.parse(
+                                      (table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')));
+                                  return Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(12),
+                                      onTap: () => Navigator.pop(ctx, table),
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color: isOccupied ? Colors.red.shade50 : Colors.white,
+                                          borderRadius: BorderRadius.circular(12),
+                                          border: Border.all(
+                                            color: isOccupied ? Colors.red.shade300 : color,
+                                            width: 2,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.05),
+                                              blurRadius: 4,
+                                              offset: const Offset(0, 2),
+                                            ),
+                                          ],
+                                        ),
+                                        child: Column(
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            // Üst durum şeridi
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                              decoration: BoxDecoration(
+                                                color: isOccupied ? Colors.red.shade600 : Colors.green.shade600,
+                                                borderRadius: BorderRadius.circular(4),
+                                              ),
+                                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                                Icon(isOccupied ? Icons.merge_type : Icons.check_circle_outline,
+                                                    size: 12, color: Colors.white),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  isOccupied ? 'BİRLEŞTİR' : 'BOŞ',
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w800,
+                                                    letterSpacing: 0.5,
+                                                  ),
+                                                ),
+                                              ]),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            // Masa numarası (büyük)
+                                            Text(
+                                              '${table['table_number']}',
+                                              style: TextStyle(
+                                                fontSize: 36,
+                                                fontWeight: FontWeight.w900,
+                                                color: isOccupied ? Colors.red.shade900 : Colors.grey.shade800,
+                                                height: 1,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 6),
+                                            // Salon adı
+                                            Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                                              child: Text(
+                                                table['section_name']?.toString() ?? '',
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  color: Colors.grey.shade600,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                textAlign: TextAlign.center,
+                                                overflow: TextOverflow.ellipsis,
+                                                maxLines: 1,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                      // FOOTER
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        decoration: BoxDecoration(
+                          border: Border(top: BorderSide(color: Colors.grey.shade200)),
+                        ),
+                        child: Row(children: [
+                          _legendDot(Colors.green.shade600, 'BOŞ (transfer)'),
+                          const SizedBox(width: 16),
+                          _legendDot(Colors.red.shade600, 'DOLU (birleştir)'),
+                          const Spacer(),
+                          SizedBox(
+                            height: 44,
+                            child: ElevatedButton.icon(
+                              onPressed: () => Navigator.pop(ctx),
+                              icon: const Icon(Icons.close),
+                              label: const Text('İptal', style: TextStyle(fontSize: 15)),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.grey.shade200,
+                                foregroundColor: Colors.black87,
+                                padding: const EdgeInsets.symmetric(horizontal: 22),
+                              ),
+                            ),
+                          ),
+                        ]),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 12),
-                const Text('Hedef masa seçin:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: candidateTables.length,
-                    itemBuilder: (context, index) {
-                      final table = candidateTables[index];
-                      final isOccupied = table['status'] == 'occupied';
-                      final color = Color(int.parse((table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')));
-                      return ListTile(
-                        contentPadding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                        leading: Stack(
-                          children: [
-                            CircleAvatar(
-                              radius: 22,
-                              backgroundColor: isOccupied ? Colors.red.shade100 : color,
-                              child: Text('${table['table_number']}',
-                                  style: TextStyle(
-                                    color: isOccupied ? Colors.red.shade900 : Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                  )),
-                            ),
-                            if (isOccupied)
-                              Positioned(
-                                right: 0, top: 0,
-                                child: Container(
-                                  padding: const EdgeInsets.all(2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.red,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.white, width: 1.5),
-                                  ),
-                                  child: const Icon(Icons.merge_type, size: 10, color: Colors.white),
-                                ),
-                              ),
-                          ],
-                        ),
-                        title: Row(
-                          children: [
-                            Text('Masa ${table['table_number']}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: isOccupied ? Colors.red.shade50 : Colors.green.shade50,
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: isOccupied ? Colors.red.shade300 : Colors.green.shade300),
-                              ),
-                              child: Text(
-                                isOccupied ? 'DOLU (Birleştir)' : 'BOŞ',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
-                                  color: isOccupied ? Colors.red.shade700 : Colors.green.shade700,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        subtitle: Text(table['section_name'] ?? '', style: const TextStyle(fontSize: 13)),
-                        onTap: () => Navigator.pop(ctx, table),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            SizedBox(width: 150, height: 50, child: ElevatedButton(
-              onPressed: () => Navigator.pop(ctx),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87),
-              child: const Text('İptal', style: TextStyle(fontSize: 16)),
-            )),
-          ],
-        ),
+              );
+            },
+          );
+        },
       );
 
       if (selectedTable == null) return;
@@ -2670,6 +2848,10 @@ class _AddItemModalState extends State<AddItemModal> {
     final addedTime = _formatItemTime(item['created_at']);
     // 19 May 2026: Mutfak'a yazdirilmis mi? Backend'den printed=1 veya true geliyor.
     final isPrinted = item['printed'] == 1 || item['printed'] == true;
+    // 21 May 2026: skip_pos_print=true ürünlerde badge gösterilmez (içecek/su gibi
+    // restoran yazıcısına gönderilmeyen, garson elden getiren ürünler).
+    final skipRaw = item['skip_pos_print'];
+    final isSkipPrint = skipRaw == true || skipRaw == 1 || skipRaw == '1' || skipRaw == 'true' || skipRaw == 't';
 
     return GestureDetector(
       onTap: () {
@@ -2769,33 +2951,34 @@ class _AddItemModalState extends State<AddItemModal> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: isPrinted ? const Color(0xFF059669) : const Color(0xFFDC2626),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        isPrinted ? Icons.check_circle : Icons.error_outline,
-                        size: 10,
-                        color: Colors.white,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        isPrinted ? 'YAZDIRILDI' : 'YAZDIRILMADI',
-                        style: const TextStyle(
+                if (!isSkipPrint)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isPrinted ? const Color(0xFF059669) : const Color(0xFFDC2626),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isPrinted ? Icons.check_circle : Icons.error_outline,
+                          size: 10,
                           color: Colors.white,
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 0.3,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 3),
+                        Text(
+                          isPrinted ? 'YAZDIRILDI' : 'YAZDIRILMADI',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
               ],
             ),
           ],
@@ -3081,6 +3264,67 @@ class _AddItemModalState extends State<AddItemModal> {
     } catch (_) {
       return '';
     }
+  }
+
+  Widget _sectionChip({
+    required String label,
+    required int count,
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+          decoration: BoxDecoration(
+            color: selected ? color : Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: selected ? color : Colors.grey.shade300, width: 2),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : Colors.grey.shade700,
+                fontWeight: FontWeight.w700,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: selected ? Colors.white.withValues(alpha: 0.22) : Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '$count',
+                style: TextStyle(
+                  color: selected ? Colors.white : Colors.grey.shade600,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+        width: 12, height: 12,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+      const SizedBox(width: 6),
+      Text(label, style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+    ]);
   }
 }
 

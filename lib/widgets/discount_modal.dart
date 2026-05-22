@@ -198,10 +198,12 @@ class _DiscountModalState extends State<DiscountModal> {
                     child: InkWell(
                       onTap: () => _applyQuickPercentage(p),
                       borderRadius: BorderRadius.circular(8),
+                      // 22 May 2026: Dokunmatik POS — min tap area 52
                       child: Container(
+                        constraints: const BoxConstraints(minHeight: 52, minWidth: 64),
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
+                          horizontal: 18,
+                          vertical: 14,
                         ),
                         decoration: BoxDecoration(
                           color: isSelected

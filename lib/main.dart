@@ -389,8 +389,41 @@ class SyncRestoPosApp extends StatelessWidget {
             ),
             useMaterial3: true,
             fontFamily: 'Roboto',
-            splashFactory: NoSplash.splashFactory,
+            // 22 May 2026: Dokunmatik POS feedback iyilestirmesi.
+            // Eskiden NoSplash idi — kullanici tikladigini anlayamiyordu, tekrar
+            // basiyor ya da kaciriyordu. InkSparkle hem daha hizli hem daha
+            // belirgin ripple verir.
+            splashFactory: InkSparkle.splashFactory,
             materialTapTargetSize: MaterialTapTargetSize.padded,
+            // Tum ElevatedButton'lara min boy + bold yazi (POS standardi)
+            elevatedButtonTheme: ElevatedButtonThemeData(
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(88, 56),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+            textButtonTheme: TextButtonThemeData(
+              style: TextButton.styleFrom(
+                minimumSize: const Size(88, 52),
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              ),
+            ),
+            outlinedButtonTheme: OutlinedButtonThemeData(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(88, 52),
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+              ),
+            ),
+            // IconButton'larin tap area'sini buyut
+            iconButtonTheme: IconButtonThemeData(
+              style: IconButton.styleFrom(
+                minimumSize: const Size(52, 52),
+                padding: const EdgeInsets.all(12),
+              ),
+            ),
           ),
           home: storageService.getApiKey() != null
               ? InitialSyncScreen(

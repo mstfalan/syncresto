@@ -1362,23 +1362,32 @@ class _TicketModalState extends State<TicketModal> {
     final theme = Provider.of<ThemeProvider>(context, listen: false);
 
     Widget buildCountButton(int count) {
+      // 22 May 2026: Dokunmatik POS — GestureDetector → Material+InkWell (ripple)
       return Expanded(
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () {
-            setState(() => _customerCount = count);
-            if (_hasPermission('open_ticket')) _openTicket();
-          },
-          child: Container(
-            height: 80,
-            margin: const EdgeInsets.all(4),
-            decoration: BoxDecoration(
-              color: Colors.white,
+        child: Container(
+          height: 80,
+          margin: const EdgeInsets.all(4),
+          child: Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            elevation: 1,
+            child: InkWell(
+              onTap: () {
+                setState(() => _customerCount = count);
+                if (_hasPermission('open_ticket')) _openTicket();
+              },
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: Colors.grey[300]!, width: 2),
-            ),
-            child: Center(
-              child: Text('$count', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+              splashColor: theme.primaryColor.withOpacity(0.25),
+              highlightColor: theme.primaryColor.withOpacity(0.12),
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Colors.grey[300]!, width: 2),
+                ),
+                child: Center(
+                  child: Text('$count', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Color(0xFF1F2937))),
+                ),
+              ),
             ),
           ),
         ),
@@ -1447,27 +1456,31 @@ class _TicketModalState extends State<TicketModal> {
           ],
 
           // Büyük "Ürün Ekle / Adisyon Yönet" butonu
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _openAddItemScreen,
-            child: Container(
-              width: 400,
-              height: 80,
-              decoration: BoxDecoration(
-                color: theme.primaryColor,
+          // 22 May 2026: GestureDetector → Material+InkWell (ripple)
+          SizedBox(
+            width: 400,
+            height: 80,
+            child: Material(
+              color: theme.primaryColor,
+              borderRadius: BorderRadius.circular(16),
+              elevation: 6,
+              shadowColor: theme.primaryColor.withOpacity(0.4),
+              child: InkWell(
+                onTap: _openAddItemScreen,
                 borderRadius: BorderRadius.circular(16),
-                boxShadow: [BoxShadow(color: theme.primaryColor.withOpacity(0.3), blurRadius: 12, offset: const Offset(0, 4))],
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(activeItems.isEmpty ? Icons.add_circle : Icons.restaurant_menu, color: Colors.white, size: 32),
-                  const SizedBox(width: 12),
-                  Text(
-                    activeItems.isEmpty ? 'Urun Ekle' : 'Adisyon Yonet',
-                    style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                  ),
-                ],
+                splashColor: Colors.white.withOpacity(0.35),
+                highlightColor: Colors.white.withOpacity(0.18),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(activeItems.isEmpty ? Icons.add_circle : Icons.restaurant_menu, color: Colors.white, size: 32),
+                    const SizedBox(width: 12),
+                    Text(
+                      activeItems.isEmpty ? 'Urun Ekle' : 'Adisyon Yonet',
+                      style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

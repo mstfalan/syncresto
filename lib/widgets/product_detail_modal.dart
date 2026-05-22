@@ -464,8 +464,10 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
+        // 22 May 2026: Dokunmatik POS — min 52 tap target
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          constraints: const BoxConstraints(minHeight: 52),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
             color: isSelected ? themeColor : Colors.grey[100],
             borderRadius: BorderRadius.circular(8),
@@ -655,17 +657,22 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
     required IconData icon,
     required VoidCallback onTap,
   }) {
+    // 22 May 2026: Dokunmatik POS — 48→56 buton boyu, ripple feedback artirildi
+    final themeColor = Provider.of<ThemeProvider>(context, listen: false).primaryColor;
     return Material(
-      color: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
-      borderRadius: BorderRadius.circular(8),
+      color: themeColor,
+      borderRadius: BorderRadius.circular(10),
+      elevation: 1.5,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(10),
+        splashColor: Colors.white.withOpacity(0.4),
+        highlightColor: Colors.white.withOpacity(0.18),
         child: Container(
-          width: 48,
-          height: 48,
+          width: 56,
+          height: 56,
           alignment: Alignment.center,
-          child: Icon(icon, color: Colors.white, size: 24),
+          child: Icon(icon, color: Colors.white, size: 28),
         ),
       ),
     );

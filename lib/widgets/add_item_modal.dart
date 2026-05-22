@@ -604,23 +604,30 @@ class _AddItemModalState extends State<AddItemModal> {
               final name = item[nameKey]?.toString() ?? '';
               final price = _safeDouble(item['price']);
               final isSelected = selectedIds.contains(id);
-              return GestureDetector(
-                onTap: () {
-                  setState(() {
-                    if (isSelected) { selectedIds.remove(id); } else { selectedIds.add(id); }
-                    rebuildNote(setState);
-                  });
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: isSelected ? theme.primaryColor : Colors.grey[100],
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: isSelected ? theme.primaryColor : Colors.grey[300]!, width: isSelected ? 2 : 1),
-                  ),
-                  child: Text(
-                    price > 0 ? '$name +${price.toStringAsFixed(0)}₺' : name,
-                    style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontSize: 15, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+              // 22 May 2026: Dokunmatik POS — InkWell + min 52
+              return Material(
+                color: isSelected ? theme.primaryColor : Colors.grey[100],
+                borderRadius: BorderRadius.circular(10),
+                child: InkWell(
+                  onTap: () {
+                    setState(() {
+                      if (isSelected) { selectedIds.remove(id); } else { selectedIds.add(id); }
+                      rebuildNote(setState);
+                    });
+                  },
+                  borderRadius: BorderRadius.circular(10),
+                  splashColor: theme.primaryColor.withOpacity(0.3),
+                  child: Container(
+                    constraints: const BoxConstraints(minHeight: 52),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: isSelected ? theme.primaryColor : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                    ),
+                    child: Text(
+                      price > 0 ? '$name +${price.toStringAsFixed(0)}₺' : name,
+                      style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontSize: 15, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal),
+                    ),
                   ),
                 ),
               );
@@ -688,21 +695,28 @@ class _AddItemModalState extends State<AddItemModal> {
                                 children: predefinedNotes.map<Widget>((n) {
                                   final noteText = n['note']?.toString() ?? '';
                                   final isSelected = selectedNotes.contains(noteText);
-                                  return GestureDetector(
-                                    onTap: () {
-                                      setDialogState(() {
-                                        if (isSelected) { selectedNotes.remove(noteText); } else { selectedNotes.add(noteText); }
-                                        rebuildNote(setDialogState);
-                                      });
-                                    },
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                                      decoration: BoxDecoration(
-                                        color: isSelected ? theme.primaryColor : Colors.grey[100],
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(color: isSelected ? theme.primaryColor : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                  // 22 May 2026: Dokunmatik POS — InkWell + min 52
+                                  return Material(
+                                    color: isSelected ? theme.primaryColor : Colors.grey[100],
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: InkWell(
+                                      onTap: () {
+                                        setDialogState(() {
+                                          if (isSelected) { selectedNotes.remove(noteText); } else { selectedNotes.add(noteText); }
+                                          rebuildNote(setDialogState);
+                                        });
+                                      },
+                                      borderRadius: BorderRadius.circular(10),
+                                      splashColor: theme.primaryColor.withOpacity(0.3),
+                                      child: Container(
+                                        constraints: const BoxConstraints(minHeight: 52),
+                                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(10),
+                                          border: Border.all(color: isSelected ? theme.primaryColor : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                        ),
+                                        child: Text(noteText, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontSize: 15, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
                                       ),
-                                      child: Text(noteText, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontSize: 15, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
                                     ),
                                   );
                                 }).toList(),
@@ -774,18 +788,25 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildNoteTab(String label, int index, int activeTab, ThemeProvider theme, void Function(int) onTap) {
+    // 22 May 2026: Dokunmatik POS — Material+InkWell (ripple)
     final isActive = activeTab == index;
     return Expanded(
-      child: GestureDetector(
-        onTap: () => onTap(index),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            color: isActive ? theme.primaryColor : Colors.grey[100],
-            borderRadius: BorderRadius.circular(10),
-            border: isActive ? null : Border.all(color: Colors.grey[300]!),
+      child: Material(
+        color: isActive ? theme.primaryColor : Colors.grey[100],
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: () => onTap(index),
+          borderRadius: BorderRadius.circular(10),
+          splashColor: theme.primaryColor.withOpacity(0.25),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 52),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              border: isActive ? null : Border.all(color: Colors.grey[300]!),
+            ),
+            child: Center(child: Text(label, style: TextStyle(color: isActive ? Colors.white : Colors.grey[700], fontSize: 14, fontWeight: FontWeight.w600))),
           ),
-          child: Center(child: Text(label, style: TextStyle(color: isActive ? Colors.white : Colors.grey[700], fontSize: 14, fontWeight: FontWeight.w600))),
         ),
       ),
     );
@@ -845,16 +866,23 @@ class _AddItemModalState extends State<AddItemModal> {
                             children: reasons.map<Widget>((r) {
                               final reason = r['reason']?.toString() ?? '';
                               final isSelected = picked == reason;
-                              return GestureDetector(
-                                onTap: () => setDialogState(() => picked = reason),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? Colors.red : Colors.grey[100],
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: isSelected ? Colors.red : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                              // 22 May 2026: Dokunmatik POS — InkWell + min 48
+                              return Material(
+                                color: isSelected ? Colors.red : Colors.grey[100],
+                                borderRadius: BorderRadius.circular(8),
+                                child: InkWell(
+                                  onTap: () => setDialogState(() => picked = reason),
+                                  borderRadius: BorderRadius.circular(8),
+                                  splashColor: Colors.red.withOpacity(0.3),
+                                  child: Container(
+                                    constraints: const BoxConstraints(minHeight: 48),
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: isSelected ? Colors.red : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                    ),
+                                    child: Text(reason, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
                                   ),
-                                  child: Text(reason, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
                                 ),
                               );
                             }).toList(),
@@ -867,16 +895,16 @@ class _AddItemModalState extends State<AddItemModal> {
                         children: [
                           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Vazgeç')),
                           const SizedBox(width: 8),
-                          GestureDetector(
-                            onTap: picked != null ? () => Navigator.pop(ctx, picked) : null,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                              decoration: BoxDecoration(
-                                color: picked != null ? Colors.red : Colors.grey[300],
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text('İptal Et', style: TextStyle(color: picked != null ? Colors.white : Colors.grey[500], fontWeight: FontWeight.bold)),
+                          // 22 May 2026: Dokunmatik POS — GestureDetector → ElevatedButton (tema'dan otomatik 56 yukseklik + ripple)
+                          ElevatedButton(
+                            onPressed: picked != null ? () => Navigator.pop(ctx, picked) : null,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red,
+                              foregroundColor: Colors.white,
+                              disabledBackgroundColor: Colors.grey[300],
+                              disabledForegroundColor: Colors.grey[500],
                             ),
+                            child: const Text('İptal Et', style: TextStyle(fontWeight: FontWeight.bold)),
                           ),
                         ],
                       ),
@@ -1571,16 +1599,23 @@ class _AddItemModalState extends State<AddItemModal> {
                               children: reasons.map<Widget>((r) {
                                 final reason = r['reason']?.toString() ?? '';
                                 final isSelected = picked == reason;
-                                return GestureDetector(
-                                  onTap: () => setDialogState(() => picked = reason),
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                    decoration: BoxDecoration(
-                                      color: isSelected ? Colors.red : Colors.grey[100],
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(color: isSelected ? Colors.red : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                // 22 May 2026: Dokunmatik POS — InkWell + min 48
+                                return Material(
+                                  color: isSelected ? Colors.red : Colors.grey[100],
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: InkWell(
+                                    onTap: () => setDialogState(() => picked = reason),
+                                    borderRadius: BorderRadius.circular(8),
+                                    splashColor: Colors.red.withOpacity(0.3),
+                                    child: Container(
+                                      constraints: const BoxConstraints(minHeight: 48),
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: isSelected ? Colors.red : Colors.grey[300]!, width: isSelected ? 2 : 1),
+                                      ),
+                                      child: Text(reason, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
                                     ),
-                                    child: Text(reason, style: TextStyle(color: isSelected ? Colors.white : Colors.grey[800], fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
                                   ),
                                 );
                               }).toList(),
@@ -2137,30 +2172,37 @@ class _AddItemModalState extends State<AddItemModal> {
               children: [
                 Row(
                   children: [
+                    // 22 May 2026: Dokunmatik POS — InkWell + min 56
                     Expanded(
-                      child: GestureDetector(
-                        onTap: () => setDialogState(() => localType = 'percentage'),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(
-                            color: localType == 'percentage' ? const Color(0xFFE11D48) : Colors.grey[200],
-                            borderRadius: BorderRadius.circular(8),
+                      child: Material(
+                        color: localType == 'percentage' ? const Color(0xFFE11D48) : Colors.grey[200],
+                        borderRadius: BorderRadius.circular(8),
+                        child: InkWell(
+                          onTap: () => setDialogState(() => localType = 'percentage'),
+                          borderRadius: BorderRadius.circular(8),
+                          splashColor: Colors.white.withOpacity(0.3),
+                          child: Container(
+                            constraints: const BoxConstraints(minHeight: 56),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            child: Center(child: Text('% Yüzde', style: TextStyle(color: localType == 'percentage' ? Colors.white : Colors.black87, fontSize: 16, fontWeight: FontWeight.bold))),
                           ),
-                          child: Center(child: Text('% Yüzde', style: TextStyle(color: localType == 'percentage' ? Colors.white : Colors.black87, fontSize: 16, fontWeight: FontWeight.bold))),
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: GestureDetector(
-                        onTap: () => setDialogState(() => localType = 'amount'),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(
-                            color: localType == 'amount' ? const Color(0xFFE11D48) : Colors.grey[200],
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                      child: Material(
+                        color: localType == 'amount' ? const Color(0xFFE11D48) : Colors.grey[200],
+                        borderRadius: BorderRadius.circular(8),
+                        child: InkWell(
+                          onTap: () => setDialogState(() => localType = 'amount'),
+                          borderRadius: BorderRadius.circular(8),
+                          splashColor: Colors.white.withOpacity(0.3),
+                          child: Container(
+                            constraints: const BoxConstraints(minHeight: 56),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
                           child: Center(child: Text('₺ Tutar', style: TextStyle(color: localType == 'amount' ? Colors.white : Colors.black87, fontSize: 16, fontWeight: FontWeight.bold))),
+                          ),
                         ),
                       ),
                     ),
@@ -2457,45 +2499,51 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildCategoryButton(ThemeProvider theme, int? categoryId, String label, IconData? icon, {String emoji = ''}) {
+    // 22 May 2026: Dokunmatik POS — InkWell ile ripple + min 64 yukseklik
     final isSelected = _selectedCategoryId == categoryId;
-
-    return GestureDetector(
-      onTap: () => _selectCategory(categoryId),
-      child: Container(
-        decoration: BoxDecoration(
-          color: isSelected ? theme.primaryColor : Colors.white,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: isSelected ? theme.primaryColor : Colors.grey[300]!,
-            width: isSelected ? 2 : 1,
+    return Material(
+      color: isSelected ? theme.primaryColor : Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      elevation: isSelected ? 2 : 0.5,
+      shadowColor: isSelected ? theme.primaryColor.withOpacity(0.4) : Colors.black26,
+      child: InkWell(
+        onTap: () => _selectCategory(categoryId),
+        borderRadius: BorderRadius.circular(8),
+        splashColor: theme.primaryColor.withOpacity(0.3),
+        highlightColor: theme.primaryColor.withOpacity(0.15),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 64),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: isSelected ? theme.primaryColor : Colors.grey[300]!,
+              width: isSelected ? 2 : 1,
+            ),
           ),
-          boxShadow: isSelected
-              ? [BoxShadow(color: theme.primaryColor.withOpacity(0.3), blurRadius: 6, offset: const Offset(0, 2))]
-              : [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 2, offset: const Offset(0, 1))],
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (emoji.isNotEmpty)
-              Text(emoji, style: const TextStyle(fontSize: 20))
-            else if (icon != null)
-              Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 20),
-            const SizedBox(height: 2),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Text(
-                label,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: isSelected ? Colors.white : Colors.grey[800],
-                  fontSize: 11,
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (emoji.isNotEmpty)
+                Text(emoji, style: const TextStyle(fontSize: 22))
+              else if (icon != null)
+                Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 22),
+              const SizedBox(height: 3),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isSelected ? Colors.white : Colors.grey[800],
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -2541,18 +2589,24 @@ class _AddItemModalState extends State<AddItemModal> {
 
     return Opacity(
       opacity: isOutOfStock ? 0.5 : 1.0,
-      child: GestureDetector(
-        onTap: isOutOfStock ? null : () => _addProductDirectly(product),
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: Colors.grey[200]!),
-            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 4, offset: const Offset(0, 2))],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        elevation: 1.5,
+        shadowColor: Colors.black26,
+        child: InkWell(
+          onTap: isOutOfStock ? null : () => _addProductDirectly(product),
+          borderRadius: BorderRadius.circular(10),
+          splashColor: theme.primaryColor.withOpacity(0.2),
+          highlightColor: theme.primaryColor.withOpacity(0.08),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.grey[200]!),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
               // Gorsel sadece varsa goster, yoksa hic yer kaplamasin
               if (widget.showProductImages && hasImage)
                 Expanded(
@@ -2597,7 +2651,8 @@ class _AddItemModalState extends State<AddItemModal> {
                     child: Text('Tukendi', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
                   ),
                 ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -2814,23 +2869,50 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildActionBtnVertical({required IconData icon, required String label, required Color color, VoidCallback? onTap}) {
+    // 22 May 2026: Dokunmatik POS icin iyilestirme.
+    // - GestureDetector → InkWell (ripple feedback verir, kullanici tikladigini anlar)
+    // - Min yukseklik 60 (eski ~32) — parmakla daha kolay isabet
+    // - Icon 22 (eski 18), font 11 (eski 9) — okunabilirligi artirir
+    // - Material wrapper ile ink ripple animasyonu calisir
     final isDisabled = onTap == null;
-    return GestureDetector(
-      onTap: isDisabled ? null : onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          color: isDisabled ? Colors.grey[200] : color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: isDisabled ? Colors.grey[300]! : color.withOpacity(0.3)),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, size: 18, color: isDisabled ? Colors.grey[400] : color),
-            const SizedBox(height: 2),
-            Text(label, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: isDisabled ? Colors.grey[400] : color), textAlign: TextAlign.center),
-          ],
+    return Material(
+      color: isDisabled ? Colors.grey[200] : color.withOpacity(0.1),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: isDisabled ? null : onTap,
+        borderRadius: BorderRadius.circular(10),
+        splashColor: isDisabled ? null : color.withOpacity(0.3),
+        highlightColor: isDisabled ? null : color.withOpacity(0.2),
+        child: Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(minHeight: 60),
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isDisabled ? Colors.grey[300]! : color.withOpacity(0.4),
+              width: 1.5,
+            ),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 22, color: isDisabled ? Colors.grey[400] : color),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: isDisabled ? Colors.grey[400] : color,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2853,22 +2935,25 @@ class _AddItemModalState extends State<AddItemModal> {
     final skipRaw = item['skip_pos_print'];
     final isSkipPrint = skipRaw == true || skipRaw == 1 || skipRaw == '1' || skipRaw == 'true' || skipRaw == 't';
 
-    return GestureDetector(
-      onTap: () {
-        final itemId = _safeInt(item['id']);
-        setState(() => _selectedItemId = isSelected ? null : itemId);
-      },
-      child: Container(
-        // Dokunmatik ekran icin 2x - padding + fontSize artirildi
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          color: isPaid
-              ? Colors.green[50]
-              : (isSelected ? theme.primaryColor.withOpacity(0.08) : Colors.transparent),
-          border: Border(
-            bottom: BorderSide(color: Colors.grey[200]!),
-            left: isSelected ? BorderSide(color: theme.primaryColor, width: 4) : BorderSide.none,
-          ),
+    // 22 May 2026: Dokunmatik POS — GestureDetector → InkWell (ripple)
+    return Material(
+      color: isPaid
+          ? Colors.green[50]
+          : (isSelected ? theme.primaryColor.withOpacity(0.08) : Colors.transparent),
+      child: InkWell(
+        onTap: () {
+          final itemId = _safeInt(item['id']);
+          setState(() => _selectedItemId = isSelected ? null : itemId);
+        },
+        splashColor: theme.primaryColor.withOpacity(0.18),
+        highlightColor: theme.primaryColor.withOpacity(0.08),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: Colors.grey[200]!),
+              left: isSelected ? BorderSide(color: theme.primaryColor, width: 4) : BorderSide.none,
+            ),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2982,6 +3067,7 @@ class _AddItemModalState extends State<AddItemModal> {
               ],
             ),
           ],
+        ),
         ),
       ),
     );
@@ -3182,29 +3268,37 @@ class _AddItemModalState extends State<AddItemModal> {
     required Color color,
     VoidCallback? onTap,
   }) {
+    // 22 May 2026: Dokunmatik POS — InkWell + min 64 yukseklik + ripple feedback
     final isDisabled = onTap == null;
-    return GestureDetector(
-      onTap: isDisabled ? null : () => onTap(),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: isDisabled ? Colors.grey[200] : color,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 20),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: isDisabled ? Colors.grey[400] : Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
+    return Material(
+      color: isDisabled ? Colors.grey[200] : color,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: isDisabled ? null : () => onTap(),
+        borderRadius: BorderRadius.circular(10),
+        splashColor: Colors.white.withOpacity(0.35),
+        highlightColor: Colors.white.withOpacity(0.18),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 64),
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 22),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: isDisabled ? Colors.grey[400] : Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -3582,30 +3676,39 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                     const Text('Parçalı Ödeme', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                     const Spacer(),
                     // Tümünü Seç / Seçimi Kaldır
-                    GestureDetector(
-                                onTap: () => _selectedIds.length == unpaidItems.length ? _clearSelection() : _selectAll(),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          _selectedIds.length == unpaidItems.length ? 'Seçimi Kaldır' : 'Tümünü Seç',
-                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                    // 22 May 2026: Dokunmatik POS — InkWell + min 44
+                    Material(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(8),
+                      child: InkWell(
+                        onTap: () => _selectedIds.length == unpaidItems.length ? _clearSelection() : _selectAll(),
+                        borderRadius: BorderRadius.circular(8),
+                        splashColor: Colors.white.withOpacity(0.3),
+                        child: Container(
+                          constraints: const BoxConstraints(minHeight: 44),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          child: Center(
+                            child: Text(
+                              _selectedIds.length == unpaidItems.length ? 'Seçimi Kaldır' : 'Tümünü Seç',
+                              style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600),
+                            ),
+                          ),
                         ),
                       ),
                     ),
                     const SizedBox(width: 8),
-                    GestureDetector(
-                                onTap: () => widget.onClose(),
-                      child: Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(8),
+                    Material(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(8),
+                      child: InkWell(
+                        onTap: () => widget.onClose(),
+                        borderRadius: BorderRadius.circular(8),
+                        splashColor: Colors.white.withOpacity(0.3),
+                        child: Container(
+                          constraints: const BoxConstraints(minHeight: 44, minWidth: 44),
+                          padding: const EdgeInsets.all(10),
+                          child: const Icon(Icons.close, color: Colors.white, size: 22),
                         ),
-                        child: const Icon(Icons.close, color: Colors.white, size: 20),
                       ),
                     ),
                   ],
@@ -3851,22 +3954,32 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     required Color color,
     VoidCallback? onTap,
   }) {
+    // 22 May 2026: Dokunmatik POS — InkWell + min 56
     final isDisabled = onTap == null;
-    return GestureDetector(
-      onTap: isDisabled ? null : () => onTap(),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: isDisabled ? Colors.grey[200] : color,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 16),
-            const SizedBox(width: 6),
-            Text(label, style: TextStyle(color: isDisabled ? Colors.grey[400] : Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-          ],
+    return Material(
+      color: isDisabled ? Colors.grey[200] : color,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: isDisabled ? null : () => onTap(),
+        borderRadius: BorderRadius.circular(8),
+        splashColor: Colors.white.withOpacity(0.35),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 56),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(color: isDisabled ? Colors.grey[400] : Colors.white, fontSize: 14, fontWeight: FontWeight.w700),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

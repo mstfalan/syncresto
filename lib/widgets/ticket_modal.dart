@@ -903,6 +903,12 @@ class _TicketModalState extends State<TicketModal> {
     final sections = sectionMap.values.toList()
       ..sort((a, b) => a['name'].toString().compareTo(b['name'].toString()));
 
+    // 22 May 2026: Tenant tema primary rengi
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    final headerColor = themeProvider.primaryColor;
+    final headerHsl = HSLColor.fromColor(headerColor);
+    final headerDarker = headerHsl.withLightness((headerHsl.lightness - 0.08).clamp(0.0, 1.0)).toColor();
+
     final selectedTable = await showDialog<Map<String, dynamic>>(
       context: context,
       barrierDismissible: true,
@@ -924,12 +930,12 @@ class _TicketModalState extends State<TicketModal> {
                   children: [
                     Container(
                       padding: const EdgeInsets.fromLTRB(24, 18, 16, 18),
-                      decoration: const BoxDecoration(
+                      decoration: BoxDecoration(
                         gradient: LinearGradient(
-                          colors: [Color(0xFF0EA5E9), Color(0xFF0284C7)],
+                          colors: [headerColor, headerDarker],
                           begin: Alignment.topLeft, end: Alignment.bottomRight,
                         ),
-                        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
                       ),
                       child: Row(children: [
                         const Icon(Icons.swap_horiz, color: Colors.white, size: 28),

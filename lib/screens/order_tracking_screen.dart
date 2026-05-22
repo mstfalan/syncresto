@@ -50,9 +50,11 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     super.initState();
     _sortMode = widget.storageService.getOrderTrackingSort();
     _load();
-    // 5 saniye — 2sn cok agresifti, donmaya yol aciyordu
+    // 22 May 2026: 5sn → 2sn agresif refresh (Omer Bey: "Masa transferi sonrasi
+    // takip ekraninda eski masa ile urun kaliyor"). _isFetching guard'i + 1.5sn
+    // user-action window zaten donmayi onluyor.
     _refreshTimer = Timer.periodic(
-      const Duration(seconds: 5),
+      const Duration(seconds: 2),
       (_) => _load(silent: true),
     );
   }

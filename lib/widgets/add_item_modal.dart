@@ -1694,102 +1694,288 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
-      // Boş masalar üstte (taşıma için doğal), dolu olanlar altta
+      // 22 May 2026: Numerik sirali (Masa 1, 2, 3 ... 10, 11) + salon gruplamali
+      int tableNumKey(dynamic t) {
+        final raw = t['table_number']?.toString() ?? '';
+        return int.tryParse(raw.replaceAll(RegExp(r'[^0-9]'), '')) ?? 999999;
+      }
       candidateTables.sort((a, b) {
-        final aOcc = a['status'] == 'occupied' ? 1 : 0;
-        final bOcc = b['status'] == 'occupied' ? 1 : 0;
-        if (aOcc != bOcc) return aOcc - bOcc;
-        return (a['table_number'] ?? 0).toString().compareTo((b['table_number'] ?? 0).toString());
+        final aSec = (a['section_name'] ?? '').toString();
+        final bSec = (b['section_name'] ?? '').toString();
+        if (aSec != bSec) return aSec.compareTo(bSec);
+        return tableNumKey(a).compareTo(tableNumKey(b));
       });
+
+      // Salon listesi (TUMU + her unique section)
+      final sectionMap = <int, Map<String, dynamic>>{};
+      for (final t in candidateTables) {
+        final sid = (t['section_id'] as num?)?.toInt();
+        if (sid == null) continue;
+        sectionMap.putIfAbsent(sid, () => {
+          'id': sid,
+          'name': t['section_name'] ?? '',
+          'color': t['section_color'] ?? '#3b82f6',
+        });
+      }
+      final sections = sectionMap.values.toList()
+        ..sort((a, b) => a['name'].toString().compareTo(b['name'].toString()));
 
       final productName = selectedItem['product_name']?.toString() ?? 'Ürün';
       final qty = _safeInt(selectedItem['quantity']) ?? 1;
+      // 22 May 2026: Urun Tasi — tenant tema secondary rengi (Masa Degistir primary'den ayrilsin)
+      final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+      final headerColor = themeProvider.secondaryColor;
+      final headerHsl = HSLColor.fromColor(headerColor);
+      final headerDarker = headerHsl.withLightness((headerHsl.lightness - 0.08).clamp(0.0, 1.0)).toColor();
+      final bannerBg = headerHsl.withLightness(0.93).toColor();
+      final bannerText = headerHsl.withLightness(0.30).toColor();
 
       final selectedTable = await showDialog<Map<String, dynamic>>(
         context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Ürünü Taşı', style: TextStyle(fontSize: 22)),
-          content: SizedBox(
-            width: 460,
-            height: 460,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF3E8FF),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFD8B4FE)),
-                  ),
-                  child: Row(children: [
-                    const Icon(Icons.drive_file_move, color: Color(0xFF7C3AED)),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text('$qty × $productName', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600))),
-                  ]),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  'Boş masa seçerseniz yeni adisyon açılır. Dolu masa seçerseniz mevcut adisyona eklenir.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[700]),
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: candidateTables.length,
-                    itemBuilder: (context, index) {
-                      final table = candidateTables[index];
-                      final isOccupied = table['status'] == 'occupied';
-                      final color = Color(int.parse((table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')));
-                      return ListTile(
-                        contentPadding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                        leading: CircleAvatar(
-                          radius: 22,
-                          backgroundColor: isOccupied ? Colors.red.shade100 : color,
-                          child: Text('${table['table_number']}',
-                              style: TextStyle(
-                                color: isOccupied ? Colors.red.shade900 : Colors.white,
-                                fontWeight: FontWeight.bold,
-                              )),
+        barrierDismissible: true,
+        builder: (ctx) {
+          int? selectedSectionId; // null = TUMU
+          return StatefulBuilder(
+            builder: (ctx, setDialogState) {
+              final filtered = selectedSectionId == null
+                  ? candidateTables
+                  : candidateTables.where((t) => (t['section_id'] as num?)?.toInt() == selectedSectionId).toList();
+
+              return Dialog(
+                insetPadding: const EdgeInsets.all(24),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1100, maxHeight: 780),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // HEADER (tenant tema secondary — Masa Degistir primary'den ayrilir)
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(24, 18, 16, 18),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [headerColor, headerDarker],
+                            begin: Alignment.topLeft, end: Alignment.bottomRight,
+                          ),
+                          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
                         ),
-                        title: Row(children: [
-                          Text('Masa ${table['table_number']}',
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: isOccupied ? Colors.orange.shade50 : Colors.green.shade50,
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: isOccupied ? Colors.orange.shade300 : Colors.green.shade300),
+                        child: Row(children: [
+                          const Icon(Icons.drive_file_move, color: Colors.white, size: 28),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text('Ürünü Taşı',
+                                    style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700)),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '$qty × $productName',
+                                  style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
                             ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            icon: const Icon(Icons.close, color: Colors.white, size: 26),
+                          ),
+                        ]),
+                      ),
+                      // BILGI BANDI (tema rengi acik tonu)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+                        color: bannerBg,
+                        child: Row(children: [
+                          Icon(Icons.info_outline, size: 18, color: headerColor),
+                          const SizedBox(width: 8),
+                          Expanded(
                             child: Text(
-                              isOccupied ? 'DOLU (Mevcuta ekle)' : 'BOŞ (Yeni adisyon)',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold,
-                                color: isOccupied ? Colors.orange.shade800 : Colors.green.shade700,
+                              'BOŞ masa seçerseniz YENİ ADİSYON açılır. DOLU masa seçerseniz mevcut adisyona EKLENİR.',
+                              style: TextStyle(fontSize: 13, color: bannerText),
+                            ),
+                          ),
+                        ]),
+                      ),
+                      // SALON FILTRE
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        decoration: BoxDecoration(
+                          border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+                        ),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(children: [
+                            _sectionChip(
+                              label: 'TÜMÜ',
+                              count: candidateTables.length,
+                              color: const Color(0xFF6B7280),
+                              selected: selectedSectionId == null,
+                              onTap: () => setDialogState(() => selectedSectionId = null),
+                            ),
+                            const SizedBox(width: 10),
+                            ...sections.map((s) {
+                              final sid = s['id'] as int;
+                              final secCount = candidateTables
+                                  .where((t) => (t['section_id'] as num?)?.toInt() == sid).length;
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 10),
+                                child: _sectionChip(
+                                  label: s['name'].toString(),
+                                  count: secCount,
+                                  color: Color(int.parse((s['color'] as String).replaceAll('#', '0xFF'))),
+                                  selected: selectedSectionId == sid,
+                                  onTap: () => setDialogState(() => selectedSectionId = sid),
+                                ),
+                              );
+                            }),
+                          ]),
+                        ),
+                      ),
+                      // MASA GRID
+                      Expanded(
+                        child: filtered.isEmpty
+                            ? Center(
+                                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                  Icon(Icons.table_restaurant, size: 64, color: Colors.grey.shade300),
+                                  const SizedBox(height: 12),
+                                  Text('Bu salonda hedef masa yok',
+                                      style: TextStyle(color: Colors.grey.shade500, fontSize: 16)),
+                                ]),
+                              )
+                            : GridView.builder(
+                                padding: const EdgeInsets.all(16),
+                                gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: 160,
+                                  mainAxisSpacing: 12,
+                                  crossAxisSpacing: 12,
+                                  childAspectRatio: 1.0,
+                                ),
+                                itemCount: filtered.length,
+                                itemBuilder: (context, index) {
+                                  final table = filtered[index];
+                                  final isOccupied = table['status'] == 'occupied';
+                                  final color = Color(int.parse(
+                                      (table['section_color'] ?? '#3b82f6').replaceAll('#', '0xFF')));
+                                  return Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(12),
+                                      onTap: () => Navigator.pop(ctx, table),
+                                      splashColor: (isOccupied ? Colors.orange : Colors.green).withValues(alpha: 0.2),
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color: isOccupied ? Colors.orange.shade50 : Colors.white,
+                                          borderRadius: BorderRadius.circular(12),
+                                          border: Border.all(
+                                            color: isOccupied ? Colors.orange.shade300 : color,
+                                            width: 2,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.05),
+                                              blurRadius: 4,
+                                              offset: const Offset(0, 2),
+                                            ),
+                                          ],
+                                        ),
+                                        child: Column(
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            // Ust durum seridi
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                              decoration: BoxDecoration(
+                                                color: isOccupied ? Colors.orange.shade700 : Colors.green.shade600,
+                                                borderRadius: BorderRadius.circular(4),
+                                              ),
+                                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                                Icon(isOccupied ? Icons.add_circle : Icons.note_add,
+                                                    size: 12, color: Colors.white),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  isOccupied ? 'MEVCUTA EKLE' : 'YENİ ADİSYON',
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 9,
+                                                    fontWeight: FontWeight.w800,
+                                                    letterSpacing: 0.5,
+                                                  ),
+                                                ),
+                                              ]),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            // Masa numarasi (buyuk)
+                                            Text(
+                                              '${table['table_number']}',
+                                              style: TextStyle(
+                                                fontSize: 36,
+                                                fontWeight: FontWeight.w900,
+                                                color: isOccupied ? Colors.orange.shade900 : Colors.grey.shade800,
+                                                height: 1,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 6),
+                                            // Salon adi
+                                            Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                                              child: Text(
+                                                table['section_name']?.toString() ?? '',
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  color: Colors.grey.shade600,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                textAlign: TextAlign.center,
+                                                overflow: TextOverflow.ellipsis,
+                                                maxLines: 1,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                      // FOOTER
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        decoration: BoxDecoration(
+                          border: Border(top: BorderSide(color: Colors.grey.shade200)),
+                        ),
+                        child: Row(children: [
+                          _legendDot(Colors.green.shade600, 'BOŞ (yeni adisyon)'),
+                          const SizedBox(width: 16),
+                          _legendDot(Colors.orange.shade700, 'DOLU (mevcuta ekle)'),
+                          const Spacer(),
+                          SizedBox(
+                            height: 44,
+                            child: ElevatedButton.icon(
+                              onPressed: () => Navigator.pop(ctx),
+                              icon: const Icon(Icons.close),
+                              label: const Text('İptal', style: TextStyle(fontSize: 15)),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.grey.shade200,
+                                foregroundColor: Colors.black87,
+                                padding: const EdgeInsets.symmetric(horizontal: 22),
                               ),
                             ),
                           ),
                         ]),
-                        subtitle: Text(table['section_name'] ?? '', style: const TextStyle(fontSize: 13)),
-                        onTap: () => Navigator.pop(ctx, table),
-                      );
-                    },
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ),
-          ),
-          actions: [
-            SizedBox(width: 150, height: 50, child: ElevatedButton(
-              onPressed: () => Navigator.pop(ctx),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87),
-              child: const Text('İptal', style: TextStyle(fontSize: 16)),
-            )),
-          ],
-        ),
+              );
+            },
+          );
+        },
       );
 
       if (selectedTable == null) return;
@@ -1858,6 +2044,12 @@ class _AddItemModalState extends State<AddItemModal> {
       final sections = sectionMap.values.toList()
         ..sort((a, b) => a['name'].toString().compareTo(b['name'].toString()));
 
+      // 22 May 2026: Masa Degistir — tenant tema primary rengi (Urun Tasi secondary'den ayrilir)
+      final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+      final headerColor = themeProvider.primaryColor;
+      final headerHsl = HSLColor.fromColor(headerColor);
+      final headerDarker = headerHsl.withLightness((headerHsl.lightness - 0.08).clamp(0.0, 1.0)).toColor();
+
       final selectedTable = await showDialog<Map<String, dynamic>>(
         context: context,
         barrierDismissible: true,
@@ -1877,15 +2069,15 @@ class _AddItemModalState extends State<AddItemModal> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      // HEADER
+                      // HEADER (tenant tema primary)
                       Container(
                         padding: const EdgeInsets.fromLTRB(24, 18, 16, 18),
-                        decoration: const BoxDecoration(
+                        decoration: BoxDecoration(
                           gradient: LinearGradient(
-                            colors: [Color(0xFF0EA5E9), Color(0xFF0284C7)],
+                            colors: [headerColor, headerDarker],
                             begin: Alignment.topLeft, end: Alignment.bottomRight,
                           ),
-                          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
                         ),
                         child: Row(children: [
                           const Icon(Icons.swap_horiz, color: Colors.white, size: 28),
@@ -2788,11 +2980,55 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildActionPanel(ThemeProvider theme) {
+    // 22 May 2026: 2-sutun layout. Buton yuksekligi 60+ olunca tek sutun cok
+    // asagi tasiyordu; 2 sutun + scroll ile daha kompakt. Genislik 130 → 240.
     final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
     final hasItems = activeItems.isNotEmpty;
 
+    // Buton liste yapisini bir kerede tanimla (group: 1-4)
+    final btnGroup1 = <Widget>[
+      _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null),
+      _buildActionBtnVertical(
+        icon: Icons.tune,
+        label: 'Varyant',
+        color: const Color(0xFFF59E0B),
+        onTap: hasItems && _selectedItemId != null && _variantsForSelectedItem().isNotEmpty
+            ? _openVariantDialogForSelected
+            : null,
+      ),
+      _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
+      _buildActionBtnVertical(
+        icon: Icons.drive_file_move,
+        label: 'Ürün Taşı',
+        color: const Color(0xFF7C3AED),
+        onTap: hasItems && _selectedItemId != null && _hasPermission('move_item') ? _moveSelectedItem : null,
+      ),
+      _buildActionBtnVertical(icon: Icons.restaurant, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
+      _buildActionBtnVertical(icon: Icons.print, label: 'Yazdır', color: Colors.blueGrey, onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null),
+    ];
+
+    final btnGroup2 = <Widget>[
+      if (_hasPermission('apply_discount'))
+        _buildActionBtnVertical(icon: Icons.percent, label: 'İndirim', color: const Color(0xFFE11D48), onTap: hasItems ? _openDiscountDialog : null),
+      if (_hasPermission('transfer_table'))
+        _buildActionBtnVertical(icon: Icons.swap_horiz, label: 'Masa Değiştir', color: const Color(0xFF0EA5E9), onTap: hasItems ? _transferTable : null),
+      _buildActionBtnVertical(icon: Icons.splitscreen, label: 'Parçalı Ödeme', color: const Color(0xFF7C3AED), onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null),
+    ];
+
+    final btnGroup3 = <Widget>[
+      _buildActionBtnVertical(icon: Icons.payments, label: 'Nakit Kapat', color: theme.primaryColor, onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null),
+      _buildActionBtnVertical(icon: Icons.credit_card, label: 'Kart Kapat', color: const Color(0xFF3B82F6), onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null),
+      _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Nakit', color: const Color(0xFF059669), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('cash') : null),
+      _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Kart', color: const Color(0xFF2563EB), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('credit_card') : null),
+    ];
+
+    final btnGroup4 = <Widget>[
+      if (_hasPermission('void_ticket'))
+        _buildActionBtnVertical(icon: Icons.delete_outline, label: 'Adisyon İptal', color: const Color(0xFFDC2626), onTap: _voidTicket),
+    ];
+
     return Container(
-      width: 130,
+      width: 240,
       decoration: BoxDecoration(
         color: Colors.grey[50],
         border: Border(left: BorderSide(color: Colors.grey[200]!)),
@@ -2800,71 +3036,44 @@ class _AddItemModalState extends State<AddItemModal> {
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(8),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Grup 1: Not Ekle, Varyant, Ürün İptal, Mutfak, Yazdır
-            _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(
-              icon: Icons.tune,
-              label: 'Varyant',
-              color: const Color(0xFFF59E0B),
-              onTap: hasItems && _selectedItemId != null && _variantsForSelectedItem().isNotEmpty
-                  ? _openVariantDialogForSelected
-                  : null,
-            ),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
-            const SizedBox(height: 5),
-            // 16 May 2026: Tek ürün taşıma — yetki: move_item
-            _buildActionBtnVertical(
-              icon: Icons.drive_file_move,
-              label: 'Ürün Taşı',
-              color: const Color(0xFF7C3AED),
-              onTap: hasItems && _selectedItemId != null && _hasPermission('move_item') ? _moveSelectedItem : null,
-            ),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.restaurant, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.print, label: 'Yazdır', color: Colors.blueGrey, onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null),
-
-            const SizedBox(height: 12),
-            Divider(color: Colors.grey[300], height: 1),
-            const SizedBox(height: 12),
-
-            // Grup 2: İndirim, Masa Değiştir, Parçalı Ödeme
-            if (_hasPermission('apply_discount')) ...[
-              _buildActionBtnVertical(icon: Icons.percent, label: 'İndirim', color: const Color(0xFFE11D48), onTap: hasItems ? _openDiscountDialog : null),
-              const SizedBox(height: 5),
+            _buildActionGrid(btnGroup1),
+            if (btnGroup2.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Divider(color: Colors.grey[300], height: 1),
+              const SizedBox(height: 10),
+              _buildActionGrid(btnGroup2),
             ],
-            if (_hasPermission('transfer_table')) ...[
-              _buildActionBtnVertical(icon: Icons.swap_horiz, label: 'Masa Değiştir', color: const Color(0xFF0EA5E9), onTap: hasItems ? _transferTable : null),
-              const SizedBox(height: 5),
+            const SizedBox(height: 10),
+            Divider(color: Colors.grey[300], height: 1),
+            const SizedBox(height: 10),
+            _buildActionGrid(btnGroup3),
+            if (btnGroup4.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Divider(color: Colors.grey[300], height: 1),
+              const SizedBox(height: 10),
+              _buildActionGrid(btnGroup4),
             ],
-            _buildActionBtnVertical(icon: Icons.splitscreen, label: 'Parçalı Ödeme', color: const Color(0xFF7C3AED), onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null),
-
-            const SizedBox(height: 12),
-            Divider(color: Colors.grey[300], height: 1),
-            const SizedBox(height: 12),
-
-            // Grup 3: Ödeme kapama
-            _buildActionBtnVertical(icon: Icons.payments, label: 'Nakit Kapat', color: theme.primaryColor, onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.credit_card, label: 'Kart Kapat', color: const Color(0xFF3B82F6), onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Nakit', color: const Color(0xFF059669), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('cash') : null),
-            const SizedBox(height: 5),
-            _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Kart', color: const Color(0xFF2563EB), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('credit_card') : null),
-
-            const SizedBox(height: 12),
-            Divider(color: Colors.grey[300], height: 1),
-            const SizedBox(height: 12),
-
-            // Grup 4: Adisyon İptal
-            if (_hasPermission('void_ticket'))
-              _buildActionBtnVertical(icon: Icons.delete_outline, label: 'Adisyon İptal', color: const Color(0xFFDC2626), onTap: _voidTicket),
           ],
         ),
       ),
+    );
+  }
+
+  /// 2-sutun action button grid (responsive Wrap)
+  Widget _buildActionGrid(List<Widget> buttons) {
+    return LayoutBuilder(
+      builder: (ctx, c) {
+        // 2-sutun: her buton (toplamGenislik - aralarGap) / 2
+        const spacing = 6.0;
+        final cellW = (c.maxWidth - spacing) / 2;
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: buttons.map((b) => SizedBox(width: cellW, child: b)).toList(),
+        );
+      },
     );
   }
 

@@ -1647,12 +1647,26 @@ class _TicketModalState extends State<TicketModal> {
             ),
           ),
 
-          // Cancel button - cancel_item yetkisi gerekli
-          if (!isCancelled && _hasPermission('cancel_item'))
+          // Cancel button — 23 May 2026: cancel_item VEYA cancel_item_unprinted
+          // (Detay printed kontrolu _cancelItem icinde yapilmali — ileride)
+          if (!isCancelled && (_hasPermission('cancel_item') || _hasPermission('cancel_item_unprinted')))
             IconButton(
               onPressed: () {
                 final itemId = _safeInt(item['id']);
-                if (itemId != null) _cancelItem(itemId);
+                if (itemId == null) return;
+                // Mutfaga gitmis (printed=1) urun icin cancel_item gerekli
+                final isPrinted = item['printed'] == 1 || item['printed'] == true;
+                if (isPrinted && !_hasPermission('cancel_item')) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Mutfağa gitmiş bir fişi iptal etme yetkiniz bulunmamaktadır.'),
+                      backgroundColor: Colors.red,
+                      duration: Duration(seconds: 3),
+                    ),
+                  );
+                  return;
+                }
+                _cancelItem(itemId);
               },
               icon: const Icon(Icons.close, size: 18),
               color: Colors.red[400],

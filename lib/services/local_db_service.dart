@@ -866,6 +866,21 @@ class LocalDbService {
     };
   }
 
+  // 22 May 2026: server_id ile lokal ticket'i bul (FK constraint bug fix).
+  // api_service offline fallback'i ticketId olarak SERVER id veriyordu ama
+  // getLocalTicket sadece local_id'ye bakiyordu, FK hatasi olusuyordu.
+  Future<Map<String, dynamic>?> getLocalTicketByServerId(int serverId) async {
+    final db = await database;
+    final results = await db.query(
+      'local_tickets',
+      where: 'server_id = ?',
+      whereArgs: [serverId],
+      limit: 1,
+    );
+    if (results.isEmpty) return null;
+    return getLocalTicket(results.first['local_id'] as int);
+  }
+
   // Yerel adisyonu getir
   Future<Map<String, dynamic>?> getLocalTicket(int localId) async {
     final db = await database;

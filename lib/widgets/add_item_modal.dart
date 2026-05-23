@@ -819,6 +819,22 @@ class _AddItemModalState extends State<AddItemModal> {
     final itemId = _safeInt(item['id']);
     if (itemId == null) return;
 
+    // 23 May 2026: Iki kademeli iptal yetkisi
+    //  - cancel_item: HER turlu urun iptal (mutfaga gitmis dahil)
+    //  - cancel_item_unprinted: SADECE mutfaga gitmemis (printed=0)
+    // Mutfaga gitmis urun iptal etmek icin cancel_item GEREKLI.
+    final isPrinted = item['printed'] == 1 || item['printed'] == true;
+    final hasFullCancel = _hasPermission('cancel_item');
+    final hasUnprintedCancel = _hasPermission('cancel_item_unprinted');
+    if (isPrinted && !hasFullCancel) {
+      _showError('Mutfağa gitmiş bir fişi iptal etme yetkiniz bulunmamaktadır.');
+      return;
+    }
+    if (!isPrinted && !hasFullCancel && !hasUnprintedCancel) {
+      _showError('Ürün iptal etme yetkiniz bulunmamaktadır.');
+      return;
+    }
+
     // İptal sebeplerini API'den çek
     final reasons = await widget.apiService.getCancelReasons();
 
@@ -2996,7 +3012,7 @@ class _AddItemModalState extends State<AddItemModal> {
             ? _openVariantDialogForSelected
             : null,
       ),
-      _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && _hasPermission('cancel_item') ? _cancelSelectedItem : null),
+      _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && (_hasPermission('cancel_item') || _hasPermission('cancel_item_unprinted')) ? _cancelSelectedItem : null),
       _buildActionBtnVertical(
         icon: Icons.drive_file_move,
         label: 'Ürün Taşı',
@@ -3323,8 +3339,10 @@ class _AddItemModalState extends State<AddItemModal> {
                   onTap: hasItems && _selectedItemId != null
                       ? () async {
                           print('[AddItemModal] Ürün İptal butonuna tıklandı! selectedItemId=$_selectedItemId');
-                          if (!_hasPermission('cancel_item')) {
-                            print('[AddItemModal] cancel_item yetkisi YOK');
+                          // 23 May 2026: cancel_item VEYA cancel_item_unprinted yetki kontrolu
+                          // (Detay mutfaga-gitmis kontrolu _cancelSelectedItem icinde)
+                          if (!_hasPermission('cancel_item') && !_hasPermission('cancel_item_unprinted')) {
+                            print('[AddItemModal] cancel yetkisi YOK');
                             await showDialog(
                               context: context,
                               builder: (ctx) => AlertDialog(

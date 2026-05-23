@@ -558,12 +558,24 @@ class ApiService {
     // Offline - local'e ekle ve sync queue'ya ekle
     print('[API] Offline item ekleniyor...');
 
-    // Ticket local mi server mi kontrol et
-    final localTicket = await _localDb.getLocalTicket(ticketId);
-    final localTicketId = localTicket != null ? ticketId : null;
+    // 22 May 2026 FK constraint fix: ticketId hem local_id hem server_id olabilir.
+    // Eskiden getLocalTicket(ticketId) sadece local_id'ye bakiyordu, server ile
+    // olusturulmus ticket'larda null donuyor → fallback ticketId (server_id) ile
+    // local_ticket_id olarak insert → FOREIGN KEY constraint failed (code 787).
+    // Cozum: hem local_id hem server_id ile bak, bulamadiysan EXCEPTION fırlat.
+    Map<String, dynamic>? localTicket = await _localDb.getLocalTicket(ticketId);
+    localTicket ??= await _localDb.getLocalTicketByServerId(ticketId);
+    if (localTicket == null) {
+      throw Exception(
+        'Lokal adisyon bulunamadi (ticket_id=$ticketId). Cevrim disi mod aktif '
+        'oldugunda yeni adisyon hala server\'da, lokal kopya yok. Internet '
+        'baglantinizi kontrol edin.',
+      );
+    }
+    final localTicketId = localTicket['local_id'] as int;
 
     final localItem = await _localDb.addLocalTicketItem(
-      localTicketId: localTicketId ?? ticketId,
+      localTicketId: localTicketId,
       productId: productId,
       productName: productName,
       unitPrice: unitPrice,
@@ -573,7 +585,7 @@ class ApiService {
     );
 
     _logService.logAction('Urun eklendi (offline)', details: {
-      'local_ticket_id': localTicketId ?? ticketId,
+      'local_ticket_id': localTicketId,
       'product_id': productId,
       'product_name': productName,
       'quantity': quantity,

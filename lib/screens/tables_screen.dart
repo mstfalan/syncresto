@@ -1211,121 +1211,175 @@ class _TablesScreenState extends State<TablesScreen> {
 
     return GestureDetector(
       onTap: () => _openTable(table),
-      child: Container(
-          decoration: BoxDecoration(
-            gradient: isOccupied ? tableGradient : null,
-            color: isOccupied ? null : Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              // 19 May 2026: hasUnprinted ise kirmizi border (boyut DEGISMEZ, sadece renk)
-              color: hasUnprinted ? const Color(0xFFDC2626) : (isOccupied ? tableBorder : Colors.grey[300]!),
-              width: 2,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: hasUnprinted
-                    ? const Color(0xFFDC2626).withValues(alpha: 0.4)
-                    : Colors.black.withValues(alpha: 0.05),
-                blurRadius: 4,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisAlignment: isOccupied ? MainAxisAlignment.start : MainAxisAlignment.center,
-            children: [
-              if (isOccupied) const SizedBox(height: 8),
-              // Table number
-              Text(
-                tableNumber,
-                style: TextStyle(
-                  color: isOccupied ? Colors.white : const Color(0xFF1F2937),
-                  fontSize: isOccupied ? 24 : 32,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+      child: LayoutBuilder(
+        builder: (ctx, constraints) {
+          // 22 May 2026: Tum metin/padding kutu boyutuna gore olcekleniyor.
+          // Bug: Alt katta cok masa olunca kartlar kucuk, sabit font'lar
+          // (8/10/14/24) tasiyordu. Olcum: 140px referans width — bunun
+          // altinda font'lar kuculur, ustunde olceklenir (max 1.35x).
+          final w = constraints.maxWidth;
+          final h = constraints.maxHeight;
+          final scale = ((w + h) / 2 / 140).clamp(0.55, 1.35);
 
-              SizedBox(height: isOccupied ? 4 : 8),
+          // Olcekli font/padding hesaplari
+          double fs(double base) => (base * scale).clamp(7.0, 48.0);
+          double sp(double base) => (base * scale).clamp(1.0, 24.0);
 
-              // Status — 19 May 2026: mutfaga gitmemis varsa kirmizi vurgulu badge
-              Container(
-                padding: EdgeInsets.symmetric(horizontal: isOccupied ? 8 : 12, vertical: isOccupied ? 2 : 4),
-                decoration: BoxDecoration(
+          return Container(
+            decoration: BoxDecoration(
+              gradient: isOccupied ? tableGradient : null,
+              color: isOccupied ? null : Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: hasUnprinted ? const Color(0xFFDC2626) : (isOccupied ? tableBorder : Colors.grey[300]!),
+                width: 2,
+              ),
+              boxShadow: [
+                BoxShadow(
                   color: hasUnprinted
-                      ? const Color(0xFFDC2626)
-                      : (isOccupied
-                          ? Colors.white.withValues(alpha: 0.2)
-                          : Colors.grey[100]),
-                  borderRadius: BorderRadius.circular(12),
+                      ? const Color(0xFFDC2626).withValues(alpha: 0.4)
+                      : Colors.black.withValues(alpha: 0.05),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
                 ),
-                child: Text(
-                  hasUnprinted ? 'MUTFAĞA GİTMEDİ' : (isOccupied ? 'Dolu' : 'Bos'),
-                  style: TextStyle(
-                    color: (hasUnprinted || isOccupied) ? Colors.white : Colors.grey[600],
-                    fontSize: isOccupied ? 10 : 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-
-              // Total (if occupied)
-              if (isOccupied) ...[
-                const SizedBox(height: 3),
-                if (hasPartialPayment) ...[
-                  Text(
-                    '${unpaidTotal.toStringAsFixed(0)} TL',
+              ],
+            ),
+            padding: EdgeInsets.symmetric(horizontal: sp(4), vertical: sp(6)),
+            child: Column(
+              mainAxisAlignment: isOccupied ? MainAxisAlignment.start : MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isOccupied) SizedBox(height: sp(4)),
+                // Table number (en buyuk)
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    tableNumber,
+                    maxLines: 1,
                     style: TextStyle(
-                      color: Colors.orange[200],
-                      fontSize: 14,
+                      color: isOccupied ? Colors.white : const Color(0xFF1F2937),
+                      fontSize: fs(isOccupied ? 24 : 32),
                       fontWeight: FontWeight.bold,
+                      height: 1.0,
                     ),
                   ),
-                  Text(
-                    'Odenen: ${paidTotal.toStringAsFixed(0)} TL',
-                    style: TextStyle(color: Colors.green[200], fontSize: 9, fontWeight: FontWeight.w600),
+                ),
+                SizedBox(height: sp(isOccupied ? 4 : 6)),
+
+                // Status badge (Dolu / Bos / MUTFAGA GITMEDI)
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: sp(8), vertical: sp(2)),
+                  decoration: BoxDecoration(
+                    color: hasUnprinted
+                        ? const Color(0xFFDC2626)
+                        : (isOccupied
+                            ? Colors.white.withValues(alpha: 0.2)
+                            : Colors.grey[100]),
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                ] else ...[
-                  Text(
-                    '${total.toStringAsFixed(0)} TL',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      hasUnprinted ? 'MUTFAĞA GİTMEDİ' : (isOccupied ? 'Dolu' : 'Boş'),
+                      maxLines: 1,
+                      style: TextStyle(
+                        color: (hasUnprinted || isOccupied) ? Colors.white : Colors.grey[600],
+                        fontSize: fs(isOccupied ? 10 : 12),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+
+                // Total (occupied)
+                if (isOccupied) ...[
+                  SizedBox(height: sp(3)),
+                  if (hasPartialPayment) ...[
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        '${unpaidTotal.toStringAsFixed(0)} TL',
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: Colors.orange[200],
+                          fontSize: fs(14),
+                          fontWeight: FontWeight.bold,
+                          height: 1.0,
+                        ),
+                      ),
+                    ),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        'Ödenen: ${paidTotal.toStringAsFixed(0)} TL',
+                        maxLines: 1,
+                        style: TextStyle(color: Colors.green[200], fontSize: fs(9), fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ] else ...[
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        '${total.toStringAsFixed(0)} TL',
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: fs(14),
+                          fontWeight: FontWeight.bold,
+                          height: 1.0,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+
+                // Açılış + son sipariş + süre (occupied)
+                if (isOccupied && openedAt != null) ...[
+                  SizedBox(height: sp(2)),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      'Açılış: ${_formatTime(openedAt)}',
+                      maxLines: 1,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.9),
+                        fontSize: fs(9),
+                        fontWeight: FontWeight.w600,
+                        height: 1.1,
+                      ),
+                    ),
+                  ),
+                  if (lastItemAt != null)
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        'Son: ${_formatTime(lastItemAt)}',
+                        maxLines: 1,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.75),
+                          fontSize: fs(9),
+                          height: 1.1,
+                        ),
+                      ),
+                    ),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      _formatDuration(openedAt),
+                      maxLines: 1,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.65),
+                        fontSize: fs(9),
+                        height: 1.1,
+                      ),
                     ),
                   ),
                 ],
               ],
-
-              // Açılış saati ve son sipariş saati
-              if (isOccupied && openedAt != null) ...[
-                const SizedBox(height: 2),
-                Text(
-                  'Acilis: ${_formatTime(openedAt)}',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.9),
-                    fontSize: 8,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (lastItemAt != null)
-                  Text(
-                    'Son Siparis: ${_formatTime(lastItemAt)}',
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.7),
-                      fontSize: 8,
-                    ),
-                  ),
-                Text(
-                  _formatDuration(openedAt),
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.6),
-                    fontSize: 8,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
+            ),
+          );
+        },
+      ),
     );
   }
 

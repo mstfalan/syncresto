@@ -51,6 +51,10 @@ class LocalDbService {
         await db.execute('PRAGMA synchronous = NORMAL');
         // foreign_keys aktif
         await db.execute('PRAGMA foreign_keys = ON');
+        // 1 Haz 2026 (v1.5.6): auto_vacuum INCREMENTAL — DELETE sonrası boş alan
+        // tutulmasın. SADECE yeni create'lerde etkili (mevcut DB'ler için
+        // compactDatabase() boot'ta VACUUM çalıştırır).
+        await db.execute('PRAGMA auto_vacuum = INCREMENTAL');
       },
     );
   }
@@ -1523,6 +1527,10 @@ class LocalDbService {
       where: "status = 'failed' AND retry_count >= 3",
     );
 
+    // 1 Haz 2026 (v1.5.6): DELETE sonrası boş alanı geri kazan
+    // (auto_vacuum=INCREMENTAL aktifse hızlı; değilse no-op).
+    await incrementalVacuum(pages: 1000);
+
     print('[LocalDb] Cleanup tamamlandı');
   }
 
@@ -1924,6 +1932,58 @@ class LocalDbService {
       'failed_count': failed.first['count'] as int,
       'completed_count': completed.first['count'] as int,
     };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 1 Haz 2026 (v1.5.6) — SQLite şişme önleme (donma fix)
+  // cleanupSyncedTickets DELETE yapıyor ama dosya küçülmüyordu
+  // (auto_vacuum yok → silinen kayıtlar "boş alan" tutuyor).
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// DB dosya boyutunu byte cinsinden döndür.
+  Future<int> getDatabaseSizeBytes() async {
+    try {
+      final dbPath = await getDatabasesPath();
+      final file = File(join(dbPath, 'syncresto_pos.db'));
+      if (!await file.exists()) return 0;
+      return await file.length();
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Boot'ta çağrılır. DB > thresholdBytes ise VACUUM çalıştırır.
+  /// VACUUM: tüm DB'yi yeniden yazar, silinen kayıtların yer kaybını geri kazanır.
+  /// (Çok büyük DB'lerde yavaş — sadece şişmiş bayilerde tetiklenir.)
+  Future<void> compactDatabase({int thresholdBytes = 50 * 1024 * 1024}) async {
+    try {
+      final beforeSize = await getDatabaseSizeBytes();
+      if (beforeSize < thresholdBytes) {
+        print('[LocalDb] compactDatabase atlandı: ${(beforeSize / (1024 * 1024)).toStringAsFixed(1)}MB < ${(thresholdBytes / (1024 * 1024)).toInt()}MB threshold');
+        return;
+      }
+      final db = await database;
+      print('[LocalDb] VACUUM başlıyor (DB ${(beforeSize / (1024 * 1024)).toStringAsFixed(1)}MB)...');
+      final sw = Stopwatch()..start();
+      await db.execute('VACUUM');
+      sw.stop();
+      final afterSize = await getDatabaseSizeBytes();
+      final reclaimed = beforeSize - afterSize;
+      print('[LocalDb] VACUUM tamamlandı ${sw.elapsedMilliseconds}ms: ${(beforeSize / (1024 * 1024)).toStringAsFixed(1)}MB → ${(afterSize / (1024 * 1024)).toStringAsFixed(1)}MB (${(reclaimed / (1024 * 1024)).toStringAsFixed(1)}MB geri kazanıldı)');
+    } catch (e) {
+      print('[LocalDb] compactDatabase hatası: $e');
+    }
+  }
+
+  /// cleanupSyncedTickets gibi büyük DELETE'ler sonrası boş alanı geri kazan.
+  /// (auto_vacuum=INCREMENTAL aktifse hızlı; değilse no-op.)
+  Future<void> incrementalVacuum({int pages = 1000}) async {
+    try {
+      final db = await database;
+      await db.execute('PRAGMA incremental_vacuum($pages)');
+    } catch (e) {
+      print('[LocalDb] incremental_vacuum hatası: $e');
+    }
   }
 
   // Veritabanını kapat

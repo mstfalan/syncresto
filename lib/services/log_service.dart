@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -75,7 +77,15 @@ class LogService {
   // Ayarlar
   static const int _maxPendingLogs = 50;
   static const Duration _flushInterval = Duration(seconds: 30);
-  static const String _pendingLogsKey = 'pending_pos_logs';
+  static const String _pendingLogsKey = 'pending_pos_logs'; // legacy (migrate-once)
+
+  // 1 Haz 2026 — Şişme önleme (v1.5.6):
+  // Sahada sunucu down olursa _pendingLogs RAM'de + SharedPreferences XML'inde
+  // sınırsız büyüyordu. Üst limit + dosya bazlı persist eklendi.
+  static const int _maxRetainedLogs = 1000;         // RAM cap (en yeniler kalır)
+  static const int _maxPersistedBytes = 1024 * 1024; // disk cap 1MB
+  static const String _persistFileName = 'pending_logs.json';
+  File? _persistFile;
 
   /// Servisi başlat
   Future<void> init(Dio dio, String apiKey) async {
@@ -279,34 +289,98 @@ class LogService {
       } else {
         // Diger hatalar (5xx vs) — geri pending'e ekle, sonra retry
         _pendingLogs.insertAll(0, logsToSend);
+        _capPendingLogs(); // 1 Haz 2026: max 1000, taşan en eski log'lar drop
         await _savePendingLogs();
       }
     } catch (e) {
       // Network/timeout vs — sadece bunlari retry et
       debugPrint('[LogService] Log gonderme network hatasi: $e');
       _pendingLogs.insertAll(0, logsToSend);
+      _capPendingLogs(); // 1 Haz 2026: max 1000, taşan en eski log'lar drop
       await _savePendingLogs();
     } finally {
       _isFlushing = false;
     }
   }
 
+  /// 1 Haz 2026 (v1.5.6) — _pendingLogs üst limit guard'ı.
+  /// Sunucu uzun süre down kalsa bile RAM/disk sınırsız büyümez.
+  /// En eski log'lar drop edilir, son N tutulur.
+  void _capPendingLogs() {
+    if (_pendingLogs.length > _maxRetainedLogs) {
+      final dropCount = _pendingLogs.length - _maxRetainedLogs;
+      _pendingLogs.removeRange(0, dropCount);
+      debugPrint('[LogService] $dropCount eski log drop edildi (cap=$_maxRetainedLogs)');
+    }
+  }
+
+  /// 1 Haz 2026 (v1.5.6) — Disk persist dosyası (lazy init).
+  /// SharedPreferences XML'i log için verimsiz, ayrı dosya kullanılır.
+  Future<File?> _getPersistFile() async {
+    if (_persistFile != null) return _persistFile;
+    try {
+      final dir = await getApplicationSupportDirectory();
+      _persistFile = File(path.join(dir.path, _persistFileName));
+      return _persistFile;
+    } catch (e) {
+      debugPrint('[LogService] Persist dosyası açılamadı: $e');
+      return null;
+    }
+  }
+
   /// Bekleyen logları local'e kaydet
+  /// 1 Haz 2026: dosya bazlı + boyut guard (>1MB ise drop + uyarı)
   Future<void> _savePendingLogs() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      _capPendingLogs(); // garanti
       final logsJson = _pendingLogs.map((l) => l.toJson()).toList();
-      await prefs.setString(_pendingLogsKey, jsonEncode(logsJson));
+      final jsonStr = jsonEncode(logsJson);
+
+      // Boyut guard
+      if (jsonStr.length > _maxPersistedBytes) {
+        // En yeni 500'ünü tut, gerisini drop
+        final keep = _pendingLogs.length > 500
+            ? _pendingLogs.sublist(_pendingLogs.length - 500)
+            : List<LogEntry>.from(_pendingLogs);
+        _pendingLogs
+          ..clear()
+          ..addAll(keep);
+        debugPrint('[LogService] Disk persist >1MB → en yeni 500 log tutuldu');
+      }
+
+      final file = await _getPersistFile();
+      if (file != null) {
+        await file.writeAsString(jsonEncode(_pendingLogs.map((l) => l.toJson()).toList()));
+      } else {
+        // Fallback: SharedPreferences (legacy)
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_pendingLogsKey, jsonEncode(_pendingLogs.map((l) => l.toJson()).toList()));
+      }
     } catch (e) {
       debugPrint('[LogService] Log kaydetme hatası: $e');
     }
   }
 
   /// Bekleyen logları local'den yükle
+  /// 1 Haz 2026: önce dosya, yoksa eski SharedPreferences (legacy migration)
   Future<void> _loadPendingLogs() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final logsJson = prefs.getString(_pendingLogsKey);
+      // 1) Dosyadan yükle (yeni)
+      final file = await _getPersistFile();
+      String? logsJson;
+      if (file != null && await file.exists()) {
+        logsJson = await file.readAsString();
+      }
+
+      // 2) Yoksa legacy SharedPreferences'tan migrate et
+      if (logsJson == null || logsJson.isEmpty) {
+        final prefs = await SharedPreferences.getInstance();
+        logsJson = prefs.getString(_pendingLogsKey);
+        if (logsJson != null && logsJson.isNotEmpty) {
+          debugPrint('[LogService] Legacy log\'lar SharedPreferences\'tan dosyaya migrate ediliyor');
+        }
+      }
+
       if (logsJson != null) {
         final logs = jsonDecode(logsJson) as List;
         for (final log in logs) {
@@ -324,6 +398,18 @@ class LogService {
           ));
         }
         debugPrint('[LogService] ${_pendingLogs.length} bekleyen log yüklendi');
+
+        // 1 Haz 2026 (v1.5.6) — Load sonrası cap + legacy temizlik
+        _capPendingLogs();
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          if (prefs.containsKey(_pendingLogsKey)) {
+            await prefs.remove(_pendingLogsKey); // migrate sonrası eski şişmiş key
+            debugPrint('[LogService] Legacy SharedPreferences key temizlendi');
+          }
+        } catch (_) {}
+        // Yeni dosya formatına yaz (legacy şişme sıfırlansın)
+        await _savePendingLogs();
       }
     } catch (e) {
       debugPrint('[LogService] Log yükleme hatası: $e');

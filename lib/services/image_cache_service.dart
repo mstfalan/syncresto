@@ -166,4 +166,101 @@ class ImageCacheService {
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 1 Haz 2026 (v1.5.6) — Cache şişme önleme (donma fix)
+  // Sahada %AppData%\com.syncresto.pos\image_cache\ GB'lara çıkıp donmaya
+  // sebep oluyordu. audit() LRU silme + pruneByActiveUrls() stale temizlik.
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// Toplam cache boyutu > maxBytes ise en eski (lastModified) dosyalardan
+  /// başlayarak targetBytes altına düşür. Boot'ta + saatlik çağrılır.
+  Future<void> audit({
+    int maxBytes = 200 * 1024 * 1024,    // 200MB hard cap
+    int targetBytes = 150 * 1024 * 1024, // 150MB hedef (LRU sonrası)
+  }) async {
+    if (_cacheDir == null) return;
+    try {
+      final dir = Directory(_cacheDir!);
+      if (!await dir.exists()) return;
+
+      // 1) Dosyaları listele ve boyut+mtime topla
+      final entries = <_FileMeta>[];
+      int totalSize = 0;
+      await for (final entity in dir.list(recursive: false)) {
+        if (entity is File) {
+          try {
+            final stat = await entity.stat();
+            entries.add(_FileMeta(entity, stat.size, stat.modified));
+            totalSize += stat.size;
+          } catch (_) {}
+        }
+      }
+
+      if (totalSize <= maxBytes) {
+        print('[ImageCache] audit OK: ${(totalSize / (1024 * 1024)).toStringAsFixed(1)}MB (limit ${maxBytes ~/ (1024 * 1024)}MB)');
+        return;
+      }
+
+      // 2) Eskiden yeniye sırala (LRU — en eski mtime önce silinir)
+      entries.sort((a, b) => a.modified.compareTo(b.modified));
+
+      // 3) targetBytes altına düşene kadar sil
+      int deleted = 0;
+      int reclaimed = 0;
+      for (final e in entries) {
+        if (totalSize <= targetBytes) break;
+        try {
+          await e.file.delete();
+          totalSize -= e.size;
+          reclaimed += e.size;
+          deleted++;
+        } catch (_) {}
+      }
+      print('[ImageCache] audit: $deleted dosya silindi, ${(reclaimed / (1024 * 1024)).toStringAsFixed(1)}MB geri kazanıldı');
+    } catch (e) {
+      print('[ImageCache] audit hatası: $e');
+    }
+  }
+
+  /// Aktif (menüde olan) URL'lerin dışındaki cache dosyalarını sil.
+  /// sync sonrası çağrılırsa silinmiş/değişmiş ürünlerin eski cache'i temizlenir.
+  Future<void> pruneByActiveUrls(Set<String> activeUrls) async {
+    if (_cacheDir == null || activeUrls.isEmpty) return;
+    try {
+      final activeFileNames = activeUrls.map(_urlToFileName).toSet();
+
+      final dir = Directory(_cacheDir!);
+      if (!await dir.exists()) return;
+
+      int deleted = 0;
+      int reclaimed = 0;
+      await for (final entity in dir.list(recursive: false)) {
+        if (entity is File) {
+          final name = path.basename(entity.path);
+          if (!activeFileNames.contains(name)) {
+            try {
+              final size = await entity.length();
+              await entity.delete();
+              reclaimed += size;
+              deleted++;
+            } catch (_) {}
+          }
+        }
+      }
+      if (deleted > 0) {
+        print('[ImageCache] prune: $deleted stale dosya silindi, ${(reclaimed / (1024 * 1024)).toStringAsFixed(1)}MB geri kazanıldı');
+      }
+    } catch (e) {
+      print('[ImageCache] prune hatası: $e');
+    }
+  }
+}
+
+/// Internal: audit() için dosya meta
+class _FileMeta {
+  final File file;
+  final int size;
+  final DateTime modified;
+  _FileMeta(this.file, this.size, this.modified);
 }

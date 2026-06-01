@@ -835,12 +835,19 @@ class _AddItemModalState extends State<AddItemModal> {
       return;
     }
 
-    // İptal sebeplerini API'den çek
-    final reasons = await widget.apiService.getCancelReasons();
+    // 1 Haz 2026 (v1.5.6): Mutfağa GİTMEMİŞ ürün iptalinde uyarı YOK.
+    //  - printed=0 → direkt sil, reason='Mutfağa gönderilmedi' otomatik
+    //  - printed=1 → mevcut sebep seçme dialog'u (panel_pos_cancel_reasons)
+    String? selectedReason;
+    if (!isPrinted) {
+      selectedReason = 'Mutfağa gönderilmedi';
+    } else {
+      // İptal sebeplerini API'den çek (mutfağa gitmiş ürün)
+      final reasons = await widget.apiService.getCancelReasons();
 
-    if (!mounted) return;
+      if (!mounted) return;
 
-    final selectedReason = await showDialog<String>(
+      selectedReason = await showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
@@ -933,6 +940,7 @@ class _AddItemModalState extends State<AddItemModal> {
         );
       },
     );
+    } // else: printed=1 sebep seçme bloğu sonu
 
     if (selectedReason == null) return;
 

@@ -265,6 +265,10 @@ class SyncService {
 
     print('[Sync] ${imageUrls.length} görsel indirilecek...');
 
+    // 1 Haz 2026 (v1.5.6) — Menüde olmayan resimleri sil (stale cache prune)
+    // Fire-and-forget: download ile paralel çalışır, UI bloklamaz.
+    unawaited(_imageCache.pruneByActiveUrls(imageUrls.toSet()));
+
     int downloaded = 0;
     int failed = 0;
 

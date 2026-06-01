@@ -15,6 +15,10 @@ import 'services/sound_service.dart';
 import 'services/websocket_service.dart';
 import 'services/print_queue_service.dart';
 import 'services/sync_service.dart';
+// 1 Haz 2026 (v1.5.6): Boot audit servisleri (donma fix)
+import 'services/image_cache_service.dart';
+import 'services/local_db_service.dart';
+import 'services/version_service.dart';
 import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
@@ -168,6 +172,34 @@ void main() {
         if (kDebugMode) print('[Main] apiService.initOfflineServices timeout');
       },
     );
+
+    // 1 Haz 2026 (v1.5.6) — Boot cache audit (donma fix)
+    // Fire-and-forget: UI'ı bloklamaz, arka planda çalışır.
+    //   1) Image cache LRU 200MB altına çek (sahada GB'lara çıkıyordu)
+    //   2) SQLite DB > 50MB ise VACUUM (silinen ticket'ların boş alanı)
+    //   3) %temp% eski update artefakt'ları (3 günden eski) sil
+    unawaited(() async {
+      try {
+        await ImageCacheService().init();
+        await ImageCacheService().audit();
+      } catch (e) {
+        if (kDebugMode) print('[Main] image audit error: $e');
+      }
+    }());
+    unawaited(() async {
+      try {
+        await LocalDbService().compactDatabase();
+      } catch (e) {
+        if (kDebugMode) print('[Main] db compact error: $e');
+      }
+    }());
+    unawaited(() async {
+      try {
+        await VersionService().cleanupOldUpdateFiles();
+      } catch (e) {
+        if (kDebugMode) print('[Main] update cleanup error: $e');
+      }
+    }());
 
     // Yazici ayarlarini yukle
     await printerService.loadSettings().timeout(

@@ -709,4 +709,50 @@ REM Updater script'i kendini sil
       return null;
     }
   }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 1 Haz 2026 (v1.5.6) — Eski update dosyalarını temizle (donma fix)
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// %temp% (getTemporaryDirectory) altındaki eski update artefakt'larını sil.
+  /// Pattern: SyncResto-*.zip, SyncResto_Update klasörü, syncresto_updater.log.
+  /// 3 günden eski olanlar silinir (yeni indirilenler korunur).
+  Future<void> cleanupOldUpdateFiles({Duration maxAge = const Duration(days: 3)}) async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      if (!await tempDir.exists()) return;
+
+      final cutoff = DateTime.now().subtract(maxAge);
+      int deleted = 0;
+      int reclaimed = 0;
+
+      await for (final entity in tempDir.list(recursive: false)) {
+        try {
+          final name = entity.path.split(Platform.pathSeparator).last;
+          final isUpdateArtifact = name.startsWith('SyncResto-') ||
+              name == 'SyncResto_Update' ||
+              name == 'syncresto_updater.log';
+          if (!isUpdateArtifact) continue;
+
+          final stat = await entity.stat();
+          if (stat.modified.isBefore(cutoff)) {
+            if (entity is File) {
+              reclaimed += stat.size;
+              await entity.delete();
+              deleted++;
+            } else if (entity is Directory) {
+              await entity.delete(recursive: true);
+              deleted++;
+            }
+          }
+        } catch (_) {}
+      }
+
+      if (deleted > 0) {
+        debugPrint('[VersionService] cleanupOldUpdateFiles: $deleted eski update artefakt silindi, ${(reclaimed / (1024 * 1024)).toStringAsFixed(1)}MB geri kazanıldı');
+      }
+    } catch (e) {
+      debugPrint('[VersionService] cleanupOldUpdateFiles hatası: $e');
+    }
+  }
 }

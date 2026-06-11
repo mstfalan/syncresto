@@ -37,6 +37,12 @@ jobs:
         run: flutter pub get
 
       - name: Build Windows
+        # 11 Haz 2026: GitHub runner yeni MSVC'ye (VS18/14.51) güncellendi; eski
+        # audioplayers_windows + permission_handler_windows plugin'leri <experimental/coroutine>
+        # kullandığı için STL1011 deprecation HATASI veriyor. CL env ile uyarıyı sustur
+        # (resmi öneri, plugin kodlarına dokunmaz). _CRT/_SILENCE define MSVC'ye geçer.
+        env:
+          CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: flutter build windows --release
 
       - name: Create self-signed certificate and sign exe

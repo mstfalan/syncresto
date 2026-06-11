@@ -42,6 +42,19 @@ class WebSocketService {
   void _connect() {
     if (_serverUrl == null) return;
 
+    // 11 Haz 2026: SOCKET LEAK FIX. Eski socket dispose EDİLMEDEN yenisi açılınca
+    // (lisans hatası / 12sa offline / "Tekrar Dene" → InitialSyncScreen tekrar açılıp
+    // connect() yeniden çağrılınca) eski socket + 6 event handler asılı kalıyordu.
+    // Asılı socket'ler reconnect timer çalıştırmaya devam (CPU) + aynı event N kez
+    // işleniyor (N kez ses/yazdırma → ÇİFT FİŞ). Uzun açık kalınca birikip donduruyordu.
+    // connectPanelSocket'teki (satır ~261) mevcut pattern'in AYNISI — eskiyi kapat.
+    try {
+      _socket?.clearListeners();
+      _socket?.disconnect();
+      _socket?.dispose();
+    } catch (_) {}
+    _socket = null;
+
     try {
       print('[WebSocket] Connecting to: $_serverUrl');
 
@@ -258,11 +271,13 @@ class WebSocketService {
       return;
     }
     _apiKey = apiKey;
-    // Eski bağlantıyı kapat
+    // Eski bağlantıyı kapat (11 Haz 2026: clearListeners eklendi — handler leak'i tam kapat)
     try {
+      _panelSocket?.clearListeners();
       _panelSocket?.disconnect();
       _panelSocket?.dispose();
     } catch (_) {}
+    _panelSocket = null;
 
     const panelUrl = 'https://panel.syncresto.com';
     try {

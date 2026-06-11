@@ -58,6 +58,15 @@ class _TablesScreenState extends State<TablesScreen> {
   // 19 May 2026: Mutfaga gitmemis (printed=0) urun olan masalar. Kart ustunde
   // kirmizi badge "MUTFAGA GITMEMIS URUN VAR" gosterimi icin.
   Set<int> _unprintedByTable = {};
+  // 11 Haz 2026: FIS CIKMADI. Backend printed=1 SET etti AMA panel_print_jobs
+  // status=timeout/failed (fiziksel fis cikmadi olabilir). printed=1 oldugu icin
+  // _unprintedByTable'a girmiyor -> ayri TURUNCU "FIS CIKMADI" badge gosterilir.
+  Set<int> _printFailedByTable = {};
+
+  // 11 Haz 2026 DONMA FIX: silent (2sn/5sn otomatik) poll'ler yavaş ağda üst üste
+  // binmesin diye guard. Manuel/ilk yükleme guard'a takılmaz (kullanıcı aksiyonu bloklanmaz).
+  bool _isFetchingData = false;
+  bool _isFetchingPending = false;
 
   // Offline monitoring
   final ConnectivityService _connectivity = ConnectivityService();
@@ -329,6 +338,10 @@ class _TablesScreenState extends State<TablesScreen> {
   }
 
   Future<void> _loadData({bool silent = false}) async {
+    // 11 Haz 2026 DONMA FIX: silent (otomatik 2sn) poll yavaş ağda üst üste binmesin.
+    // Manuel/ilk yükleme (silent=false) HER ZAMAN çalışır (kullanıcı aksiyonu bloklanmaz).
+    if (silent && _isFetchingData) return;
+    _isFetchingData = true;
     // Sadece ilk yüklemede loading göster
     if (!silent) {
       setState(() => _isLoading = true);
@@ -352,6 +365,7 @@ class _TablesScreenState extends State<TablesScreen> {
         _showError('Veri yuklenemedi: $e');
       }
     } finally {
+      _isFetchingData = false;
       if (!silent) {
         setState(() => _isLoading = false);
       }
@@ -359,6 +373,9 @@ class _TablesScreenState extends State<TablesScreen> {
   }
 
   Future<void> _refreshPendingCount() async {
+    // 11 Haz 2026 DONMA FIX: 5sn otomatik poll yavaş ağda üst üste binmesin.
+    if (_isFetchingPending) return;
+    _isFetchingPending = true;
     try {
       final rows = await widget.apiService.getPendingOrders();
       // Hem badge sayisi hem masa-bazli en eski bekleyen zamani — masa rengi icin.
@@ -366,6 +383,8 @@ class _TablesScreenState extends State<TablesScreen> {
       final Map<int, DateTime> oldest = {};
       // 19 May 2026: Mutfaga gitmemis (printed=0) urun olan masalari topla
       final Set<int> unprintedTables = {};
+      // 11 Haz 2026: FIS CIKMADI (backend print_failed=true) olan masalar
+      final Set<int> printFailedTables = {};
       for (final r in rows) {
         if (r is! Map) continue;
         if (r['delivered_at'] != null) continue;
@@ -380,6 +399,11 @@ class _TablesScreenState extends State<TablesScreen> {
         if (!isPrinted && !isSkip && tid != null) {
           unprintedTables.add(tid);
         }
+        // 11 Haz 2026: Backend print_failed=true -> bu ticket'in mutfak fisi
+        // timeout/failed (printed=1 olsa bile fiziksel cikmamis olabilir).
+        if (r['print_failed'] == true && tid != null) {
+          printFailedTables.add(tid);
+        }
         final iso = r['item_created_at']?.toString();
         if (tid == null || iso == null || iso.isEmpty) continue;
         try {
@@ -393,10 +417,13 @@ class _TablesScreenState extends State<TablesScreen> {
           _pendingItemCount = total;
           _oldestPendingByTable = oldest;
           _unprintedByTable = unprintedTables;
+          _printFailedByTable = printFailedTables;
         });
       }
     } catch (_) {
       // Sessiz: bu endpoint henuz deploy edilmemis olabilir
+    } finally {
+      _isFetchingPending = false; // 11 Haz 2026: guard mutlaka serbest (kalıcı kilit önle)
     }
   }
 
@@ -1185,6 +1212,9 @@ class _TablesScreenState extends State<TablesScreen> {
     final waitSeconds = hasPending ? DateTime.now().difference(oldestPending).inSeconds : 0;
     // 19 May 2026: Mutfaga gitmemis urun var mi (printed=0 olan item)
     final hasUnprinted = tableId != null && _unprintedByTable.contains(tableId);
+    // 11 Haz 2026: Fis cikmadi mi (backend print_failed=true, printed=1 olsa bile
+    // mutfak fisi timeout/failed). hasUnprinted'tan ayri TURUNCU badge.
+    final hasPrintFailed = tableId != null && _printFailedByTable.contains(tableId);
 
     Color tableBorder;
     Gradient? tableGradient;
@@ -1231,14 +1261,20 @@ class _TablesScreenState extends State<TablesScreen> {
               color: isOccupied ? null : Colors.white,
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
-                color: hasUnprinted ? const Color(0xFFDC2626) : (isOccupied ? tableBorder : Colors.grey[300]!),
+                color: hasUnprinted
+                    ? const Color(0xFFDC2626)
+                    : (hasPrintFailed
+                        ? const Color(0xFFF97316)
+                        : (isOccupied ? tableBorder : Colors.grey[300]!)),
                 width: 2,
               ),
               boxShadow: [
                 BoxShadow(
                   color: hasUnprinted
                       ? const Color(0xFFDC2626).withValues(alpha: 0.4)
-                      : Colors.black.withValues(alpha: 0.05),
+                      : (hasPrintFailed
+                          ? const Color(0xFFF97316).withValues(alpha: 0.4)
+                          : Colors.black.withValues(alpha: 0.05)),
                   blurRadius: 4,
                   offset: const Offset(0, 2),
                 ),
@@ -1266,24 +1302,32 @@ class _TablesScreenState extends State<TablesScreen> {
                 ),
                 SizedBox(height: sp(isOccupied ? 4 : 6)),
 
-                // Status badge (Dolu / Bos / MUTFAGA GITMEDI)
+                // Status badge (Dolu / Bos / MUTFAGA GITMEDI / FIS CIKMADI)
+                // Oncelik: hasUnprinted (kirmizi, hic gonderilmemis) > hasPrintFailed
+                // (turuncu, gonderildi ama fis cikmadi) > Dolu/Bos.
                 Container(
                   padding: EdgeInsets.symmetric(horizontal: sp(8), vertical: sp(2)),
                   decoration: BoxDecoration(
                     color: hasUnprinted
                         ? const Color(0xFFDC2626)
-                        : (isOccupied
-                            ? Colors.white.withValues(alpha: 0.2)
-                            : Colors.grey[100]),
+                        : (hasPrintFailed
+                            ? const Color(0xFFF97316)
+                            : (isOccupied
+                                ? Colors.white.withValues(alpha: 0.2)
+                                : Colors.grey[100])),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
                     child: Text(
-                      hasUnprinted ? 'MUTFAĞA GİTMEDİ' : (isOccupied ? 'Dolu' : 'Boş'),
+                      hasUnprinted
+                          ? 'MUTFAĞA GİTMEDİ'
+                          : (hasPrintFailed ? 'FİŞ ÇIKMADI' : (isOccupied ? 'Dolu' : 'Boş')),
                       maxLines: 1,
                       style: TextStyle(
-                        color: (hasUnprinted || isOccupied) ? Colors.white : Colors.grey[600],
+                        color: (hasUnprinted || hasPrintFailed || isOccupied)
+                            ? Colors.white
+                            : Colors.grey[600],
                         fontSize: fs(isOccupied ? 10 : 12),
                         fontWeight: FontWeight.w600,
                       ),

@@ -773,11 +773,25 @@ class _AddItemModalState extends State<AddItemModal> {
       });
 
       final currentUnitPrice = _safeDouble(item['unit_price']);
+
+      // 3 Haz 2026 — Safety net: notes içinde "(+NTL)" pattern var ama addedPrice 0 ise
+      // (örn. garson manuel yazdı), regex ile parse et ki unit_price güncellensin.
+      // Backend pos.js'te de aynı pattern var ([[project_pos_extras_safety_net]]).
+      double effectiveAdded = addedPrice;
+      if (effectiveAdded == 0 && note.isNotEmpty) {
+        final matches = RegExp(r'\(\+\s*(\d+(?:[.,]\d+)?)\s*TL\)', caseSensitive: false).allMatches(note);
+        double parsed = 0;
+        for (final m in matches) {
+          parsed += double.tryParse((m.group(1) ?? '0').replaceAll(',', '.')) ?? 0;
+        }
+        if (parsed > 0) effectiveAdded = parsed;
+      }
+
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         notes: note,
-        unitPrice: addedPrice != 0 ? currentUnitPrice + addedPrice : null,
+        unitPrice: effectiveAdded != 0 ? currentUnitPrice + effectiveAdded : null,
       );
 
       await _loadTicketItems();

@@ -89,9 +89,15 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
   String _buildNotes() {
     List<String> notes = [];
 
-    // Seçilen ekstralar
+    // Seçilen ekstralar — 3 Haz 2026: fiyat dahil yazılıyor ki backend safety net yakalayabilsin
+    // Format: "Ad (+NTL)" — backend pos.js regex bu pattern'i parse eder
     for (var extra in _selectedExtras) {
-      notes.add('+${extra['name']}');
+      final price = _safeDouble(extra['price']);
+      if (price > 0) {
+        notes.add('+${extra['name']} (+${price.toStringAsFixed(0)}TL)');
+      } else {
+        notes.add('+${extra['name']}');
+      }
     }
 
     // Özel not

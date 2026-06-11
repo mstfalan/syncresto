@@ -30,6 +30,11 @@ class SyncService {
 
   Dio? _dio;
   Timer? _syncTimer;
+  // 11 Haz 2026 LEAK FIX: 30sn cache timer eskiden değişkene atanmıyordu →
+  // dispose'da cancel EDİLEMİYORDU (init tekrar çağrılırsa ölümsüz timer birikir).
+  Timer? _cacheUpdateTimer;
+  StreamSubscription? _connectivitySub; // eskiden tutulmuyordu → cancel edilemiyordu
+  bool _isBgUpdating = false;           // backgroundCacheUpdate re-entry guard
   bool _isSyncing = false;
   bool _isInitialSyncDone = false;
   String? _backendUrl;
@@ -56,8 +61,13 @@ class SyncService {
     // Image cache'i başlat
     await _imageCache.init();
 
-    // İnternet durumu değişince sync başlat
-    _connectivity.connectionStream.listen((isOnline) async {
+    // 11 Haz 2026 LEAK FIX: init tekrar çağrılırsa (ileride) eski timer/sub birikmesin.
+    _syncTimer?.cancel();
+    _cacheUpdateTimer?.cancel();
+    _connectivitySub?.cancel();
+
+    // İnternet durumu değişince sync başlat (sub saklanıyor → dispose'da cancel)
+    _connectivitySub = _connectivity.connectionStream.listen((isOnline) async {
       if (isOnline) {
         print('[Sync] Online oldu, sync başlatılıyor...');
         // Önce bekleyen işlemleri sync et
@@ -77,7 +87,8 @@ class SyncService {
     });
 
     // Periyodik cache güncelleme (her 30 saniye - fiyat degisikliklerini hizli yakala)
-    Timer.periodic(const Duration(seconds: 30), (_) {
+    // 11 Haz 2026: değişkene atandı (eskiden anonimdi, cancel edilemiyordu).
+    _cacheUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (_connectivity.isOnline) {
         backgroundCacheUpdate();
       }
@@ -324,6 +335,13 @@ class SyncService {
   /// Arka planda cache'i güncelle (kullanıcıyı bekletmeden)
   Future<void> backgroundCacheUpdate() async {
     if (!_connectivity.isOnline || _dio == null) return;
+    // 11 Haz 2026 GUARD: yavaş ağda bir update 30sn'den uzun sürerse 2. timer tetiği
+    // üst üste binmesin (CPU/ağ birikmesi → donma). syncPendingItems'taki _isSyncing pattern'i.
+    if (_isBgUpdating) {
+      print('[Sync] Arka plan güncelleme zaten çalışıyor, atlandı');
+      return;
+    }
+    _isBgUpdating = true;
 
     print('[Sync] Arka plan güncelleme başlıyor...');
     _logService.logSync('Arka plan cache guncellemesi baslatildi', operation: 'background_update_start');
@@ -461,6 +479,9 @@ class SyncService {
     } catch (e) {
       print('[Sync] Arka plan güncelleme hatası: $e');
       _logService.logSyncError('Arka plan cache guncellemesi hatasi', operation: 'background_update', error: e);
+    } finally {
+      // 11 Haz 2026: guard mutlaka serbest bırakılmalı (yoksa kalıcı kilit → bir daha hiç çalışmaz)
+      _isBgUpdating = false;
     }
   }
 
@@ -1351,5 +1372,7 @@ class SyncService {
 
   void dispose() {
     _syncTimer?.cancel();
+    _cacheUpdateTimer?.cancel();   // 11 Haz 2026 LEAK FIX
+    _connectivitySub?.cancel();    // 11 Haz 2026 LEAK FIX
   }
 }

@@ -201,6 +201,42 @@ void main() {
       }
     }());
 
+    // 12 Haz 2026 — PERİYODİK BAKIM (donma fix devamı)
+    // Yukarıdaki 3 temizlik yalnız boot'ta çalışıyordu; POS haftalarca
+    // kapanmadığı için hiç tetiklenmiyordu. Aynı 3 işlem 6 saatte bir
+    // tekrar çalışır. Tek timer + guard: bir tur bitmeden yenisi başlamaz.
+    // Her işlem kendi try/catch'inde — biri patlarsa diğerleri çalışır.
+    // unawaited (fire-and-forget): UI'ı bloklamaz.
+    bool isMaintenanceRunning = false;
+    Future<void> runPeriodicMaintenance() async {
+      if (isMaintenanceRunning) return;
+      isMaintenanceRunning = true;
+      try {
+        if (kDebugMode) print('[Main] Periyodik bakim basladi');
+        try {
+          await ImageCacheService().init();
+          await ImageCacheService().audit();
+        } catch (e) {
+          if (kDebugMode) print('[Main] periyodik image audit error: $e');
+        }
+        try {
+          await LocalDbService().compactDatabase();
+        } catch (e) {
+          if (kDebugMode) print('[Main] periyodik db compact error: $e');
+        }
+        try {
+          await VersionService().cleanupOldUpdateFiles();
+        } catch (e) {
+          if (kDebugMode) print('[Main] periyodik update cleanup error: $e');
+        }
+      } finally {
+        isMaintenanceRunning = false;
+      }
+    }
+    Timer.periodic(const Duration(hours: 6), (_) {
+      unawaited(runPeriodicMaintenance());
+    });
+
     // Yazici ayarlarini yukle
     await printerService.loadSettings().timeout(
       const Duration(seconds: 3),

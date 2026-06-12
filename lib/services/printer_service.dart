@@ -577,6 +577,7 @@ class PrinterService {
   Future<bool> _attemptSend(String ip, int port, List<int> bytes, {int timeoutSec = 4}) async {
     Socket? socket;
     bool wroteSuccessfully = false;
+    bool flushTimedOut = false;
     try {
       socket = await Socket.connect(
         ip,
@@ -586,8 +587,16 @@ class PrinterService {
 
       socket.add(bytes);
       await socket.flush().timeout(const Duration(seconds: 5), onTimeout: () {
+        // 12 Haz 2026: flush 5sn'de bitmediyse yazici veriyi almamis olabilir
+        // (kapak acik / kagit yok / buffer dolu). Basari SAYMA — false don ki
+        // _sendToPrinter'in mevcut retry/kuyruk yolu devreye girsin.
+        flushTimedOut = true;
         print('[Printer] flush timeout - $ip:$port');
       });
+      if (flushTimedOut) {
+        print('[Printer] flush tamamlanamadi ($ip:$port) — basarisiz sayiliyor');
+        return false;
+      }
       wroteSuccessfully = true;
 
       // Small grace period so the printer fully consumes the buffer before close()

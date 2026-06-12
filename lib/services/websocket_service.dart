@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'log_service.dart';
 
@@ -30,6 +31,16 @@ class WebSocketService {
   IO.Socket? _panelSocket;
   String? _apiKey;
 
+  // 12 Haz 2026: KALICI ÖLÜM FİX. reconnectionAttempts (10/20) tükenince
+  // socket.io Manager 'reconnect_failed' emit eder ve bir daha ASLA denemez
+  // → POS açıkken ~1dk internet kesintisi = fiş/cache eventleri kalıcı ölü.
+  // DİKKAT: 'reconnect_failed' Socket'te DEĞİL Manager'da emit edilir
+  // (paket kaynağı manager.dart:418) — bu yüzden _socket.io.on(...) ile dinlenir.
+  Timer? _watchdogTimer;             // 45sn'de bir bağlantı sağlığı kontrolü
+  Timer? _reconnectFailedTimer;      // _socket reconnect_failed → 30sn sonra tekrar
+  Timer? _panelReconnectFailedTimer; // _panelSocket reconnect_failed → 30sn sonra tekrar
+  bool _isReconnecting = false;      // watchdog üst üste binme koruması
+
   Future<void> connect(String serverUrl, {String? token}) async {
     var url = serverUrl.replaceAll('/api', '');
     // HTTP → HTTPS, ws → wss
@@ -37,6 +48,33 @@ class WebSocketService {
     _serverUrl = url;
     _authToken = token;
     _connect();
+    // 12 Haz 2026: watchdog'u başlat (bağlantı parametreleri artık elde)
+    _startWatchdog();
+  }
+
+  // 12 Haz 2026: 45sn watchdog — reconnect_failed handler'ı herhangi bir
+  // sebeple kaçarsa bağlantıyı toparlayan son emniyet kemeri. Her iki socket
+  // için de geçerli. _isReconnecting guard'ı üst üste binmeyi engeller.
+  void _startWatchdog() {
+    _watchdogTimer?.cancel();
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 45), (_) {
+      if (_isReconnecting) return;
+      try {
+        _isReconnecting = true;
+        if (_serverUrl != null && (_socket == null || _socket!.connected != true)) {
+          print('[WebSocket] Watchdog: tenant socket kopuk, yeniden baglaniliyor');
+          _connect();
+        }
+        if (_apiKey != null && (_panelSocket == null || _panelSocket!.connected != true)) {
+          print('[PanelSocket] Watchdog: panel socket kopuk, yeniden baglaniliyor');
+          connectPanelSocket(_apiKey!);
+        }
+      } catch (e) {
+        print('[WebSocket] Watchdog hata: $e');
+      } finally {
+        _isReconnecting = false;
+      }
+    });
   }
 
   void _connect() {
@@ -49,6 +87,9 @@ class WebSocketService {
     // işleniyor (N kez ses/yazdırma → ÇİFT FİŞ). Uzun açık kalınca birikip donduruyordu.
     // connectPanelSocket'teki (satır ~261) mevcut pattern'in AYNISI — eskiyi kapat.
     try {
+      // 12 Haz 2026: Manager-level listener'ı da temizle (reconnect_failed
+      // Manager'a bağlanır, clearListeners sadece Socket'inkileri siler)
+      _socket?.io.off('reconnect_failed');
       _socket?.clearListeners();
       _socket?.disconnect();
       _socket?.dispose();
@@ -195,6 +236,20 @@ class WebSocketService {
         }
       });
 
+      // 12 Haz 2026: KALICI ÖLÜM FİX — reconnectionAttempts (10) tükenince
+      // Manager 'reconnect_failed' emit eder ve bir daha ASLA denemez.
+      // 30sn sonra temiz _connect() ile sıfırdan dene (dispose pattern'i güvenli).
+      _socket!.io.on('reconnect_failed', (_) {
+        print('[WebSocket] reconnect_failed — 30sn sonra yeniden denenecek');
+        _logService.error(LogType.error, 'WebSocket reconnect_failed, 30sn sonra tekrar denenecek');
+        _reconnectFailedTimer?.cancel();
+        _reconnectFailedTimer = Timer(const Duration(seconds: 30), () {
+          if (_socket == null || _socket!.connected != true) {
+            _connect();
+          }
+        });
+      });
+
     } catch (e) {
       print('[WebSocket] Connection error: $e');
       _isConnected = false;
@@ -241,6 +296,14 @@ class WebSocketService {
   }
 
   void disconnect() {
+    // 12 Haz 2026: bilinçli kapanışta reconnect timer'ları da durdur
+    // (watchdog/reconnect_failed bağlantıyı geri açmasın)
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
+    _reconnectFailedTimer?.cancel();
+    _reconnectFailedTimer = null;
+    _panelReconnectFailedTimer?.cancel();
+    _panelReconnectFailedTimer = null;
     _socket?.disconnect();
     _socket?.dispose();
     _socket = null;
@@ -273,6 +336,9 @@ class WebSocketService {
     _apiKey = apiKey;
     // Eski bağlantıyı kapat (11 Haz 2026: clearListeners eklendi — handler leak'i tam kapat)
     try {
+      // 12 Haz 2026: Manager-level listener'ı da temizle (reconnect_failed
+      // Manager'a bağlanır, clearListeners sadece Socket'inkileri siler)
+      _panelSocket?.io.off('reconnect_failed');
       _panelSocket?.clearListeners();
       _panelSocket?.disconnect();
       _panelSocket?.dispose();
@@ -302,6 +368,18 @@ class WebSocketService {
 
       _panelSocket!.onConnectError((error) {
         print('[PanelSocket] Connect error: $error');
+      });
+
+      // 12 Haz 2026: KALICI ÖLÜM FİX — reconnectionAttempts (20) tükenince
+      // panel socket de bir daha denemez; 30sn sonra temiz yeniden bağlan.
+      _panelSocket!.io.on('reconnect_failed', (_) {
+        print('[PanelSocket] reconnect_failed — 30sn sonra yeniden denenecek');
+        _panelReconnectFailedTimer?.cancel();
+        _panelReconnectFailedTimer = Timer(const Duration(seconds: 30), () {
+          if (_apiKey != null && (_panelSocket == null || _panelSocket!.connected != true)) {
+            connectPanelSocket(_apiKey!);
+          }
+        });
       });
 
       // KITCHEN PRINT — başka POS'tan gelen mutfak fişi

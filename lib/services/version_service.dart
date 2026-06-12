@@ -350,7 +350,8 @@ class VersionService {
   /// Dosyaya log yaz (debug için)
   Future<void> _writeDebugLog(String message) async {
     try {
-      final home = Platform.environment['HOME'];
+      // Windows'ta HOME tanımsız — USERPROFILE fallback (yoksa log hiç yazılmıyordu)
+      final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
       if (home == null) return;
       final logFile = File('$home/syncresto_update.log');
       final timestamp = DateTime.now().toIso8601String();
@@ -570,12 +571,32 @@ class VersionService {
         //   2. Yeni dosyalar robocopy /MIR ile aynalanır (eski silinen dosyalar bırakılmaz)
         //   3. Çalışan .exe kapanması için 20 saniye bekle, sonra start
         //   4. Hata olursa batch errorlevel ile yakalanır, log'a yazılır
-        final appData = Platform.environment['LOCALAPPDATA'];
-        if (appData == null) {
-          throw Exception('LOCALAPPDATA bulunamadı');
+        // Update hedefi = ÇALIŞAN exe'nin bulunduğu klasör (zip nereye açıldıysa orası).
+        // Eski sabit %LOCALAPPDATA% hedefi, exe başka konumdaysa update'lerin hiç
+        // ulaşmamasına ve sonsuz update döngüsüne yol açıyordu.
+        String appDir = File(Platform.resolvedExecutable).parent.path;
+
+        // Yazılabilirlik testi — exe Program Files gibi korumalı bir klasördeyse
+        // eski LOCALAPPDATA davranışına düş (robocopy yetki hatasıyla patlamasın)
+        bool appDirWritable = false;
+        try {
+          final probe = File('$appDir\\.syncresto_write_test');
+          await probe.writeAsString('test');
+          await probe.delete();
+          appDirWritable = true;
+        } catch (e) {
+          await _writeDebugLog('appDir yazılamıyor ($appDir): $e');
         }
 
-        final appDir = '$appData\\SyncResto POS';
+        if (!appDirWritable) {
+          final appData = Platform.environment['LOCALAPPDATA'];
+          if (appData == null) {
+            throw Exception('LOCALAPPDATA bulunamadı');
+          }
+          appDir = '$appData\\SyncResto POS';
+          await _writeDebugLog('Fallback: LOCALAPPDATA hedefine düşüldü: $appDir');
+        }
+
         final tempDir = await getTemporaryDirectory();
         final extractDir = '${tempDir.path}\\SyncResto_Update';
         final logFile = '${tempDir.path}\\syncresto_updater.log';
@@ -629,7 +650,7 @@ class VersionService {
           await _writeDebugLog('Source dir tespit hatası: $e');
         }
 
-        // Updater batch script — robocopy /MIR + bekleme + restart + hata kontrolü
+        // Updater batch script — yedek + robocopy /MIR + rollback + restart + hata kontrolü
         // %ERRORLEVEL% < 8 = robocopy başarılı (8+ gerçek hata)
         final batchContent = '''
 @echo off
@@ -643,24 +664,44 @@ echo Eski uygulama kapanıyor... >> "$logFile"
 taskkill /IM "SyncResto POS.exe" /F >nul 2>&1
 timeout /t 5 /nobreak > nul
 
+REM Robocopy /MIR ÖNCESİ mevcut kurulumu yedekle (rollback için)
+echo Yedek alınıyor: $appDir.backup >> "$logFile"
+robocopy "$appDir" "$appDir.backup" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS >> "$logFile" 2>&1
+set BRC=!ERRORLEVEL!
+echo Backup exit code: !BRC! >> "$logFile"
+
 REM Robocopy ile mirror — eski dosyalar silinir, yeniler kopyalanır
 REM /MIR: mirror, /R:3 retry 3, /W:2 wait 2, /NFL/NDL/NJH/NJS quiet
 robocopy "$sourceDir" "$appDir" /MIR /R:3 /W:2 /NFL /NDL /NJH /NJS >> "$logFile" 2>&1
 set RC=!ERRORLEVEL!
 echo Robocopy exit code: !RC! >> "$logFile"
 
-REM Robocopy 0-7 başarılı, 8+ hata
-if !RC! GEQ 8 (
-  echo HATA: Robocopy başarısız !RC! >> "$logFile"
-  pause
-  exit /b 1
-)
+REM Robocopy 0-7 başarılı, 8+ hata → yedekten geri yükle + eski sürümü başlat
+if !RC! GEQ 8 goto :rollback
+
+REM Başarılı — yedeği ve zip'i temizle
+rmdir /s /q "$appDir.backup" >nul 2>&1
+del /f /q "${updateFile.path}" >nul 2>&1
 
 echo Yeni uygulama başlatılıyor... >> "$logFile"
 start "" "$appDir\\SyncResto POS.exe"
 echo [%date% %time%] Update tamamlandı >> "$logFile"
+goto :selfdelete
 
-REM Updater script'i kendini sil
+:rollback
+echo HATA: Robocopy başarısız !RC! — yedekten geri yükleniyor >> "$logFile"
+if !BRC! LSS 8 (
+  robocopy "$appDir.backup" "$appDir" /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS >> "$logFile" 2>&1
+  echo Rollback exit code: !ERRORLEVEL! >> "$logFile"
+) else (
+  echo UYARI: Yedek sağlıksız ^(!BRC!^) — rollback atlandı >> "$logFile"
+)
+echo Eski uygulama başlatılıyor... >> "$logFile"
+start "" "$appDir\\SyncResto POS.exe"
+goto :selfdelete
+
+:selfdelete
+REM Updater script'i kendini sil (başarı VE hata yolunda)
 (goto) 2>nul & del "%~f0"
 ''';
 
@@ -715,8 +756,9 @@ REM Updater script'i kendini sil
   // ───────────────────────────────────────────────────────────────────────
 
   /// %temp% (getTemporaryDirectory) altındaki eski update artefakt'larını sil.
-  /// Pattern: SyncResto-*.zip, SyncResto_Update klasörü, syncresto_updater.log.
+  /// Pattern: SyncResto-*.zip, SyncResto_Update klasörü, syncresto_updater.log/.bat.
   /// 3 günden eski olanlar silinir (yeni indirilenler korunur).
+  /// syncresto_startup.log SİLİNMEZ (runner her boot append ediyor) — 1MB üstünde truncate edilir.
   Future<void> cleanupOldUpdateFiles({Duration maxAge = const Duration(days: 3)}) async {
     try {
       final tempDir = await getTemporaryDirectory();
@@ -729,9 +771,22 @@ REM Updater script'i kendini sil
       await for (final entity in tempDir.list(recursive: false)) {
         try {
           final name = entity.path.split(Platform.pathSeparator).last;
+
+          // syncresto_startup.log SİLİNMEZ (runner her boot append ediyor) —
+          // 1MB üstündeyse truncate et ki sınırsız büyümesin
+          if (name == 'syncresto_startup.log' && entity is File) {
+            final stat = await entity.stat();
+            if (stat.size > 1024 * 1024) {
+              await entity.writeAsString('');
+              debugPrint('[VersionService] syncresto_startup.log 1MB üstü — truncate edildi');
+            }
+            continue;
+          }
+
           final isUpdateArtifact = name.startsWith('SyncResto-') ||
               name == 'SyncResto_Update' ||
-              name == 'syncresto_updater.log';
+              name == 'syncresto_updater.log' ||
+              name == 'syncresto_updater.bat';
           if (!isUpdateArtifact) continue;
 
           final stat = await entity.stat();

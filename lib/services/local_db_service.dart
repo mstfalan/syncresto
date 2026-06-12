@@ -2,11 +2,20 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 
 class LocalDbService {
   static Database? _database;
+  // 12 Haz 2026: sabitlenmiş mutlak DB yolu (cache) — _resolveDbPath() doldurur
+  static String? _dbPath;
+  // 12 Haz 2026: cacheTables/cacheSections hash-diff — aynı veri tekrar yazılmasın
+  // (2sn'lik masa poll'u günde ~86K gereksiz delete+insert transaction'ı yapıyordu)
+  static String? _lastTablesHash;
+  static String? _lastSectionsHash;
+  // 12 Haz 2026: print_queue completed temizliği throttle (getPendingPrintJobs içinde)
+  static DateTime? _lastPrintCleanupAt;
   static final LocalDbService _instance = LocalDbService._internal();
 
   factory LocalDbService() => _instance;
@@ -30,8 +39,10 @@ class LocalDbService {
       databaseFactory = databaseFactoryFfi;
     }
 
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'syncresto_pos.db');
+    final path = await _resolveDbPath();
+
+    // 12 Haz 2026: eski CWD-relatif konumdaki DB varsa yeni konuma taşı (tek seferlik)
+    await _migrateLegacyDbIfNeeded(path);
 
     return await openDatabase(
       path,
@@ -57,6 +68,61 @@ class LocalDbService {
         await db.execute('PRAGMA auto_vacuum = INCREMENTAL');
       },
     );
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 12 Haz 2026 — DB YOLU SABİTLEME
+  // sqflite_common_ffi'de getDatabasesPath() CWD-relatif
+  // '.dart_tool/sqflite_common_ffi/databases' döner. Uygulama nasıl başlatıldıysa
+  // (çift tık / kısayol / terminal) CWD değişir → her seferinde FARKLI DB açılabilir!
+  // Artık path_provider getApplicationSupportDirectory() altında sabit mutlak yol kullanılır.
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// Sabit mutlak DB yolu: {ApplicationSupport}/databases/syncresto_pos.db
+  Future<String> _resolveDbPath() async {
+    if (_dbPath != null) return _dbPath!;
+    final supportDir = await getApplicationSupportDirectory();
+    final dbDir = Directory(join(supportDir.path, 'databases'));
+    if (!await dbDir.exists()) {
+      await dbDir.create(recursive: true);
+    }
+    _dbPath = join(dbDir.path, 'syncresto_pos.db');
+    return _dbPath!;
+  }
+
+  /// Eski CWD-relatif konumdaki DB'yi yeni sabit konuma kopyala (tek seferlik).
+  /// Adaylar: 1) Directory.current altı (terminal/kısayol "start in" senaryosu)
+  ///          2) Platform.resolvedExecutable dizini altı (çift tık senaryosu)
+  /// Kopyalama başarılı olsa bile ESKİ DOSYALAR SİLİNMEZ (güvenlik için bırakılır).
+  /// Hata olursa migration atlanır — açılış ASLA bloklanmaz.
+  Future<void> _migrateLegacyDbIfNeeded(String newPath) async {
+    try {
+      if (await File(newPath).exists()) return; // Yeni konumda DB zaten var
+
+      final legacyRelative = join('.dart_tool', 'sqflite_common_ffi', 'databases', 'syncresto_pos.db');
+      final candidates = <String>[
+        join(Directory.current.path, legacyRelative),
+        join(File(Platform.resolvedExecutable).parent.path, legacyRelative),
+      ];
+
+      for (final oldPath in candidates) {
+        final oldFile = File(oldPath);
+        if (!await oldFile.exists()) continue;
+
+        // .db + .db-wal + .db-shm kopyala (WAL mode yan dosyaları)
+        await oldFile.copy(newPath);
+        for (final suffix in ['-wal', '-shm']) {
+          final sideFile = File('$oldPath$suffix');
+          if (await sideFile.exists()) {
+            await sideFile.copy('$newPath$suffix');
+          }
+        }
+        print('[LocalDb] DB migration: $oldPath -> $newPath (eski dosyalar güvenlik için silinmedi)');
+        return; // İlk bulunan adaydan kopyalandı, diğerine bakma
+      }
+    } catch (e) {
+      print('[LocalDb] DB migration hatası (atlandı, normal devam): $e');
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -516,10 +582,34 @@ class LocalDbService {
     return await db.query('cached_products', where: 'is_active = 1');
   }
 
+  // 12 Haz 2026: hash-diff yardımcısı — gelen listenin deterministik hash'i.
+  // 'cached_at' alanı HARİÇ tutulur (onu zaten biz ekliyoruz, içerik karşılaştırmasına girmez).
+  // Hash üretilemezse null döner → diff atlanır, normal yazma yapılır (davranış değişmez).
+  static String? _computeCacheHash(List<Map<String, dynamic>> rows) {
+    try {
+      final body = jsonEncode(
+        rows.map((r) => Map<String, dynamic>.from(r)..remove('cached_at')).toList(),
+      );
+      return sha256.convert(utf8.encode(body)).toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Salonları cache'le
   Future<void> cacheSections(List<Map<String, dynamic>> sections) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
+
+    // 12 Haz 2026: hash-diff — gelen veri öncekiyle AYNIYSA delete+insert
+    // transaction'ını hiç çalıştırma (gereksiz yazma önleme).
+    // Guard: tablo dışarıdan boşaltıldıysa (örn. sync_service clearAllCache)
+    // hash aynı olsa bile yaz — cache boş kalmasın.
+    final hash = _computeCacheHash(sections);
+    if (hash != null && hash == _lastSectionsHash) {
+      final cnt = await db.rawQuery('SELECT COUNT(*) as count FROM cached_sections');
+      if (((cnt.first['count'] as int?) ?? 0) > 0) return; // Veri değişmedi — yazma atlandı
+    }
 
     await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_sections');
@@ -534,6 +624,7 @@ class LocalDbService {
         });
       }
     }), opName: 'cacheSections');
+    _lastSectionsHash = hash;
   }
 
   // Salonları getir
@@ -546,6 +637,16 @@ class LocalDbService {
   Future<void> cacheTables(List<Map<String, dynamic>> tables) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
+
+    // 12 Haz 2026: hash-diff — gelen veri öncekiyle AYNIYSA delete+insert
+    // transaction'ını hiç çalıştırma (2sn'lik poll günde ~86K gereksiz yazma yapıyordu).
+    // Guard: tablo dışarıdan boşaltıldıysa (örn. sync_service clearAllCache)
+    // hash aynı olsa bile yaz — cache boş kalmasın.
+    final hash = _computeCacheHash(tables);
+    if (hash != null && hash == _lastTablesHash) {
+      final cnt = await db.rawQuery('SELECT COUNT(*) as count FROM cached_tables');
+      if (((cnt.first['count'] as int?) ?? 0) > 0) return; // Veri değişmedi — yazma atlandı
+    }
 
     await _runWithRetry(() => db.transaction((txn) async {
       await txn.delete('cached_tables');
@@ -564,6 +665,7 @@ class LocalDbService {
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
     }), opName: 'cacheTables');
+    _lastTablesHash = hash;
   }
 
   // Masaları getir
@@ -1427,6 +1529,9 @@ class LocalDbService {
     await db.delete('cached_products');
     await db.delete('cached_tables');
     await db.delete('cached_sections');
+    // 12 Haz 2026: hash-diff sıfırla — temizlik sonrası ilk cache yazımı atlanmasın
+    _lastTablesHash = null;
+    _lastSectionsHash = null;
   }
 
   // Masa durumunu güncelle
@@ -1790,8 +1895,22 @@ class LocalDbService {
   }
 
   // Bekleyen yazdırma işlerini getir
+  // 12 Haz 2026: completed temizliği buraya bağlandı — print_queue_service._processQueue()
+  // kuyruk boşken early-return yaptığı için cleanupCompletedPrintJobs() hiç çalışmıyordu
+  // (completed satırlar sürekli birikiyordu). Bu fonksiyon early-return'dan ÖNCE her
+  // döngüde çağrıldığı için temizlik artık garantili; 10dk throttle gereksiz DELETE'i önler.
   Future<List<Map<String, dynamic>>> getPendingPrintJobs() async {
     final db = await database;
+    final nowDt = DateTime.now();
+    if (_lastPrintCleanupAt == null ||
+        nowDt.difference(_lastPrintCleanupAt!) > const Duration(minutes: 10)) {
+      _lastPrintCleanupAt = nowDt;
+      try {
+        await cleanupCompletedPrintJobs();
+      } catch (e) {
+        print('[LocalDb] completed print job temizlik hatası: $e');
+      }
+    }
     return await db.query(
       'print_queue',
       where: "status = 'pending' AND retry_count < max_retries",
@@ -1941,10 +2060,11 @@ class LocalDbService {
   // ───────────────────────────────────────────────────────────────────────
 
   /// DB dosya boyutunu byte cinsinden döndür.
+  /// 12 Haz 2026: getDatabasesPath() yerine sabitlenmiş yol (_resolveDbPath) —
+  /// yoksa compactDatabase eski CWD-relatif konuma bakıp yanlış ölçerdi.
   Future<int> getDatabaseSizeBytes() async {
     try {
-      final dbPath = await getDatabasesPath();
-      final file = File(join(dbPath, 'syncresto_pos.db'));
+      final file = File(await _resolveDbPath());
       if (!await file.exists()) return 0;
       return await file.length();
     } catch (_) {

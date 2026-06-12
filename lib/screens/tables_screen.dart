@@ -884,8 +884,8 @@ class _TablesScreenState extends State<TablesScreen> {
 
               // Print queue
               final printData = snapshot.data?[1] as Map<String, int>? ?? {};
-              final printPending = printData['pending'] ?? 0;
-              final printFailed = printData['failed'] ?? 0;
+              final printPending = printData['pending_count'] ?? 0;
+              final printFailed = printData['failed_count'] ?? 0;
 
               // Toplam
               final totalPending = syncPending + printPending;

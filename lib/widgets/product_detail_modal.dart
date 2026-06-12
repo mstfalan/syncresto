@@ -80,6 +80,9 @@ class _ProductDetailModalState extends State<ProductDetailModal> {
     return total;
   }
 
+  // MUTLAK fiyat modeli (Web POS ticket.js:310-332 ile ayni): unit_price = baz + ekstra.
+  // addTicketItem'a HER ZAMAN bu mutlak deger gonderilir — backend extras_amount okumaz,
+  // unit_price eksik giderse katalog fiyati basilir ('bazen 340 bazen 350' vakasi).
   double get _unitPrice {
     return _basePrice + _extrasTotal;
   }

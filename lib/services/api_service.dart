@@ -513,6 +513,14 @@ class ApiService {
     }
   }
 
+  /// Adisyona urun ekler.
+  ///
+  /// FIYAT SOZLESMESI (12 Haz 2026, Web POS ticket.js:310-332 ile ayni model):
+  /// [unitPrice] MUTLAK satir fiyatidir = bazFiyat + secilmis ekstra toplami.
+  /// Parametre `required` oldugu icin payload'da `unit_price` HER ZAMAN gonderilir;
+  /// backend katalog fiyatina dusmez. [extrasAmount] sadece bilgi amaclidir:
+  /// backend panel-direct addItem `extras_amount` alanini OKUMAZ (tickets.js:169),
+  /// fiyati ASLA unit_price + extras_amount diye toplamaz.
   Future<Map<String, dynamic>> addTicketItem({
     required int ticketId,
     required int productId,
@@ -615,7 +623,12 @@ class ApiService {
           if (notes != null) 'notes': notes,
           if (waiterId != null) 'waiter_id': waiterId,
           if (extrasAmount != null) 'extras_amount': extrasAmount,
-          if (unitPrice != null && extrasAmount == null) 'unit_price': unitPrice,
+          // 12 Haz 2026 FIX: unit_price extrasAmount'tan BAGIMSIZ her zaman gonderilir.
+          // Eski kod extrasAmount doluysa unit_price'i payload'dan dusuruyordu;
+          // backend updateItem extras_amount OKUMAZ ve COALESCE($3, unit_price) ile
+          // eski fiyati korur (tickets.js:308) → fiyat guncellemesi sessizce kayboluyordu.
+          // unitPrice MUTLAK fiyattir (baz + ekstra), null ise eski fiyat korunur (COALESCE).
+          if (unitPrice != null) 'unit_price': unitPrice,
         });
         if (response.data['success'] == true) {
           _logService.logAction('Urun guncellendi', details: {
@@ -644,7 +657,8 @@ class ApiService {
         if (notes != null) 'notes': notes,
         if (waiterId != null) 'waiter_id': waiterId,
         if (extrasAmount != null) 'extras_amount': extrasAmount,
-        if (unitPrice != null && extrasAmount == null) 'unit_price': unitPrice,
+        // 12 Haz 2026 FIX: online dal ile ayni — unit_price her zaman dolu gider (MUTLAK fiyat)
+        if (unitPrice != null) 'unit_price': unitPrice,
       },
       description: 'Urun #$itemId offline guncellendi',
     );

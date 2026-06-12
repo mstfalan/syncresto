@@ -82,6 +82,19 @@ class _AddItemModalState extends State<AddItemModal> {
     return double.tryParse(value.toString()) ?? defaultValue;
   }
 
+  /// 12 Haz 2026 — MUTLAK FIYAT modeli: notes icindeki '(+N TL)' / '(+NTL)'
+  /// fiyat token'larini toplar (ondalik virgul/nokta destekli).
+  /// Tek kullanim yeri: varyant uygulamasinda mevcut ucretli ekstra toplamini
+  /// bulmak (eski varyant etiketleri temizlendikten SONRA cagrilir).
+  double _sumExtraPriceTokens(String notes) {
+    if (notes.isEmpty) return 0;
+    double total = 0;
+    for (final m in RegExp(r'\(\+\s*(\d+(?:[.,]\d+)?)\s*TL\)', caseSensitive: false).allMatches(notes)) {
+      total += double.tryParse((m.group(1) ?? '0').replaceAll(',', '.')) ?? 0;
+    }
+    return total;
+  }
+
   bool _hasPermission(String permission) {
     if (!widget.apiService.isOnline) {
       const offlineAllowed = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket'];
@@ -348,6 +361,12 @@ class _AddItemModalState extends State<AddItemModal> {
     }
     newNotes = newNotes.replaceAll(RegExp(',\\s*,'), ',').replaceAll(RegExp('^,|,\$'), '').trim();
 
+    // 12 Haz 2026 — MUTLAK FIYAT modeli (F4 fix): eski varyant etiketleri
+    // temizlendikten sonra notes'ta kalan '(+N TL)' token'lari = mevcut ucretli
+    // ekstra toplami. unit_price'a eklenir ki varyant degisince ekstra ucreti
+    // fiyattan ucmasin. (Yeni varyant etiketi henuz eklenmeden hesaplanmali.)
+    final existingExtrasTotal = _sumExtraPriceTokens(newNotes);
+
     if (selectedVariant != null) {
       final vname = selectedVariant['name']?.toString() ?? '';
       final mod = _safeDouble(selectedVariant['price_modifier']);
@@ -367,7 +386,8 @@ class _AddItemModalState extends State<AddItemModal> {
         ticketId: widget.ticketId,
         itemId: itemId,
         notes: newNotes.isEmpty ? null : newNotes,
-        unitPrice: basePrice + variantModifier,
+        // MUTLAK FIYAT: baz + yeni varyant modifier + mevcut ekstra toplami
+        unitPrice: basePrice + variantModifier + existingExtrasTotal,
         waiterId: widget.waiterId,
       );
       if (res['success'] == true) {
@@ -512,13 +532,16 @@ class _AddItemModalState extends State<AddItemModal> {
     final currentNote = item['notes']?.toString() ?? '';
     final controller = TextEditingController(text: currentNote);
 
-    // Ürünün category_id'sini bul
+    // Ürünün category_id'sini bul + MUTLAK FIYAT modeli icin urun kaydini sakla
+    // (kayitta baz fiyat urun kaydindan okunur: restaurant_price ?? price —
+    // item.unit_price'tan TURETILMEZ, o eski ekstralarla kirlenmis olabilir)
     final productId = item['product_id'];
     int? categoryId;
+    dynamic dialogProd;
     if (productId != null) {
       final allProducts = await widget.apiService.getProducts();
-      final prod = (allProducts as List).where((p) => p['id'] == productId).firstOrNull;
-      if (prod != null) categoryId = prod['category_id'] as int?;
+      dialogProd = (allProducts as List).where((p) => p['id'] == productId).firstOrNull;
+      if (dialogProd != null) categoryId = dialogProd['category_id'] as int?;
     }
 
     // Paralel API çağrıları
@@ -556,16 +579,41 @@ class _AddItemModalState extends State<AddItemModal> {
           }
         }
 
+        // 12 Haz 2026 — MUTLAK FIYAT modeli: token normalize. Flutter
+        // product_detail '+Ad (+NTL)' yazar, chip etiketi 'Ad (+NTL)' —
+        // bastaki '+' strip edilmezse ayni ekstra hem serbest-metin hem chip
+        // olarak NOT'U CIFTLER (Web POS ticket.js normTok esleniği).
+        String normTok(String s) {
+          var t = s.trim();
+          if (t.startsWith('+')) t = t.substring(1).trim();
+          return t;
+        }
+
+        bool isChipToken(String raw) {
+          final t = normTok(raw);
+          if (t.isEmpty) return false;
+          if (predefinedNotes.any((p) => p['note'] == t)) return true;
+          if (globalVariants.any((v) => v['name'] == t || '${v['name']} (+${_safeDouble(v['price']).toStringAsFixed(0)}TL)' == t)) return true;
+          if (globalExtras.any((e) => e['name'] == t || '${e['name']} (+${_safeDouble(e['price']).toStringAsFixed(0)}TL)' == t)) return true;
+          return false;
+        }
+
+        // Chip'e eslenmeyen serbest-metin tokenlari (fiyat etiketleri korunur)
+        String computeFreeText() => controller.text
+            .split(',')
+            .where((t) => t.trim().isNotEmpty && !isChipToken(t))
+            .map((t) => t.trim())
+            .join(', ');
+
+        // Acilis durumu — priceDirty karsilastirmasi icin (Web POS pattern'i):
+        // chip setleri + chip'e eslenmeyen serbest '(+N TL)' token toplami.
+        final initialVariantIds = Set<int>.from(selectedVariantIds);
+        final initialExtraIds = Set<int>.from(selectedExtraIds);
+        final initialFreeSum = _sumExtraPriceTokens(computeFreeText());
+
         void rebuildNote(void Function(void Function()) setState) {
           final parts = <String>[];
-          final freeText = controller.text.split(',').where((t) {
-            final trimmed = t.trim();
-            if (trimmed.isEmpty) return false;
-            if (predefinedNotes.any((p) => p['note'] == trimmed)) return false;
-            if (globalVariants.any((v) => v['name'] == trimmed || '${v['name']} (+${_safeDouble(v['price']).toStringAsFixed(0)}TL)' == trimmed)) return false;
-            if (globalExtras.any((e) => e['name'] == trimmed || '${e['name']} (+${_safeDouble(e['price']).toStringAsFixed(0)}TL)' == trimmed)) return false;
-            return true;
-          }).join(', ');
+          final freeText = computeFreeText();
           if (freeText.isNotEmpty) parts.add(freeText);
           parts.addAll(selectedNotes);
           for (var vid in selectedVariantIds) {
@@ -595,6 +643,16 @@ class _AddItemModalState extends State<AddItemModal> {
             if (e != null) extraPrice += _safeDouble(e['price']);
           }
         }
+
+        // 12 Haz 2026 — MUTLAK FIYAT modeli (F1 fix): pre-select edilmis fiyatli
+        // chip'lerden extraPrice'i acilista BIR KEZ hesapla (Web POS updateUI()
+        // init pattern'i). Eskiden 0 basliyordu → chip'e dokunulmadan kaydedilince
+        // additive safety-net regex'i devreye girip her kayitta cift sayim yapiyordu.
+        if (selectedVariantIds.isNotEmpty || selectedExtraIds.isNotEmpty) {
+          rebuildNote((fn) => fn());
+        }
+        // Acilistaki chip toplami (baz fiyat turetme fallback'i icin)
+        final initialChipsPrice = extraPrice;
 
         Widget buildChips(List items, Set<int> selectedIds, String nameKey, void Function(void Function()) setState) {
           return Wrap(
@@ -737,7 +795,25 @@ class _AddItemModalState extends State<AddItemModal> {
                           )),
                           const SizedBox(width: 8),
                           SizedBox(width: 150, height: 48, child: ElevatedButton(
-                            onPressed: () => Navigator.pop(ctx, {'note': controller.text, 'extraPrice': extraPrice}),
+                            onPressed: () {
+                              // 12 Haz 2026 MUTLAK FIYAT: fiyat ogeleri degisti mi?
+                              // Degismediyse kaydetmede unit_price GONDERILMEZ
+                              // (backend COALESCE eski fiyati korur).
+                              final freeSum = _sumExtraPriceTokens(computeFreeText());
+                              final varSame = selectedVariantIds.length == initialVariantIds.length &&
+                                  selectedVariantIds.containsAll(initialVariantIds);
+                              final extSame = selectedExtraIds.length == initialExtraIds.length &&
+                                  selectedExtraIds.containsAll(initialExtraIds);
+                              final priceDirty = !(varSame && extSame && (freeSum - initialFreeSum).abs() < 0.001);
+                              Navigator.pop(ctx, {
+                                'note': controller.text,
+                                'extraPrice': extraPrice,
+                                'freeSum': freeSum,
+                                'priceDirty': priceDirty,
+                                'initialChipsPrice': initialChipsPrice,
+                                'initialFreeSum': initialFreeSum,
+                              });
+                            },
                             style: ElevatedButton.styleFrom(backgroundColor: theme.primaryColor, foregroundColor: Colors.white),
                             child: Text(extraPrice > 0 ? 'Kaydet (+${extraPrice.toStringAsFixed(0)}₺)' : 'Kaydet', style: const TextStyle(fontSize: 16)),
                           )),
@@ -761,7 +837,37 @@ class _AddItemModalState extends State<AddItemModal> {
       if (itemId == null) return;
 
       final note = result['note'] as String? ?? '';
-      final addedPrice = result['extraPrice'] as double? ?? 0;
+      final chipsPrice = result['extraPrice'] as double? ?? 0;
+      final freeSum = result['freeSum'] as double? ?? 0;
+      final priceDirty = result['priceDirty'] as bool? ?? true;
+
+      final currentUnitPrice = _safeDouble(item['unit_price']);
+
+      // 12 Haz 2026 — MUTLAK FIYAT modeli (F1/F2 fix, Web POS ticket.js ile ayni):
+      // - Fiyat ogesi DEGISMEDIYSE unit_price gonderilmez → backend COALESCE
+      //   eski fiyati korur (manuel ozel fiyat + mevcut ekstra ucreti bozulmaz).
+      // - DEGISTIYSE fiyat SIFIRDAN kurulur: baz (urun kaydi restaurant_price
+      //   ?? price) + secili chip toplami + chip'e eslenmeyen serbest '(+N TL)'
+      //   token toplami. Eski ADDITIVE model (currentUnitPrice + delta) her
+      //   kayitta cift sayim yapiyordu (350→360→370) — kaldirildi. Ekstra
+      //   kaldirilinca da fiyat artik DUSER (eskiden COALESCE eski fiyati
+      //   tutuyordu, iz birakmayan fazla tahsilat).
+      double? newUnitPrice;
+      if (priceDirty) {
+        double base = 0;
+        if (dialogProd != null) {
+          base = _safeDouble(dialogProd['restaurant_price'] ?? dialogProd['price']);
+        }
+        if (base <= 0) {
+          // Urun kaydi bulunamadiysa baz'i mevcut fiyattan turet:
+          // acilista bilinen fiyat ogelerini (chip + serbest token) dus.
+          final initialChipsPrice = result['initialChipsPrice'] as double? ?? 0;
+          final initialFreeSum = result['initialFreeSum'] as double? ?? 0;
+          base = currentUnitPrice - initialChipsPrice - initialFreeSum;
+          if (base < 0) base = currentUnitPrice;
+        }
+        newUnitPrice = base + chipsPrice + freeSum;
+      }
 
       // 12 May 2026 debug: hangi item'a not yazildi
       LogService().logAction('Not API cagirildi', details: {
@@ -769,29 +875,17 @@ class _AddItemModalState extends State<AddItemModal> {
         'item_id': itemId,
         'item_product_name': item['product_name'],
         'note': note,
-        'added_price': addedPrice,
+        'chips_price': chipsPrice,
+        'free_sum': freeSum,
+        'price_dirty': priceDirty,
+        'new_unit_price': newUnitPrice,
       });
-
-      final currentUnitPrice = _safeDouble(item['unit_price']);
-
-      // 3 Haz 2026 — Safety net: notes içinde "(+NTL)" pattern var ama addedPrice 0 ise
-      // (örn. garson manuel yazdı), regex ile parse et ki unit_price güncellensin.
-      // Backend pos.js'te de aynı pattern var ([[project_pos_extras_safety_net]]).
-      double effectiveAdded = addedPrice;
-      if (effectiveAdded == 0 && note.isNotEmpty) {
-        final matches = RegExp(r'\(\+\s*(\d+(?:[.,]\d+)?)\s*TL\)', caseSensitive: false).allMatches(note);
-        double parsed = 0;
-        for (final m in matches) {
-          parsed += double.tryParse((m.group(1) ?? '0').replaceAll(',', '.')) ?? 0;
-        }
-        if (parsed > 0) effectiveAdded = parsed;
-      }
 
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         notes: note,
-        unitPrice: effectiveAdded != 0 ? currentUnitPrice + effectiveAdded : null,
+        unitPrice: newUnitPrice,
       );
 
       await _loadTicketItems();

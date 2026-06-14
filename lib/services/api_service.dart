@@ -97,6 +97,10 @@ class ApiService {
     _dio.options.headers['X-API-Key'] = apiKey;
   }
 
+  // 12 Haz 2026: WebposPrintService poll guard — API key set edilmeden
+  // polling baslamasin (setup ekranindayken 5sn'de bir 401 spam onleme).
+  bool get hasApiKey => _apiKey != null;
+
   Dio get dio => _dio;
 
   Future<void> initOfflineServices() async {
@@ -1463,6 +1467,76 @@ class ApiService {
     } on DioException catch (e) {
       // Heartbeat patlamasi POS akisini etkilemesin — sadece sessiz logla
       print('[API] printerHeartbeat hatasi: ${e.message}');
+      return false;
+    }
+  }
+
+  // =============================================
+  // Web POS Print Jobs — DB-polling + atomic claim (12 Haz 2026)
+  // Basim yetkisi SADECE claim'den gelir: 2 POS ayni job'i ayni anda gorse
+  // bile claim'i kazanan TEK POS basar (cift fis onleme DB'de atomik).
+  // ONLINE-ONLY: bu cagrilar offline sync kuyruguna ASLA GIRMEZ.
+  // =============================================
+
+  /// Bekleyen Web POS fis islerini getirir.
+  /// Yanit elemanlari: { id, job_type, printer: {ip, port},
+  /// items: [{product_name, quantity, notes, unit_price}], ticket: {...} }
+  Future<List<dynamic>> getWebposPendingPrintJobs() async {
+    if (!_connectivity.isOnline) return [];
+    try {
+      final response = await _dio.get('/api/pos/print-jobs/pending');
+      final data = response.data;
+      if (data is List) return data;
+      if (data is Map && data['jobs'] is List) return data['jobs'] as List;
+      return [];
+    } on DioException catch (e) {
+      print('[API] getWebposPendingPrintJobs hatasi: ${e.message}');
+      return [];
+    } catch (e) {
+      print('[API] getWebposPendingPrintJobs beklenmeyen hata: $e');
+      return [];
+    }
+  }
+
+  /// Print job'i atomik olarak sahiplenir.
+  /// SADECE HTTP 200 && claimed==true ise true doner; 409 (baska POS kapti)
+  /// dahil diger HER durum false — false donerse YAZDIRMA YAPILMAZ.
+  Future<bool> claimPrintJob(int jobId) async {
+    if (!_connectivity.isOnline) return false;
+    try {
+      final response = await _dio.post('/api/pos/print-jobs/$jobId/claim');
+      return response.statusCode == 200 &&
+          response.data is Map &&
+          response.data['claimed'] == true;
+    } on DioException catch (e) {
+      // 409 = job baska POS tarafindan claim edildi — normal akis, sessiz false
+      if (e.response?.statusCode != 409) {
+        print('[API] claimPrintJob hatasi (#$jobId): ${e.message}');
+      }
+      return false;
+    } catch (e) {
+      print('[API] claimPrintJob beklenmeyen hata (#$jobId): $e');
+      return false;
+    }
+  }
+
+  /// Claim edilen job'in yazdirma sonucunu sunucuya bildirir.
+  Future<bool> reportPrintJobResult(int jobId, {required bool ok, String? error}) async {
+    if (!_connectivity.isOnline) return false;
+    try {
+      final response = await _dio.post(
+        '/api/pos/print-jobs/$jobId/result',
+        data: {
+          'ok': ok,
+          if (error != null) 'error': error,
+        },
+      );
+      return response.data is Map && response.data['success'] == true;
+    } on DioException catch (e) {
+      print('[API] reportPrintJobResult hatasi (#$jobId): ${e.message}');
+      return false;
+    } catch (e) {
+      print('[API] reportPrintJobResult beklenmeyen hata (#$jobId): $e');
       return false;
     }
   }

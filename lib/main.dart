@@ -13,6 +13,7 @@ import 'services/api_service.dart';
 import 'services/printer_service.dart';
 import 'services/sound_service.dart';
 import 'services/websocket_service.dart';
+import 'services/webpos_print_service.dart';
 import 'services/print_queue_service.dart';
 import 'services/sync_service.dart';
 // 1 Haz 2026 (v1.5.6): Boot audit servisleri (donma fix)
@@ -393,6 +394,23 @@ void main() {
       print('[KitchenPrint] hata: $e');
     }
   };
+
+  // 12 Haz 2026: Web POS fiş işleri — DB-polling + atomic claim istemcisi.
+  // Socket 'webpos_jobs_hint' SADECE poll'u öne çeker; basım yetkisi DB'deki
+  // atomic claim'den gelir (2 POS açıkken bile tek fiş). 5sn timer + guard
+  // WebposPrintService içinde. Kill-switch: SharedPreferences
+  // 'webpos_poll_enabled' (default true) — kapalıysa start() no-op.
+  final webposPrintService = WebposPrintService();
+  webposPrintService.configure(
+    apiService: apiService,
+    printerService: printerService,
+  );
+  webSocketService.onWebposJobsHint = () {
+    webposPrintService.triggerNow();
+  };
+  // Fire-and-forget: boot'u bloklamaz; API key yokken poll kendini atlar
+  // (api.hasApiKey guard), InitialSync sonrası key set olunca devreye girer.
+  unawaited(webposPrintService.start());
 
     runApp(
       ChangeNotifierProvider.value(

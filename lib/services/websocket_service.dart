@@ -23,6 +23,10 @@ class WebSocketService {
   // 16 May 2026: Aynı tenant POS'lar arası kitchen print broadcast
   // payload: { ticket_id, ticket_number, table_number, printer_groups, source_socket_id, ... }
   Function(Map<String, dynamic>)? onKitchenPrint;
+  // 12 Haz 2026: Web POS print job hint — backend yeni fiş işi oluşunca emit eder.
+  // Basım YETKİSİ taşımaz; sadece "hemen poll et" tetiğidir
+  // (tek-basım garantisi DB'deki atomic claim'den gelir → WebposPrintService).
+  Function()? onWebposJobsHint;
 
   bool get isConnected => _isConnected;
   String? _authToken;
@@ -236,6 +240,12 @@ class WebSocketService {
         }
       });
 
+      // 12 Haz 2026: Web POS print job hint — payload önemsiz, sadece tetik.
+      // Yazdırma kararı/yetkisi burada DEĞİL; WebposPrintService poll + claim yapar.
+      _socket!.on('webpos_jobs_hint', (_) {
+        onWebposJobsHint?.call();
+      });
+
       // 12 Haz 2026: KALICI ÖLÜM FİX — reconnectionAttempts (10) tükenince
       // Manager 'reconnect_failed' emit eder ve bir daha ASLA denemez.
       // 30sn sonra temiz _connect() ile sıfırdan dene (dispose pattern'i güvenli).
@@ -403,6 +413,15 @@ class WebSocketService {
         } catch (e) {
           print('[PanelSocket] kitchen_print parse error: $e');
         }
+      });
+
+      // 12 Haz 2026: Web POS print job hint — internal-print-emit.js:101
+      // io.to('panel-' + panelId) PANEL sunucusundan emit eder ve Flutter o
+      // room'a BU socket ile join olur (panel-server.js:339). Tenant _socket'e
+      // bu event gelmez; asil alici burasi. Yetki tasimaz, sadece poll tetigi
+      // (tek-basim garantisi DB atomic claim'de — cift dinleme risksiz).
+      _panelSocket!.on('webpos_jobs_hint', (_) {
+        onWebposJobsHint?.call();
       });
     } catch (e) {
       print('[PanelSocket] connect exception: $e');

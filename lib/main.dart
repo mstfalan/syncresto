@@ -201,6 +201,16 @@ void main() {
         if (kDebugMode) print('[Main] update cleanup error: $e');
       }
     }());
+    // 14 Haz 2026 (v1.6.1) — SELF-CLEAN: kullanıcının elle açtığı eski portable
+    // kopyaları (Desktop/Downloads SyncResto-Windows*, .zip) sil. Adam yanlışlıkla
+    // ESKİ exe açamasın. Çalışan exe'nin kendi klasörü korunur.
+    unawaited(() async {
+      try {
+        await VersionService().cleanupStalePortableCopies();
+      } catch (e) {
+        if (kDebugMode) print('[Main] portable cleanup error: $e');
+      }
+    }());
 
     // 12 Haz 2026 — PERİYODİK BAKIM (donma fix devamı)
     // Yukarıdaki 3 temizlik yalnız boot'ta çalışıyordu; POS haftalarca
@@ -229,6 +239,11 @@ void main() {
           await VersionService().cleanupOldUpdateFiles();
         } catch (e) {
           if (kDebugMode) print('[Main] periyodik update cleanup error: $e');
+        }
+        try {
+          await VersionService().cleanupStalePortableCopies();
+        } catch (e) {
+          if (kDebugMode) print('[Main] periyodik portable cleanup error: $e');
         }
       } finally {
         isMaintenanceRunning = false;

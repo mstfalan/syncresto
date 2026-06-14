@@ -810,4 +810,81 @@ REM Updater script'i kendini sil (başarı VE hata yolunda)
       debugPrint('[VersionService] cleanupOldUpdateFiles hatası: $e');
     }
   }
+
+  /// 14 Haz 2026 (v1.6.1) — SELF-CLEAN: kullanıcının Desktop/Downloads/OneDrive
+  /// altına elle açtığı ESKİ portable kopyaları (SyncResto-Windows*, .zip) siler.
+  /// Sebep: sahada bir cihazda Desktop'ta v1.5.7 portable kopya + 12 eski zip
+  /// duruyordu; kullanıcı yanlışlıkla ESKİ exe'yi açabiliyordu (auto-update sadece
+  /// %LOCALAPPDATA%'ya kurar, portable kopyayı bilmez). Her açılışta ortam temizlenir.
+  /// GÜVENLİK: ÇALIŞAN exe'nin kendi klasörü ve onun üst klasörleri ASLA silinmez
+  /// (kendini silme koruması). Sadece Windows. Hata olsa bile açılışı bloklamaz.
+  Future<void> cleanupStalePortableCopies() async {
+    if (!Platform.isWindows) return;
+    try {
+      // Çalışan exe'nin klasörü ve tüm üst-zinciri (bunlara dokunma)
+      // Trailing backslash kırp (startsWith koruması her durumda sağlam olsun)
+      final selfDir = File(Platform.resolvedExecutable).parent.path;
+      final selfLower = selfDir.toLowerCase().replaceAll(RegExp(r'\\+$'), '');
+
+      final home = Platform.environment['USERPROFILE'];
+      if (home == null || home.isEmpty) return;
+
+      // Aranacak kök klasörler (kullanıcının elle açtığı tipik yerler)
+      final roots = <String>[
+        '$home\\Desktop',
+        '$home\\Downloads',
+        '$home\\Documents',
+        '$home\\OneDrive\\Desktop',
+        '$home\\OneDrive\\Masaüstü',
+        '$home\\OneDrive\\Downloads',
+      ];
+
+      int deleted = 0;
+      int reclaimed = 0;
+
+      for (final root in roots) {
+        final dir = Directory(root);
+        if (!await dir.exists()) continue;
+        await for (final entity in dir.list(recursive: false)) {
+          try {
+            final name = entity.path.split(Platform.pathSeparator).last;
+            // SyncResto-Windows klasörü VEYA SyncResto*.zip
+            final isPortable = name.startsWith('SyncResto-Windows') ||
+                (name.startsWith('SyncResto') && name.toLowerCase().endsWith('.zip'));
+            if (!isPortable) continue;
+
+            // KENDİNİ SİLME KORUMASI: çalışan exe bu yolun içinde/altındaysa atla
+            final epLower = entity.path.toLowerCase().replaceAll(RegExp(r'\\+$'), '');
+            if (selfLower == epLower ||
+                selfLower.startsWith('$epLower\\') ||
+                epLower.startsWith('$selfLower\\')) {
+              continue;
+            }
+
+            final stat = await entity.stat();
+            if (entity is File) {
+              // Sadece SyncResto*.zip dosyaları (isPortable zaten süzdü)
+              reclaimed += stat.size;
+              await entity.delete();
+              deleted++;
+            } else if (entity is Directory) {
+              // YANLIŞ POZİTİF KORUMASI: bir klasörü ANCAK içinde
+              // 'SyncResto POS.exe' varsa sil (gerçek portable kurulum).
+              // 'SyncResto-Windows-notlarim' gibi kullanıcı klasörü silinmez.
+              final exeInside = File('${entity.path}\\SyncResto POS.exe');
+              if (!await exeInside.exists()) continue;
+              await entity.delete(recursive: true);
+              deleted++;
+            }
+          } catch (_) {}
+        }
+      }
+
+      if (deleted > 0) {
+        debugPrint('[VersionService] cleanupStalePortableCopies: $deleted eski portable kopya silindi, ${(reclaimed / (1024 * 1024)).toStringAsFixed(1)}MB');
+      }
+    } catch (e) {
+      debugPrint('[VersionService] cleanupStalePortableCopies hatası: $e');
+    }
+  }
 }

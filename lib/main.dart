@@ -340,6 +340,28 @@ void main() {
 
     soundService.playNewOrderSound();
 
+    // 14 Haz 2026 — CLAIM-FIRST tek-basim guard:
+    // print_order panel-room TUM socket'lere broadcast olur (listener_count ~10:
+    // 1-2 gercek cihaz + hayalet socket). Dedup yoktu → her socket bu fisi
+    // basiyordu (online/telefon MUKERRER). COZUM: basmadan ONCE atomik claim et.
+    // Ilk claim eden (HTTP 200 & claimed==true) basar; digerleri 409 alir → atlar.
+    // job_id YOKSA (retry/replay re-emit yollari) claim atlanir, DOGRUDAN basilir
+    // (yoksa o fisler HIC basilmaz = hic-fis incident → job_id-null fallback ZORUNLU).
+    if (jobId != null) {
+      final jobIdInt = jobId is int ? jobId : int.tryParse(jobId.toString());
+      if (jobIdInt == null) {
+        print('[Main] job_id parse edilemedi ($jobId) — claim atlaniyor, basma iptal');
+        return;
+      }
+      final claimed = await apiService.claimPrintJob(jobIdInt);
+      if (!claimed) {
+        // 409 (baska socket kapti) veya hata → MUKERRER onlendi, sessizce cik.
+        print('[Main] Print job #$jobIdInt claim edilemedi (baska socket bastı veya hata) — atlanıyor');
+        return;
+      }
+      print('[Main] Print job #$jobIdInt claim edildi — bu socket basacak');
+    }
+
     bool printed = false;
     String? errorMsg;
     try {

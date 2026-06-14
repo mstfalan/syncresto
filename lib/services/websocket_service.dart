@@ -180,15 +180,17 @@ class WebSocketService {
         if (data != null && data['order'] != null) {
           final order = Map<String, dynamic>.from(data['order']);
 
-          // Telemetry: server tags each print request with a job_id; immediately
-          // ack receipt so the panel sees status='delivered'. Carry the job_id
-          // on the order object so PrinterService can emit done/failed later.
+          // 14 Haz 2026 — CLAIM-FIRST tek-basim fix:
+          // print_order panel-room TUM socket'lere broadcast olur. Eski sistemde
+          // burada hemen print_ack emit ediliyordu (status='delivered'). Ama
+          // claimPrintJob da AYNI 'delivered' set'ini WHERE status IN(emitted,timeout)
+          // ile yapiyor → erken print_ack job'u 'delivered' yapinca tum socket'lerin
+          // claim'i 409 doner → HIC-FIS. Cozum: print_ack EMIT'INI KALDIR. Claim
+          // (main.dart onPrintRequest) zaten 'delivered' set ediyor. job_id'yi
+          // order'a tasi → onPrintRequest claim ve telemetri icin kullanir.
           final jobId = data['job_id'];
           if (jobId != null) {
             order['_job_id'] = jobId;
-            try {
-              _socket?.emit('print_ack', {'job_id': jobId});
-            } catch (_) {}
           }
 
           // Settings varsa order'a ekle

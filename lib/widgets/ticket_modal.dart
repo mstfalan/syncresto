@@ -694,10 +694,22 @@ class _TicketModalState extends State<TicketModal> {
           // 18 May 2026: Sag ust yazici kuyruguna ekle — arka plan retry'i baslar, badge artar.
           // Pop-up'tan elle tekrar yazdirilirsa o queue job markPrintCompleted ile dusurulur.
           int? queueJobId;
-          if (printerIp != null && printerIp.isNotEmpty) {
+          // 6 Tem 2026 (offline fix Adim 4): SESSIZ FIS KAYBI onleme — printer_ip=null grubu
+          // (urun yazicisi atanmamis, default yaziciya basildi) fail olursa da default mutfak
+          // yazicisinin IP'siyle kuyruga al. Eskiden null-IP fail = hicbir kuyrukta yok = sessiz kayip.
+          String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
+          int retryPort = printerPort;
+          if (retryIp == null) {
+            final defCfg = widget.printerService.getKitchenPrinterConfig();
+            if (defCfg != null) {
+              retryIp = defCfg['ip'] as String?;
+              retryPort = defCfg['port'] as int? ?? printerPort;
+            }
+          }
+          if (retryIp != null && retryIp.isNotEmpty) {
             queueJobId = await widget.printerService.enqueueKitchenForRetry(
-              ip: printerIp,
-              port: printerPort,
+              ip: retryIp,
+              port: retryPort,
               printerName: printerName,
               ticketInfo: ticketInfo,
               items: groupItems,

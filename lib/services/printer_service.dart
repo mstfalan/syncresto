@@ -257,6 +257,16 @@ class PrinterService {
     return _printerSettings;
   }
 
+  /// 6 Tem 2026 (offline fix Adim 4): Default mutfak yazicisinin ip/port'unu doner (varsa).
+  /// add_item_modal, printer_ip=null grubu (urun yazicisi atanmamis) default yaziciya basilip
+  /// o da BASARISIZ olursa item'lari retry kuyruguna almak icin kullanir -> SESSIZ FIS KAYBI onlenir.
+  /// null donerse default yazici da yok demektir (kuyruga alinamaz, kullanici uyarilir).
+  Map<String, dynamic>? getKitchenPrinterConfig() {
+    final config = _getPrinterConfig('kitchen');
+    if (config == null || config['ip'] == null || (config['ip'] as String).isEmpty) return null;
+    return {'ip': config['ip'], 'port': config['port'] ?? 9100};
+  }
+
   /// Prints a ticket receipt
   Future<bool> printTicket(Map<String, dynamic> ticket, {String? printerType}) async {
     final config = _getPrinterConfig(printerType ?? 'cashier');

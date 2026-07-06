@@ -1180,10 +1180,24 @@ class _AddItemModalState extends State<AddItemModal> {
           failReasons.add(printerName);
           // Sag ust yazici kuyruguna ekle (arka plan auto-retry baslatir)
           int? queueJobId;
-          if (printerIp != null && printerIp.isNotEmpty) {
+          // Retry kuyrugu icin IP cozumle. Grup IP'si varsa onu kullan; YOKSA (urun yazicisi
+          // atanmamis -> default yaziciya basildi) default mutfak yazicisinin IP'sini kullan.
+          String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
+          int retryPort = printerPort;
+          if (retryIp == null) {
+            // 6 Tem 2026 (offline fix Adim 4): SESSIZ FIS KAYBI onleme. Eskiden printer_ip=null
+            // grubu fail olunca enqueue ATLANIYORDU -> item printed=1 kalir, hicbir kuyrukta
+            // olmaz = sessiz kayip. Simdi default mutfak yazicisinin IP'siyle kuyruga alinir.
+            final defCfg = widget.printerService!.getKitchenPrinterConfig();
+            if (defCfg != null) {
+              retryIp = defCfg['ip'] as String?;
+              retryPort = defCfg['port'] as int? ?? printerPort;
+            }
+          }
+          if (retryIp != null && retryIp.isNotEmpty) {
             queueJobId = await widget.printerService!.enqueueKitchenForRetry(
-              ip: printerIp,
-              port: printerPort,
+              ip: retryIp,
+              port: retryPort,
               printerName: printerName,
               ticketInfo: ticketInfo,
               items: groupItems,

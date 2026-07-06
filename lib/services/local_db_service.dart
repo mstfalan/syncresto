@@ -1104,8 +1104,10 @@ class LocalDbService {
 
     // Ticket'ın sync_id'sini al (bağımlılık için)
     final ticket = await getLocalTicket(localTicketId);
-    final ticketSyncId = ticket?['synced'] as int?; // synced alanında sync_id tutuyoruz
     final tableNumber = ticket?['table_number'] ?? '';
+    // 6 Tem 2026 (offline fix Adim 7): server_id varsa (mirror/sync olmus) item dogrudan
+    // server ticket'a eklenir, depends_on gereksiz; yoksa create'e bagimli (synced=sync_id).
+    final dependsOn = ticket != null ? _resolveDependsOn(ticket) : null;
 
     // Sync kuyruğuna ekle - ticket create'e bağımlı
     await addToSyncQueue(
@@ -1121,7 +1123,7 @@ class LocalDbService {
         'notes': notes,
       },
       description: 'Masa $tableNumber: $productName x$quantity eklendi',
-      dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
+      dependsOnSyncId: dependsOn,
     );
 
     return localItemId;
@@ -1164,6 +1166,20 @@ class LocalDbService {
   }
 
   // Adisyonu kapat
+  /// 6 Tem 2026 (offline fix Adim 7): close/void/item aksiyonlarinin depends_on_sync_id'sini
+  /// DOGRU hesaplar. TUZAK: `synced` alani cift-anlamli — offline create'te sync_id (>0),
+  /// ama MIRROR'lanan/sync olmus ticket'ta 1 (bayrak). Eski kod `synced>0` gorunce depends_on=1
+  /// (bozuk referans) yapiyordu -> sync sirasi bozulup ciro karismasi olusuyordu.
+  /// DOGRU MANTIK: ticket'in server_id'si VARSA (mirror veya sync olmus) close/void dogrudan
+  /// server_id ile gider -> depends_on GEREKSIZ (null). SADECE server_id YOK + synced gercek
+  /// bir create sync_id ise (offline-olusturulan, henuz sync olmamis) depends_on kullan.
+  int? _resolveDependsOn(Map<String, dynamic> ticket) {
+    final serverId = ticket['server_id'];
+    if (serverId != null) return null; // zaten server'da var -> beklemeye gerek yok
+    final syncId = ticket['synced'] as int?;
+    return (syncId != null && syncId > 0) ? syncId : null;
+  }
+
   Future<void> closeLocalTicket({
     required int localTicketId,
     required String paymentMethod,
@@ -1180,7 +1196,7 @@ class LocalDbService {
 
     final total = (ticket['subtotal'] as num) - discountAmount;
     final tableNumber = ticket['table_number'] ?? '';
-    final ticketSyncId = ticket['synced'] as int?;
+    final dependsOn = _resolveDependsOn(ticket);
 
     await db.update(
       'local_tickets',
@@ -1221,7 +1237,7 @@ class LocalDbService {
       },
       priority: 1, // Yüksek öncelik
       description: 'Masa $tableNumber: Hesap kapatıldı ($paymentLabel)',
-      dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
+      dependsOnSyncId: dependsOn,
     );
   }
 
@@ -1238,7 +1254,7 @@ class LocalDbService {
     if (ticket == null) return;
 
     final tableNumber = ticket['table_number'] ?? '';
-    final ticketSyncId = ticket['synced'] as int?;
+    final dependsOn = _resolveDependsOn(ticket); // 6 Tem 2026 (offline fix Adim 7)
 
     await db.update(
       'local_tickets',
@@ -1271,7 +1287,7 @@ class LocalDbService {
       },
       priority: 1,
       description: 'Masa $tableNumber: Adisyon iptal edildi${reason != null ? " ($reason)" : ""}',
-      dependsOnSyncId: (ticketSyncId != null && ticketSyncId > 0) ? ticketSyncId : null,
+      dependsOnSyncId: dependsOn,
     );
   }
 

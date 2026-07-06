@@ -1832,6 +1832,22 @@ class LocalDbService {
         // Server'da masa boş - local'deki açık ticketları kapat
         for (final localTicket in localTickets) {
           final localId = localTicket['local_id'] as int;
+
+          // 6 Tem 2026 (offline fix Adim 6): YANLIS KAPATMA GUARD. Bir masa offline acildi ama
+          // create sync henuz BASARILI olmadiysa (transient hata -> server_id=NULL, sync_queue'da
+          // pending create), server bu masayi HENUZ bos gorur. Burada koşulsuz kapatirsak: sonraki
+          // poll create'i basarir -> server'da ticket olusur AMA local kapali = ORPHAN/DESYNC.
+          // Cozum: bu ticket icin bekleyen sync (pending/in_progress) VARSA kapatma, atla.
+          final pendingSync = await db.query(
+            'sync_queue',
+            where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
+            whereArgs: [localId, '%"local_ticket_id":$localId%'],
+          );
+          if (pendingSync.isNotEmpty) {
+            print('[LocalDb] Masa $tableId local ticket $localId sync bekliyor, kapatma ATLANDI');
+            continue;
+          }
+
           // Server'da kapatılmış, local'de de kapat
           await db.update(
             'local_tickets',

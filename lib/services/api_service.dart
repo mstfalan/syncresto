@@ -331,9 +331,15 @@ class ApiService {
       }
     }
 
-    // Offline - cache'den getir
-    print('[API] Tables cache\'den yukleniyor...');
-    return await _localDb.getCachedTables();
+    // Offline - cache'den getir + offline degisiklikleri (offline acilan/kapatilan masa) birlestir.
+    // 6 Tem 2026: mergeTablesWithOfflineChanges olu koddu (hicbir yerden cagrilmiyordu) -> offline
+    // acilan masa cache'te occupied yazili olsa bile UI'da yesil kalabiliyordu. Simdi getCachedTables
+    // uzerine getOfflineOpenTableIds/getOfflineClosedTableIds bindiriliyor. Kolon semasi getCachedTables
+    // ile AYNI (merge sadece status/current_ticket_id degistirir), _buildTableCard bozulmaz.
+    // NOT: SADECE offline dalda -> online modda server otoriter (commit 5b4cdc4 karari korunur).
+    print('[API] Tables cache\'den yukleniyor (offline merge ile)...');
+    final cachedTables = await _localDb.getCachedTables();
+    return await _localDb.mergeTablesWithOfflineChanges(cachedTables);
   }
 
   // Online olunca masa durumlarını sunucudan yenile

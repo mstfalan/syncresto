@@ -1111,6 +1111,7 @@ class _AddItemModalState extends State<AddItemModal> {
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
+        expectedTableId: widget.table?['id'] as int?, // 6 Tem 2026 DÜZELTME 1: yanlis-masa fis guard
       );
       if (result['success'] != true) {
         _showError(result['error'] ?? 'Mutfak fişi alınamadı');
@@ -1471,6 +1472,7 @@ class _AddItemModalState extends State<AddItemModal> {
       final result = await widget.apiService.printKitchen(
         ticketId: widget.ticketId,
         waiterId: widget.waiterId,
+        expectedTableId: widget.table?['id'] as int?, // 6 Tem 2026 DÜZELTME 1: yanlis-masa fis guard
       );
       if (result['success'] != true) return;
       final printerGroups = result['printerGroups'] as List? ?? [];

@@ -898,7 +898,29 @@ class SyncService {
         }
 
         if (serverTicketId == null) {
-          // Ticket henüz sync olmamış - sonraki döngüde tekrar denenecek
+          // 🟡 6 Tem 2026 DÜZELTME 5: Parent create KALICI OLDU MU kontrol et. Eski kod her
+          // durumda sessizce return false yapiyordu (retry_count artmaz) -> parent dead_letter'a
+          // gecip 30 gun sonra silinince bu item SONSUZA 'pending' kaliyordu (her dongude bosa
+          // denenir). Cozum: parent (depends_on) dead_letter/failed VEYA silinmis (yok) ise ->
+          // child'i da BASARISIZ say (markSyncFailed) ki o da sonunda dead_letter'a gecsin.
+          final db = await _localDb.database;
+          final syncRow = await db.query('sync_queue',
+              columns: ['depends_on_sync_id'], where: 'id = ?', whereArgs: [syncId]);
+          final depId = syncRow.isNotEmpty ? syncRow.first['depends_on_sync_id'] as int? : null;
+          if (depId != null) {
+            final parent = await db.query('sync_queue',
+                columns: ['status'], where: 'id = ?', whereArgs: [depId]);
+            final parentGone = parent.isEmpty; // parent silinmis (30 gun cleanup)
+            final parentDead = parent.isNotEmpty &&
+                (parent.first['status'] == 'dead_letter' || parent.first['status'] == 'failed');
+            if (parentGone || parentDead) {
+              await _localDb.markSyncFailed(syncId,
+                  'Parent ticket create kalici basarisiz (${parentGone ? "silinmis" : parent.first['status']})');
+              print('[Sync] Item parent create kalici oldu -> item de basarisiz isaretlendi (syncId=$syncId)');
+              return false;
+            }
+          }
+          // Parent hala canli/pending -> ticket henuz sync olmamis, sonraki dongude tekrar dene (retry harcama).
           print('[Sync] Item için ticket henüz sync olmamış, bekleniyor...');
           return false;
         }

@@ -291,6 +291,7 @@ class _TicketModalState extends State<TicketModal> {
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
+        expectedTableId: widget.table['id'] as int?, // 6 Tem 2026 DÜZELTME 1: yanlis-masa fis guard
       );
 
       if (result['success'] != true) {
@@ -631,6 +632,7 @@ class _TicketModalState extends State<TicketModal> {
       final result = await widget.apiService.printKitchen(
         ticketId: ticketId,
         waiterId: _waiterId,
+        expectedTableId: widget.table['id'] as int?, // 6 Tem 2026 DÜZELTME 1: yanlis-masa fis guard
       );
 
       if (result['success'] != true) {

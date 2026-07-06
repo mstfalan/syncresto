@@ -754,6 +754,13 @@ class LocalDbService {
   /// acilan (mirror'lanan) ticket'ta printKitchen server_id ile gelir; server_id fallback
   /// eklenmezse 'Lokal ticket bulunamadi' olur ve offline mutfak fisi CIKMAZDI.
   /// Donen satirda gercek local_id de var (t.*) -> caller item'lari onunla ceker.
+  /// [ticketId] local_id VEYA server_id olabilir.
+  /// 🔴 6 Tem 2026 DÜZELTME 1 (KRİTİK-PRINT): local_id (1,2,3..AUTOINCREMENT) ve server_id (backend
+  /// küçük tamsayı) AYNI sayı uzayında çakışabilir. Eski `WHERE local_id=? OR server_id=?` + ORDER BY
+  /// YOK → belirsiz sonuç → offline printKitchen YANLIŞ ticket'ı (başka masa) döndürüp o masanın
+  /// ürünlerini basıp printed=1 yazabiliyordu → gerçek fiş HİÇ çıkmaz. FIX: server_id eşleşmesini
+  /// ÖNCELİKLENDİR (ORDER BY server_id=? DESC). server_id ile gelen çağrı gerçek server ticket'ı bulur;
+  /// çakışan bir local_id varsa bile server_id eşleşen kazanır. Caller ayrıca table_id guard yapar.
   Future<Map<String, dynamic>?> getLocalTicketWithSection(int ticketId) async {
     final db = await database;
     final r = await db.rawQuery('''
@@ -763,8 +770,9 @@ class LocalDbService {
    LEFT JOIN cached_sections s ON s.id = tb.section_id
    LEFT JOIN cached_waiters w ON w.id = t.waiter_id
        WHERE t.local_id = ? OR t.server_id = ?
+    ORDER BY (t.server_id = ?) DESC, t.local_id ASC
        LIMIT 1
-    ''', [ticketId, ticketId]);
+    ''', [ticketId, ticketId, ticketId]);
     return r.isNotEmpty ? r.first : null;
   }
 
@@ -1039,10 +1047,15 @@ class LocalDbService {
   // Masanın açık adisyonunu getir
   Future<Map<String, dynamic>?> getTableTicket(int tableId) async {
     final db = await database;
+    // 🟡 6 Tem 2026 DÜZELTME 4: Ayni masada HEM mirror (server_id'li, online acilmis) HEM
+    // offline-yeni (server_id NULL) acik ticket olabilir. ORDER BY olmadan rastgele secince
+    // item/kapama YANLIS ticket'a gidiyordu. Deterministik: offline-yeni (server_id NULL) ONCELIKLI
+    // (garsonun fiilen uzerinde calistigi adisyon), ayni tipte en yeni (local_id DESC).
     final results = await db.query(
       'local_tickets',
       where: 'table_id = ? AND status = ?',
       whereArgs: [tableId, 'open'],
+      orderBy: '(server_id IS NULL) DESC, local_id DESC',
     );
 
     if (results.isEmpty) return null;
@@ -1178,6 +1191,15 @@ class LocalDbService {
     if (serverId != null) return null; // zaten server'da var -> beklemeye gerek yok
     final syncId = ticket['synced'] as int?;
     return (syncId != null && syncId > 0) ? syncId : null;
+  }
+
+  /// 6 Tem 2026 (DÜZELTME 3): Backend fiyat alanini (num veya String) guvenli double'a cevirir.
+  /// null/gecersiz -> 0.0. Boylece backend String fiyat donse bile mirror yazilir (offline fis kaynagi korunur).
+  double _parseMoney(dynamic v) {
+    if (v == null) return 0.0;
+    if (v is num) return v.toDouble();
+    if (v is String) return double.tryParse(v) ?? 0.0;
+    return 0.0;
   }
 
   Future<void> closeLocalTicket({
@@ -1489,11 +1511,13 @@ class LocalDbService {
         'waiter_id': serverTicket['waiter_id'] ?? 0,
         'customer_count': serverTicket['customer_count'] ?? 1,
         'status': serverTicket['status']?.toString() ?? 'open',
-        'subtotal': (serverTicket['subtotal'] as num?)?.toDouble() ?? 0,
-        'discount_amount': (serverTicket['discount_amount'] as num?)?.toDouble() ?? 0,
-        'total': (serverTicket['total_amount'] ?? serverTicket['total'] as num?) is num
-            ? (serverTicket['total_amount'] ?? serverTicket['total']).toDouble()
-            : 0.0,
+        // 🟡 6 Tem 2026 DÜZELTME 3 (ORTA-PRINT): backend fiyat alanini num VEYA String donebilir.
+        // Eski kod `(x as num?)?.toDouble()` String'de 0'a dusuruyordu; total'da operator onceligi
+        // hatasi (as num? sadece 2. operanda) + kontrolsuz .toDouble() -> String gelirse EXCEPTION
+        // -> upsertServerTicket TAMAMEN atlanir -> o masaya offline fis kaynagi OLUSMAZ. Guvenli parse:
+        'subtotal': _parseMoney(serverTicket['subtotal']),
+        'discount_amount': _parseMoney(serverTicket['discount_amount']),
+        'total': _parseMoney(serverTicket['total_amount'] ?? serverTicket['total']),
         'opened_at': serverTicket['opened_at']?.toString() ??
             serverTicket['created_at']?.toString() ?? now,
         'synced': 1,
@@ -1714,8 +1738,8 @@ class LocalDbService {
       final localId = t['local_id'] as int;
       // Guvenlik: bu ticket icin bekleyen sync var mi? (offline aksiyon uzerine mirror gelmis olabilir)
       final pending = await db.query('sync_queue',
-          where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
-          whereArgs: [localId, '%"local_ticket_id":$localId%']);
+          where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+          whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%']);
       if (pending.isNotEmpty) continue; // sync bekliyor -> dokunma
 
       await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
@@ -1766,8 +1790,8 @@ class LocalDbService {
       // Bu ticket için pending sync işlemi var mı kontrol et
       final pendingSync = await db.query(
         'sync_queue',
-        where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
-        whereArgs: [localId, '%"local_ticket_id":$localId%'],
+        where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+        whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%'],
       );
 
       if (pendingSync.isNotEmpty) {
@@ -1808,7 +1832,9 @@ class LocalDbService {
     await db.update(
       'sync_queue',
       {'status': 'dead_letter'},
-      where: "status = 'failed' AND retry_count >= 3",
+      // 6 Tem 2026 DÜZELTME 7: hardcoded 3 yerine dinamik max_retries (diger tum yerlerle tutarli;
+      // ileride ozel max_retries verilirse 'failed' asamasi atlanmasin).
+      where: "status = 'failed' AND retry_count >= max_retries",
     );
 
     // dead_letter kayitlari sonsuza birikmesin: 30 gunden eski olanlari temizle (bu noktada
@@ -1856,8 +1882,8 @@ class LocalDbService {
           // Cozum: bu ticket icin bekleyen sync (pending/in_progress) VARSA kapatma, atla.
           final pendingSync = await db.query(
             'sync_queue',
-            where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
-            whereArgs: [localId, '%"local_ticket_id":$localId%'],
+            where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+            whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%'],
           );
           if (pendingSync.isNotEmpty) {
             print('[LocalDb] Masa $tableId local ticket $localId sync bekliyor, kapatma ATLANDI');
@@ -1999,11 +2025,13 @@ class LocalDbService {
   // Tüm hatalı işlemleri sil
   Future<void> clearFailedSyncItems() async {
     final db = await database;
+    // 6 Tem 2026 DÜZELTME 6: dead_letter'i da sil. getOfflineDataSummary (failed listesi) dead_letter'i
+    // gosteriyor ama eski clearFailedSyncItems onu haric tutuyordu -> "Tumunu Temizle" bozuk sanilyordu.
     await db.delete(
       'sync_queue',
-      where: "status = 'failed' OR (status = 'pending' AND retry_count >= max_retries)",
+      where: "status IN ('failed', 'dead_letter') OR (status = 'pending' AND retry_count >= max_retries)",
     );
-    print('[LocalDb] Tüm hatalı işlemler temizlendi');
+    print('[LocalDb] Tüm hatalı işlemler temizlendi (dead_letter dahil)');
   }
 
   // Offline'da kapatılmış ama henüz sync olmamış masaların table_id'lerini getir
@@ -2053,16 +2081,20 @@ class LocalDbService {
       final tableId = table['id'] as int;
       final newTable = Map<String, dynamic>.from(table);
 
-      // Offline'da kapatılan masa: boş göster
-      if (closedTableIds.contains(tableId)) {
+      // 🟠 6 Tem 2026 DÜZELTME 2: AKTİF ADİSYON HER ZAMAN KAZANIR — open ÖNCE kontrol.
+      // Senaryo: offline'da masa kapatildi (closed, server_id=NULL) SONRA ayni masa tekrar
+      // offline acildi (yeni open, server_id=NULL). Masa HEM closed HEM open listesinde cikar.
+      // Eski kod closed'i once kontrol edince masa BOS/yesil gorunuyordu, aktif adisyon gizleniyordu.
+      // Simdi open once: masaya aktif offline adisyon varsa DOLU goster.
+      if (openTableIds.contains(tableId)) {
+        newTable['status'] = 'occupied';
+        print('[LocalDb] Masa $tableId offline açık (aktif adisyon), occupied gösteriliyor');
+      }
+      // Offline'da kapatılan (ve tekrar acilmamis) masa: boş göster
+      else if (closedTableIds.contains(tableId)) {
         newTable['status'] = 'empty';
         newTable['current_ticket_id'] = null;
         print('[LocalDb] Masa $tableId offline kapatıldı, empty gösteriliyor');
-      }
-      // Offline'da açılan masa: dolu göster
-      else if (openTableIds.contains(tableId)) {
-        newTable['status'] = 'occupied';
-        print('[LocalDb] Masa $tableId offline açıldı, occupied gösteriliyor');
       }
 
       return newTable;

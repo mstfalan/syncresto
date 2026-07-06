@@ -1314,6 +1314,7 @@ class ApiService {
   Future<Map<String, dynamic>> printKitchen({
     required int ticketId,
     int? waiterId,
+    int? expectedTableId, // 🔴 6 Tem 2026 DÜZELTME 1: yanlis-masa fis guard (offline)
   }) async {
     // OFFLINE PATH: lokal cache'lerden urun + yazici hesaplamasi yap, ayni format don.
     // - cached_products.printer_id (urun yazicisi)
@@ -1323,7 +1324,7 @@ class ApiService {
     // Yazdirma sonrasi mark_printed sync_queue'ya eklenir, online olunca backend'e printed=1 sync.
     if (!_connectivity.isOnline) {
       try {
-        final result = await _buildOfflineKitchenResult(ticketId);
+        final result = await _buildOfflineKitchenResult(ticketId, expectedTableId: expectedTableId);
         if (result == null) {
           return {'success': false, 'error': 'Lokal ticket bulunamadi (offline)'};
         }
@@ -1609,11 +1610,24 @@ class ApiService {
   // hem online hem offline ayni kodla calissin.
   // Format: { success, items, ticket, printerGroups: [{printer_id, printer_name,
   //          printer_ip, printer_port, items, type}] }
-  Future<Map<String, dynamic>?> _buildOfflineKitchenResult(int ticketId) async {
+  Future<Map<String, dynamic>?> _buildOfflineKitchenResult(int ticketId, {int? expectedTableId}) async {
     // Lokal ticket cache + section + summary_printer_id.
     // ticketId local_id VEYA server_id olabilir (getLocalTicketWithSection ikisini de arar).
     final ticketRow = await _localDb.getLocalTicketWithSection(ticketId);
     if (ticketRow == null) return null;
+
+    // 🔴 6 Tem 2026 DÜZELTME 1 (KRİTİK-PRINT): YANLIS-MASA GUARD. getLocalTicketWithSection
+    // local_id/server_id cakismasinda (nadir ama mumkun) yanlis masanin ticket'ini donebilir.
+    // Caller (add_item_modal/ticket_modal) hangi masada oldugunu BILIR -> expectedTableId gecer.
+    // Donen ticket beklenen masaya AIT DEGILSE fis basma (baska masaya yanlis fis + printed=1'i onle).
+    if (expectedTableId != null) {
+      final rowTableId = ticketRow['table_id'];
+      final rowTid = rowTableId is int ? rowTableId : int.tryParse(rowTableId?.toString() ?? '');
+      if (rowTid != null && rowTid != expectedTableId) {
+        print('[API] ⚠ Offline kitchen ABORT: ticket masasi ($rowTid) != beklenen ($expectedTableId) — yanlis-masa fis onlendi');
+        return {'success': false, 'error': 'Ticket masa uyumsuzlugu (offline guard)'};
+      }
+    }
     // summary_printer_id JOIN'le geldi (cached_sections.summary_printer_id)
     int? summaryPrinterId = ticketRow['summary_printer_id'] as int?;
 

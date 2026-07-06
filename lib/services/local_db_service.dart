@@ -1626,10 +1626,26 @@ class LocalDbService {
       whereArgs: [oneDayAgo],
     );
 
-    // Başarısız sync işlemlerini temizle (retry_count >= 3)
+    // 6 Tem 2026 (offline fix Adim 2): Basarisiz sync'leri SILME -> 'dead_letter' arsivle.
+    // ESKIDEN: status='failed' AND retry_count>=3 KOSULSUZ DELETE ediliyordu. Bu, backend'e
+    // hic gitmemis bir offline aksiyonun (adisyon/urun/kapama) re-sync talimatini KALICI yok
+    // ediyordu (transient backend hatasi 3 kez tekrarlaninca). Simdi silmek yerine dead_letter'a
+    // tasiniyor: getPendingSyncItems bunlari zaten almaz (retry_count>=max), offline_data_modal
+    // basarisiz listesinde gorunur kalir, kullanici/gelistirici manuel retry (retrySyncItem
+    // retry_count'u sifirlar) veya inceleme yapabilir. Ham veri kaybolmaz.
+    await db.update(
+      'sync_queue',
+      {'status': 'dead_letter'},
+      where: "status = 'failed' AND retry_count >= 3",
+    );
+
+    // dead_letter kayitlari sonsuza birikmesin: 30 gunden eski olanlari temizle (bu noktada
+    // zaten kalici basarisiz + kullanicinin gormesi icin makul sure gecmis).
+    final thirtyDaysAgo = DateTime.now().subtract(const Duration(days: 30)).toIso8601String();
     await db.delete(
       'sync_queue',
-      where: "status = 'failed' AND retry_count >= 3",
+      where: "status = 'dead_letter' AND created_at < ?",
+      whereArgs: [thirtyDaysAgo],
     );
 
     // 1 Haz 2026 (v1.5.6): DELETE sonrası boş alanı geri kazan
@@ -1705,10 +1721,11 @@ class LocalDbService {
       orderBy: 'created_at ASC',
     );
 
-    // Hatalı işlemler
+    // Hatalı işlemler (6 Tem 2026: dead_letter de dahil — cleanupSyncedTickets artık
+    // kalıcı başarısızları silmek yerine dead_letter'a arşivliyor; kullanıcı görüp retry edebilsin).
     final failed = await db.query(
       'sync_queue',
-      where: "status = 'failed' OR (status = 'pending' AND retry_count >= max_retries)",
+      where: "status IN ('failed', 'dead_letter') OR (status = 'pending' AND retry_count >= max_retries)",
     );
 
     // Son 24 saatte tamamlanan

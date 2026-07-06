@@ -2112,6 +2112,38 @@ class LocalDbService {
     );
   }
 
+  /// 6 Tem 2026 (offline fix Adim 4b): Cikmamis mutfak fisi olan masalarin table_id'lerini doner.
+  /// Amac: OFFLINE'da masa kartinda "FIS CIKMADI" badge'i gostermek (online'da bu getPendingOrders
+  /// print_failed'den geliyordu; offline'da o endpoint calismaz -> lokal print_queue'dan besle).
+  /// pending VEYA failed kitchen job'larin receipt_data.ticket.table_id'sini toplar.
+  Future<Set<int>> getPrintFailedTableIds() async {
+    final db = await database;
+    final rows = await db.query(
+      'print_queue',
+      columns: ['receipt_data'],
+      where: "print_type = 'kitchen' AND status IN ('pending', 'failed')",
+    );
+    final result = <int>{};
+    for (final r in rows) {
+      final raw = r['receipt_data'];
+      if (raw is! String) continue;
+      try {
+        final decoded = jsonDecode(raw);
+        final ticket = decoded is Map ? decoded['ticket'] : null;
+        final tid = ticket is Map ? ticket['table_id'] : null;
+        if (tid is int) {
+          result.add(tid);
+        } else if (tid != null) {
+          final parsed = int.tryParse(tid.toString());
+          if (parsed != null) result.add(parsed);
+        }
+      } catch (_) {
+        // bozuk JSON -> atla
+      }
+    }
+    return result;
+  }
+
   // Yazdırma işini tamamlandı olarak işaretle
   Future<void> markPrintCompleted(int id) async {
     final db = await database;

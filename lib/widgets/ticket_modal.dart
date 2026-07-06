@@ -311,6 +311,8 @@ class _TicketModalState extends State<TicketModal> {
       ticketInfo['table_number'] = widget.table['table_number'] ?? 'Masa ${widget.table['id']}';
       ticketInfo['section_name'] = widget.table['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter['name'] ?? '';
+      // 6 Tem 2026 (offline fix Adim 4b): table_id -> print_queue -> offline "FIS CIKMADI" badge eslesmesi.
+      if (widget.table['id'] != null) ticketInfo['table_id'] = widget.table['id'];
 
       int successCount = 0;
       int failCount = 0;
@@ -644,6 +646,8 @@ class _TicketModalState extends State<TicketModal> {
       ticketInfo['table_number'] = widget.table['table_number'] ?? 'Masa ${widget.table['id']}';
       ticketInfo['section_name'] = widget.table['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter['name'] ?? '';
+      // 6 Tem 2026 (offline fix Adim 4b): table_id -> print_queue -> offline "FIS CIKMADI" badge eslesmesi.
+      if (widget.table['id'] != null) ticketInfo['table_id'] = widget.table['id'];
 
       if (items.isEmpty) {
         _showSuccess('Yazdirilacak yeni urun yok');

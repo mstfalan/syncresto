@@ -174,17 +174,21 @@ class _TablesScreenState extends State<TablesScreen> {
   Timer? _pendingCountTimer;
 
   void _startAutoRefresh() {
-    // Her 2 saniyede masaları güncelle (sessiz mod - loading gösterme)
+    // Her 2 saniyede masaları güncelle (sessiz mod - loading gösterme).
+    // 6 Tem 2026 (offline fix Adim 4b): OFFLINE'da da calis. Online -> server; offline ->
+    // getTables lokal cache + offline merge doner (Adim 1). Eskiden offline'da _loadData
+    // cagrilmadigi icin masa gridi DONUYORDU (offline acilan masa guncellenmiyordu).
     _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      if (_isOnline && mounted) {
+      if (mounted) {
         _loadData(silent: true);
       }
     });
 
-    // MASA TAKIP badge + masa rengi icin pending data - 5 sn (renk gec kalmasin)
+    // MASA TAKIP badge + masa rengi icin pending data - 5 sn (renk gec kalmasin).
+    // OFFLINE'da _refreshPendingCount lokal print_queue'dan "FIS CIKMADI" badge'ini besler.
     _refreshPendingCount(); // ilk cagri hemen
     _pendingCountTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (_isOnline && mounted) {
+      if (mounted) {
         _refreshPendingCount();
       }
     });
@@ -377,6 +381,19 @@ class _TablesScreenState extends State<TablesScreen> {
     if (_isFetchingPending) return;
     _isFetchingPending = true;
     try {
+      // 6 Tem 2026 (offline fix Adim 4b): OFFLINE'da getPendingOrders bos doner ->
+      // "FIS CIKMADI" badge'i kaybolur. Bunun yerine LOKAL print_queue'dan cikmamis
+      // (pending/failed) mutfak fisi olan masalari isaretle -> masa kartinda badge gorunur
+      // (online'daki gibi ama lokal kaynaktan). Diger sayaclar (total/oldest/unprinted)
+      // offline'da guvenilir olmadigi icin dokunulmaz.
+      if (!_isOnline) {
+        final offlinePrintFailed = await LocalDbService().getPrintFailedTableIds();
+        if (mounted) {
+          setState(() => _printFailedByTable = offlinePrintFailed);
+        }
+        _isFetchingPending = false;
+        return;
+      }
       final rows = await widget.apiService.getPendingOrders();
       // Hem badge sayisi hem masa-bazli en eski bekleyen zamani — masa rengi icin.
       int total = 0;

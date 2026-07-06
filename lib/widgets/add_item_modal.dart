@@ -1122,6 +1122,9 @@ class _AddItemModalState extends State<AddItemModal> {
       ticketInfo['table_number'] = widget.table?['table_number'] ?? 'Masa ${widget.table?['id'] ?? ''}';
       ticketInfo['section_name'] = widget.table?['section_name'] ?? '';
       ticketInfo['waiter_name'] = widget.waiter?['name'] ?? '';
+      // 6 Tem 2026 (offline fix Adim 4b): table_id'yi de ekle -> print_queue'ya yazilir ->
+      // offline'da masa kartinda "FIS CIKMADI" badge'i icin masa eslesmesi yapilabilir.
+      if (widget.table?['id'] != null) ticketInfo['table_id'] = widget.table!['id'];
 
       // 21 May 2026: Yazıcı atanmamış ürünler için uyarı (backend response).
       // Backend printKitchen artık unassigned_items: [{id, product_name}] döner —

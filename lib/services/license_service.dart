@@ -123,13 +123,16 @@ class LicenseCheckResult {
   bool get canUseOffline {
     // Offline kullanım için:
     // 1. Lisans bilgisi mevcut olmalı
-    // 2. Son 12 saat içinde online kontrol edilmiş olmalı
+    // 2. Son 48 saat içinde online kontrol edilmiş olmalı
     // 3. Lisans aktif ve geçerli olmalı
     // NOT: API key pasif edilmişse, online kontrol sırasında cache temizlenecek
     //      ve bu fonksiyon false dönecek
+    // 6 Tem 2026 (Mustafa karari): 12sa -> 48sa. Eski esik gercek internet arizasinda POS'u
+    // servis ortasinda kilitliyordu (aksam kapanis + ertesi acilis + ariza = 13. saatte kilit).
+    // 48sa = 2 gunluk ariza toleransi; cihaz her online aninda zaten yeniden kontrol ediyor.
     if (licenseInfo == null) return false;
     if (!licenseInfo!.isActive) return false; // Lisans pasif ise offline kullanım yok
-    if (licenseInfo!.hoursSinceLastCheck > 12) return false; // 12 saatten eski kontrol
+    if (licenseInfo!.hoursSinceLastCheck > 48) return false; // 48 saatten eski kontrol
     if (licenseInfo!.isValid) return true;
     // Grace period: Sadece SÜRE dolmuş lisanslar için (pasif edilmiş değil)
     if (licenseInfo!.isExpired && licenseInfo!.daysRemaining >= -3) return true;

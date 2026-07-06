@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ConnectivityService {
   static final ConnectivityService _instance = ConnectivityService._internal();
@@ -38,6 +39,15 @@ class ConnectivityService {
   bool _isProbing = false;
 
   Future<void> init() async {
+    // 6 Tem 2026 FINAL: RUNTIME KILL-SWITCH — sahada probe sorun cikarirsa yeni build beklemeden
+    // kapatilabilsin. SharedPreferences 'connectivity_probe_enabled' = false yapilirsa eski saf-NIC
+    // davranisina doner (varsayilan: true = probe acik). Destek kanali/gizli ayar ile degistirilebilir.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      enableProbe = prefs.getBool('connectivity_probe_enabled') ?? true;
+      if (!enableProbe) print('[Connectivity] Probe KAPALI (kill-switch aktif, saf-NIC mod)');
+    } catch (_) {}
+
     // İlk NIC durumunu kontrol et
     final result = await _connectivity.checkConnectivity();
     _updateNicStatus(result, notify: false);

@@ -84,6 +84,7 @@ class ApiService {
   void setBaseUrl(String url) {
     _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
     _initDio();
+    _connectivity.setProbeBaseUrl(_baseUrl); // 6 Tem 2026 (Adim 8): probe hedefini de guncelle
     if (_apiKey != null) {
       _dio.options.headers['X-API-Key'] = _apiKey;
     }
@@ -105,6 +106,9 @@ class ApiService {
 
   Future<void> initOfflineServices() async {
     await _localDb.init();
+    // 6 Tem 2026 (offline fix Adim 8): probe hedefini connectivity init'ten ONCE ver
+    // (init icinde ilk probe calisir). baseUrl = api.syncresto.com -> GET /health test edilir.
+    _connectivity.setProbeBaseUrl(_baseUrl);
     await _connectivity.init();
     _syncService.init(_dio);
 

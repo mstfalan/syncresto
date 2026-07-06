@@ -750,7 +750,11 @@ class LocalDbService {
   }
 
   // Lokal ticket bilgisi + masa + salon — offline mutfak fisi icin
-  Future<Map<String, dynamic>?> getLocalTicketWithSection(int localTicketId) async {
+  /// [ticketId] local_id VEYA server_id olabilir. 6 Tem 2026 (offline fix Adim 3): online
+  /// acilan (mirror'lanan) ticket'ta printKitchen server_id ile gelir; server_id fallback
+  /// eklenmezse 'Lokal ticket bulunamadi' olur ve offline mutfak fisi CIKMAZDI.
+  /// Donen satirda gercek local_id de var (t.*) -> caller item'lari onunla ceker.
+  Future<Map<String, dynamic>?> getLocalTicketWithSection(int ticketId) async {
     final db = await database;
     final r = await db.rawQuery('''
       SELECT t.*, s.name as section_name, s.summary_printer_id, w.name as waiter_name
@@ -758,9 +762,9 @@ class LocalDbService {
    LEFT JOIN cached_tables tb ON tb.id = t.table_id
    LEFT JOIN cached_sections s ON s.id = tb.section_id
    LEFT JOIN cached_waiters w ON w.id = t.waiter_id
-       WHERE t.local_id = ?
+       WHERE t.local_id = ? OR t.server_id = ?
        LIMIT 1
-    ''', [localTicketId]);
+    ''', [ticketId, ticketId]);
     return r.isNotEmpty ? r.first : null;
   }
 
@@ -1438,6 +1442,107 @@ class LocalDbService {
     );
   }
 
+  /// 6 Tem 2026 (offline fix Adim 3): ONLINE acilan bir server ticket'ini item'lariyla
+  /// lokale MIRROR eder. Amac: internet gidince online-acilmis masaya da offline mutfak
+  /// fisi basilabilsin + adisyon gorulebilsin (eskiden sadece offline-acilanlar lokaldeydi).
+  ///
+  /// GUVENLIK KURALLARI (mevcut offline akisi BOZMA):
+  /// 1. SADECE server_id'li (backend'de var olan) ticket'lari mirror eder.
+  /// 2. OFFLINE-OLUSTURULAN (server_id IS NULL, sync bekleyen) ticket'lara ASLA DOKUNMAZ —
+  ///    onlar sync_queue'da bekliyor, uzerine yazmak veri kaybi olur.
+  /// 3. Item'larin `printed` durumunu KORUR (offline basilmis item'in printed=1'ini ezmez).
+  /// 4. `synced=1` isaretler (bu mirror kaydi zaten backend ile uyumlu, sync_queue'ya GIRMEZ).
+  /// [serverTicket] = backend GET /tickets/table/:id -> response.data['ticket'] objesi.
+  Future<void> upsertServerTicket(Map<String, dynamic> serverTicket) async {
+    final serverId = serverTicket['id'];
+    if (serverId == null || serverId is! int) return; // server_id'siz mirror edilemez
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+
+    await _runWithRetry(() => db.transaction((txn) async {
+      // Bu server_id lokalde var mi? (offline-olusturulup sync olmus da olabilir, mirror da)
+      final existing = await txn.query('local_tickets',
+          where: 'server_id = ?', whereArgs: [serverId], limit: 1);
+
+      // Ticket alanlari (offline sema ile eslesir)
+      final ticketRow = <String, dynamic>{
+        'server_id': serverId,
+        'ticket_number': serverTicket['ticket_number']?.toString() ?? 'SRV-$serverId',
+        'table_id': serverTicket['table_id'],
+        'table_number': serverTicket['table_number']?.toString(),
+        'waiter_id': serverTicket['waiter_id'] ?? 0,
+        'customer_count': serverTicket['customer_count'] ?? 1,
+        'status': serverTicket['status']?.toString() ?? 'open',
+        'subtotal': (serverTicket['subtotal'] as num?)?.toDouble() ?? 0,
+        'discount_amount': (serverTicket['discount_amount'] as num?)?.toDouble() ?? 0,
+        'total': (serverTicket['total_amount'] ?? serverTicket['total'] as num?) is num
+            ? (serverTicket['total_amount'] ?? serverTicket['total']).toDouble()
+            : 0.0,
+        'opened_at': serverTicket['opened_at']?.toString() ??
+            serverTicket['created_at']?.toString() ?? now,
+        'synced': 1,
+        'synced_at': now,
+      };
+
+      int localTicketId;
+      if (existing.isNotEmpty) {
+        localTicketId = existing.first['local_id'] as int;
+        // GUVENLIK: offline-olusturulan (server_id NULL iken sync bekleyen) kayit BURAYA DUSMEZ
+        // cunku where server_id=? ile ariyoruz; mirror sadece zaten server_id'li kaydi gunceller.
+        await txn.update('local_tickets', ticketRow,
+            where: 'local_id = ?', whereArgs: [localTicketId]);
+      } else {
+        ticketRow['created_at'] = now;
+        localTicketId = await txn.insert('local_tickets', ticketRow);
+      }
+
+      // ITEM MIRROR: server item'larini server_id ile eslestir, printed durumunu KORU.
+      final items = serverTicket['items'];
+      if (items is List) {
+        for (final raw in items) {
+          if (raw is! Map) continue;
+          final it = Map<String, dynamic>.from(raw);
+          final itemServerId = it['id'];
+          if (itemServerId == null || itemServerId is! int) continue;
+
+          // Bu item lokalde (server_id ile) var mi? printed'i korumak icin.
+          final existItem = await txn.query('local_ticket_items',
+              columns: ['local_id', 'printed'],
+              where: 'server_id = ?', whereArgs: [itemServerId], limit: 1);
+          final existingPrinted = existItem.isNotEmpty
+              ? (existItem.first['printed'] as int? ?? 0)
+              : (it['printed'] == 1 || it['printed'] == true ? 1 : 0);
+
+          final itemRow = <String, dynamic>{
+            'server_id': itemServerId,
+            'local_ticket_id': localTicketId,
+            'server_ticket_id': serverId,
+            'product_id': it['product_id'] ?? 0,
+            'product_name': it['product_name']?.toString() ?? '',
+            'quantity': (it['quantity'] as num?)?.toInt() ?? 1,
+            'unit_price': (it['unit_price'] as num?)?.toDouble() ??
+                (it['price'] as num?)?.toDouble() ?? 0,
+            'custom_price': (it['custom_price'] as num?)?.toDouble(),
+            'notes': it['notes']?.toString(),
+            'extras': it['extras'] is String ? it['extras'] : (it['extras'] != null ? it['extras'].toString() : null),
+            'status': it['status']?.toString() ?? 'pending',
+            'printed': existingPrinted, // KORUNUR
+            'synced': 1,
+            'synced_at': now,
+          };
+
+          if (existItem.isNotEmpty) {
+            await txn.update('local_ticket_items', itemRow,
+                where: 'local_id = ?', whereArgs: [existItem.first['local_id']]);
+          } else {
+            itemRow['created_at'] = now;
+            await txn.insert('local_ticket_items', itemRow);
+          }
+        }
+      }
+    }), opName: 'upsertServerTicket');
+  }
+
   // Yerel item'ı sunucu ID ile güncelle
   Future<void> updateItemServerId(int localId, int serverId) async {
     final db = await database;
@@ -1573,6 +1678,57 @@ class LocalDbService {
     );
 
     print('[LocalDb] Ticket synced olarak işaretlendi: $localTicketId');
+  }
+
+  /// 6 Tem 2026 (offline fix Adim 3): Bir masanin MIRROR'lanmis (online acilip lokale
+  /// kopyalanmis) ticket + item kayitlarini siler. Masa server'da kapaninca (getTableTicket
+  /// 404) cagrilir ki lokal DB sismesin.
+  /// GUVENLIK: SADECE server_id IS NOT NULL (mirror/sync olmus) VE o ticket icin sync_queue'da
+  /// pending/in_progress kayit OLMAYAN ticket'lari siler. Offline-olusturulan (server_id NULL,
+  /// sync bekleyen) ticket'lara ASLA dokunmaz -> veri kaybi olmaz.
+  Future<void> deleteMirroredTicketByTable(int tableId) async {
+    final db = await database;
+    // Bu masadaki server_id'li (mirror) ticket'lari bul
+    final mirrored = await db.query('local_tickets',
+        columns: ['local_id'],
+        where: 'table_id = ? AND server_id IS NOT NULL',
+        whereArgs: [tableId]);
+
+    for (final t in mirrored) {
+      final localId = t['local_id'] as int;
+      // Guvenlik: bu ticket icin bekleyen sync var mi? (offline aksiyon uzerine mirror gelmis olabilir)
+      final pending = await db.query('sync_queue',
+          where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ?)",
+          whereArgs: [localId, '%"local_ticket_id":$localId%']);
+      if (pending.isNotEmpty) continue; // sync bekliyor -> dokunma
+
+      await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
+      await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
+    }
+  }
+
+  /// 6 Tem 2026 (offline fix Adim 3 + multi-tenant guvenlik): Cihazin key'i/tenant'i degisince
+  /// (bayi degisimi) TUM lokal ticket/item/mirror + cache verisini temizle. Aksi halde eski
+  /// bayinin table_id'leri yeni bayininkiyle CAKISIR (multi-tenant sizinti). setup/login akisi
+  /// tenant degisimini tespit edince cagirmali.
+  Future<void> clearAllTenantData() async {
+    final db = await database;
+    await _runWithRetry(() => db.transaction((txn) async {
+      // Ticket/item/sync — tum tenant'a ozel operasyonel veri
+      await txn.delete('local_ticket_items');
+      await txn.delete('local_tickets');
+      await txn.delete('sync_queue');
+      await txn.delete('print_queue');
+      // Cache — bir sonraki online sync yeniden dolduracak
+      await txn.delete('cached_products');
+      await txn.delete('cached_categories');
+      await txn.delete('cached_tables');
+      await txn.delete('cached_sections');
+      await txn.delete('cached_printers');
+      await txn.delete('cached_waiters');
+      await txn.delete('cached_lookups');
+    }), opName: 'clearAllTenantData');
+    print('[LocalDb] Tenant verisi temizlendi (bayi/key degisimi)');
   }
 
   // Kapatılmış/sync edilmiş ticketları temizle

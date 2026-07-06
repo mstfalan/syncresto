@@ -5,6 +5,7 @@ import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
 import '../services/license_service.dart';
+import '../services/local_db_service.dart';
 import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 
@@ -71,6 +72,21 @@ class _SetupScreenState extends State<SetupScreen> {
           final licSvc = LicenseService();
           await licSvc.clearLicense();
         } catch (_) {}
+
+        // 6 Tem 2026 (offline fix Adim 3, MULTI-TENANT guvenlik): Bu cihaza BASKA bir bayinin
+        // key'i giriliyorsa (tenant degisimi), eski bayinin TUM lokal verisini (ticket/item/
+        // mirror/cache) temizle. Aksi halde eski bayinin table_id'leri yeni bayininkiyle
+        // cakisir = multi-tenant sizinti (baska bayinin masasi/adisyonu gorunur). SADECE key
+        // gercekten degistiyse temizle (ayni key tekrar girilirse veri kaybi olmasin).
+        final previousKey = widget.storageService.getApiKey();
+        if (previousKey != null && previousKey.isNotEmpty && previousKey != apiKey) {
+          print('[Setup] Tenant/key degisti -> eski bayinin lokal verisi temizleniyor');
+          try {
+            await LocalDbService().clearAllTenantData();
+          } catch (e) {
+            print('[Setup] Tenant veri temizleme hatasi: $e');
+          }
+        }
 
         await widget.storageService.saveApiUrl(apiUrl);
         await widget.storageService.saveApiKey(apiKey, result['restaurant_name'] ?? 'POS');

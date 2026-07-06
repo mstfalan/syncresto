@@ -464,6 +464,19 @@ class ApiService {
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.get('/api/pos/tickets/table/$tableId');
+        // 6 Tem 2026 (offline fix Adim 3): online acilan ticket'i item'lariyla lokale MIRROR et
+        // ki internet gidince bu masaya da offline mutfak fisi basilabilsin + adisyon gorulsun.
+        // Mirror sadece server_id'li kaydi yonetir, offline-olusturulan (sync bekleyen) ticket'a
+        // dokunmaz. Print akisina dokunmaz (sadece lokal cache doldurur). Hata olursa online
+        // akis ETKILENMEZ (best-effort try/catch).
+        try {
+          final t = response.data is Map ? response.data['ticket'] : null;
+          if (t is Map<String, dynamic>) {
+            await _localDb.upsertServerTicket(t);
+          }
+        } catch (mirrorErr) {
+          print('[API] Ticket mirror atlandi (online akis etkilenmedi): $mirrorErr');
+        }
         return response.data;
       } on DioException catch (e) {
         if (e.response?.statusCode == 404) {
@@ -474,6 +487,10 @@ class ApiService {
             print('[API] Server\'da ticket yok, local ticket kapatılıyor...');
             await _localDb.markTicketAsSynced(localTicket['local_id'] ?? localTicket['id']);
           }
+          // 6 Tem 2026 (offline fix Adim 3): masa kapandi (server'da ticket yok) -> bu masanin
+          // MIRROR'lanmis (server_id'li, sync BEKLEMEYEN) kayitlarini sil ki lokal DB sismesin.
+          // Offline-olusturulan (server_id NULL) veya pending-sync kayitlara DOKUNMAZ.
+          await _localDb.deleteMirroredTicketByTable(tableId);
           // Masa tablosunu da güncelle - boş olarak işaretle
           await _localDb.updateTableStatus(tableId, 'empty', null);
           return null;
@@ -1589,14 +1606,19 @@ class ApiService {
   // Format: { success, items, ticket, printerGroups: [{printer_id, printer_name,
   //          printer_ip, printer_port, items, type}] }
   Future<Map<String, dynamic>?> _buildOfflineKitchenResult(int ticketId) async {
-    // Lokal ticket cache + section + summary_printer_id
+    // Lokal ticket cache + section + summary_printer_id.
+    // ticketId local_id VEYA server_id olabilir (getLocalTicketWithSection ikisini de arar).
     final ticketRow = await _localDb.getLocalTicketWithSection(ticketId);
     if (ticketRow == null) return null;
     // summary_printer_id JOIN'le geldi (cached_sections.summary_printer_id)
     int? summaryPrinterId = ticketRow['summary_printer_id'] as int?;
 
+    // 6 Tem 2026 (offline fix Adim 3): item'lari GERCEK local_id ile cek. ticketId server_id
+    // ise (online acilan/mirror'lanan ticket) getUnprintedLocalItems local_ticket_id bekledigi
+    // icin dogrudan server_id ile arayamayiz; ticketRow'dan cozdugumuz local_id'yi kullan.
+    final resolvedLocalId = ticketRow['local_id'] as int;
     // Yazdirilmamis itemlar (printed=0 + active)
-    final unprinted = await _localDb.getUnprintedLocalItems(ticketId);
+    final unprinted = await _localDb.getUnprintedLocalItems(resolvedLocalId);
     if (unprinted.isEmpty) {
       return {
         'success': true,

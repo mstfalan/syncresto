@@ -36,6 +36,11 @@ class SyncService {
   StreamSubscription? _connectivitySub; // eskiden tutulmuyordu → cancel edilemiyordu
   bool _isBgUpdating = false;           // backgroundCacheUpdate re-entry guard
   bool _isSyncing = false;
+  // 6 Tem 2026 (offline fix Adim 5): 10sn sync tick sayaci. Her 3. tikta (~30sn) tablo-sync +
+  // cleanup da calisir. Boylece connectionStream event'i gelmeyen (fake-online->gercek-online,
+  // NIC hic dusmemis) durumda da toparlanma olur.
+  int _syncTick = 0;
+  bool _isTableReconciling = false;     // _syncTablesFromServer+cleanup re-entry guard
   bool _isInitialSyncDone = false;
   String? _backendUrl;
 
@@ -80,9 +85,24 @@ class SyncService {
     });
 
     // Periyodik sync (her 10 saniye)
-    _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (_connectivity.isOnline) {
-        syncPendingItems();
+    _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
+      if (!_connectivity.isOnline) return;
+      await syncPendingItems();
+      // 6 Tem 2026 (offline fix Adim 5): Her ~30sn'de (3. tik) tablo-sync + cleanup DA calis.
+      // connectionStream event'i SADECE NIC degisince gelir; fake-online->gercek-online (WiFi
+      // hic dusmemis) durumda o event gelmez -> _syncTablesFromServer/cleanup HIC calismazdi.
+      // Periyodik cagri bu bosslugu kapatir. re-entry guard ile uste binmeyi onle.
+      _syncTick++;
+      if (_syncTick % 3 == 0 && !_isTableReconciling) {
+        _isTableReconciling = true;
+        try {
+          await _syncTablesFromServer();
+          await _localDb.cleanupSyncedTickets();
+        } catch (e) {
+          print('[Sync] Periyodik tablo-sync hatasi: $e');
+        } finally {
+          _isTableReconciling = false;
+        }
       }
     });
 

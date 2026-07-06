@@ -886,6 +886,19 @@ class LocalDbService {
       'offline_permissions': offlinePermissions,
     });
 
+    // 🟡 6 Tem 2026 FINAL-FIX D: Ayni masada BEKLEYEN close/void varsa yeni create ONA bagimli olsun.
+    // Boylece kullanici senaryosu (offline masa kapat -> ayni masayi tekrar ac) tam zincir olur:
+    // create1 -> item1 -> close1 -> create2 -> item2 -> close2. Eski masa backend'de KAPANMADAN
+    // yeni create gitmez -> backend'in "ayni masada acik adisyona merge" tuzagi tetiklenmez (ciro karismaz).
+    final priorClose = await db.rawQuery('''
+      SELECT sq.id FROM sync_queue sq
+        JOIN local_tickets lt ON lt.local_id = sq.local_id
+       WHERE sq.action IN ('close','void') AND sq.status IN ('pending','in_progress')
+         AND lt.table_id = ?
+       ORDER BY sq.id DESC LIMIT 1
+    ''', [tableId]);
+    final createDependsOn = priorClose.isNotEmpty ? priorClose.first['id'] as int? : null;
+
     // Sync kuyruğuna ekle (bu sync_id'yi döndürmeli)
     final syncId = await addToSyncQueueWithReturn(
       action: 'create',
@@ -897,6 +910,7 @@ class LocalDbService {
         'customer_count': customerCount,
       },
       description: 'Masa $tableNumber: Adisyon açıldı',
+      dependsOnSyncId: createDependsOn,
     );
 
     // Local ticket'a sync_id'yi kaydet (item'lar bağımlılık için kullanacak)
@@ -1202,6 +1216,21 @@ class LocalDbService {
     return 0.0;
   }
 
+  /// 🟡 6 Tem 2026 FINAL-FIX D: Bu ticket'a ait SON bekleyen add_item sync kaydinin id'si.
+  /// close/void bu id'ye bagimli yapilir -> close, kendi item'larindan SONRA backend'e gider.
+  /// Aksi halde close (prio 1) item'lardan (prio 0) ONCE gidiyordu -> backend final_total'i
+  /// 0 itemla COALESCE(total,subtotal,0)=0 kilitliyordu -> offline adisyonlar raporda 0 TL (ciro kaybi).
+  Future<int?> _lastPendingItemSyncId(int localTicketId) async {
+    final db = await database;
+    final r = await db.rawQuery('''
+      SELECT id FROM sync_queue
+       WHERE action = 'add_item' AND status IN ('pending','in_progress')
+         AND (payload LIKE ? OR payload LIKE ?)
+       ORDER BY id DESC LIMIT 1
+    ''', ['%"local_ticket_id":$localTicketId,%', '%"local_ticket_id":$localTicketId}%']);
+    return r.isNotEmpty ? r.first['id'] as int? : null;
+  }
+
   Future<void> closeLocalTicket({
     required int localTicketId,
     required String paymentMethod,
@@ -1218,7 +1247,9 @@ class LocalDbService {
 
     final total = (ticket['subtotal'] as num) - discountAmount;
     final tableNumber = ticket['table_number'] ?? '';
-    final dependsOn = _resolveDependsOn(ticket);
+    // FINAL-FIX D: once bu ticket'in bekleyen SON item'ina bagimli ol (close item'lardan sonra
+    // gitsin -> final_total dogru); bekleyen item yoksa eski mantik (_resolveDependsOn).
+    final dependsOn = await _lastPendingItemSyncId(localTicketId) ?? _resolveDependsOn(ticket);
 
     await db.update(
       'local_tickets',
@@ -1276,7 +1307,8 @@ class LocalDbService {
     if (ticket == null) return;
 
     final tableNumber = ticket['table_number'] ?? '';
-    final dependsOn = _resolveDependsOn(ticket); // 6 Tem 2026 (offline fix Adim 7)
+    // FINAL-FIX D: void da item'lardan SONRA gitsin (close ile ayni gerekce).
+    final dependsOn = await _lastPendingItemSyncId(localTicketId) ?? _resolveDependsOn(ticket);
 
     await db.update(
       'local_tickets',
@@ -1339,6 +1371,66 @@ class LocalDbService {
       payload: payload,
       priority: 1,
       description: description ?? 'Server $entityType #$serverId offline $action',
+    );
+  }
+
+  /// 🟠 6 Tem 2026 FINAL-FIX B: Offline basilan mutfak fisinin printed=1 sync'ini DOGRU id
+  /// uzaylariyla kuyruklar. ESKI yol (enqueueServerTicketAction(serverId: ticketId)) UC bug iceriyordu:
+  /// (1) offline-acilan ticket'ta ticketId=LOKAL id'ydi ama server_id kolonuna yaziliyordu ->
+  ///     _resolveServerTicketId onu sorgusuz server id sanip YANLIS URL'e POST ediyordu ->
+  ///     backend'de printed=0 kalir -> online devamda ayni urunler IKINCI kez basilir (cift fis).
+  /// (2) dup-guard ayni ticket'in IKINCI mark_printed'ini payload MERGE etmeden yutuyordu ->
+  ///     ikinci partinin item listesi kayboluyordu.
+  /// (3) local_id NULL oldugu icin cleanup/mirror pending-guard'lari kaydi GOREMIYORDU.
+  /// SIMDI: localId = ticket'in GERCEK local_id'si (guard'lar gorur), serverId = varsa gercek
+  /// server_id (yoksa NULL -> sync sirasinda local ticket'tan resolve edilir), ayni ticket icin
+  /// bekleyen kayit varsa item_local_ids listeleri BIRLESTIRILIR (union).
+  Future<int?> enqueueMarkPrinted({
+    required int localTicketId,
+    int? serverTicketId,
+    required List<int> itemLocalIds,
+    int? waiterId,
+    String? description,
+  }) async {
+    if (itemLocalIds.isEmpty) return null;
+    final db = await database;
+
+    // Ayni ticket icin bekleyen mark_printed var mi? -> item listelerini BIRLESTIR (yutma!)
+    final existing = await db.query('sync_queue',
+        where: "action = 'mark_printed' AND status IN ('pending', 'in_progress') AND local_id = ?",
+        whereArgs: [localTicketId],
+        limit: 1);
+    if (existing.isNotEmpty) {
+      final row = existing.first;
+      final syncId = row['id'] as int;
+      Map<String, dynamic> payload = {};
+      try {
+        final raw = row['payload'];
+        if (raw is String && raw.isNotEmpty) payload = Map<String, dynamic>.from(jsonDecode(raw));
+      } catch (_) {}
+      final mergedIds = <int>{
+        ...((payload['item_local_ids'] as List?)?.whereType<int>() ?? const <int>[]),
+        ...itemLocalIds,
+      }.toList();
+      payload['item_local_ids'] = mergedIds;
+      if (waiterId != null) payload['waiter_id'] = waiterId;
+      await db.update('sync_queue', {'payload': jsonEncode(payload)},
+          where: 'id = ?', whereArgs: [syncId]);
+      print('[LocalDb] mark_printed MERGE edildi (sync_id=$syncId, toplam ${mergedIds.length} item)');
+      return syncId;
+    }
+
+    return await addToSyncQueueWithReturn(
+      action: 'mark_printed',
+      entityType: 'ticket',
+      localId: localTicketId,
+      serverId: serverTicketId, // null olabilir -> resolve local ticket'tan (dogru davranis)
+      payload: {
+        'item_local_ids': itemLocalIds,
+        if (waiterId != null) 'waiter_id': waiterId,
+      },
+      priority: 1,
+      description: description ?? 'Mutfak fisi offline yazdirildi (ticket local#$localTicketId)',
     );
   }
 

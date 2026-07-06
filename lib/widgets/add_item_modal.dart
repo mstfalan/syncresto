@@ -1495,11 +1495,20 @@ class _AddItemModalState extends State<AddItemModal> {
         final groupItems = group['items'] as List? ?? [];
         final printerName = group['printer_name'] as String? ?? 'Varsayilan';
         final jobId = _safeInt(group['job_id']);
-        if (groupItems.isEmpty || printerIp == null) continue;
+        if (groupItems.isEmpty) continue;
 
-        final ok = await widget.printerService!.printKitchenReceiptToIp(
-          ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
-        );
+        // 🟠 6 Tem 2026 FINAL-FIX C: null-IP grubu sessizce atlanmasin (kalici fis kaybi onleme —
+        // ticket_modal silent yolu ile ayni duzeltme).
+        bool ok = false;
+        if (printerIp != null && printerIp.isNotEmpty) {
+          ok = await widget.printerService!.printKitchenReceiptToIp(
+            ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+          );
+        } else {
+          ok = await widget.printerService!.printKitchenReceipt(
+            ticket: ticketInfo, items: groupItems,
+          );
+        }
 
         if (ok) {
           successCount += groupItems.length;
@@ -1508,14 +1517,26 @@ class _AddItemModalState extends State<AddItemModal> {
           failCount += groupItems.length;
           if (jobId != null) failJobIds.add(jobId);
           failReasons.add(printerName);
-          // Sag ust yazici kuyruguna ekle
-          final queueJobId = await widget.printerService!.enqueueKitchenForRetry(
-            ip: printerIp,
-            port: printerPort,
-            printerName: printerName,
-            ticketInfo: ticketInfo,
-            items: groupItems,
-          );
+          // Sag ust yazici kuyruguna ekle (null-IP grubunda default mutfak yazici IP'si)
+          String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
+          int retryPort = printerPort;
+          if (retryIp == null) {
+            final defCfg = widget.printerService!.getKitchenPrinterConfig();
+            if (defCfg != null) {
+              retryIp = defCfg['ip'] as String?;
+              retryPort = defCfg['port'] as int? ?? printerPort;
+            }
+          }
+          int? queueJobId;
+          if (retryIp != null && retryIp.isNotEmpty) {
+            queueJobId = await widget.printerService!.enqueueKitchenForRetry(
+              ip: retryIp,
+              port: retryPort,
+              printerName: printerName,
+              ticketInfo: ticketInfo,
+              items: groupItems,
+            );
+          }
           failedGroupsForRetry.add({
             'printer_ip': printerIp,
             'printer_port': printerPort,

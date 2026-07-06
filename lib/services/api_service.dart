@@ -746,8 +746,16 @@ class ApiService {
     String? discountType,
     int? waiterId,
   }) async {
-    // Lokal cache'te kayit varsa al
-    final localTicket = await _localDb.getLocalTicket(ticketId);
+    // Lokal cache'te kayit varsa al.
+    // 6 Tem 2026 FINAL-FIX E: MIRROR adisyonlar (online acilip lokale kopyalanan) server_id ile
+    // gelir; eski kod SADECE getLocalTicket (local_id uzayi) aradigindan mirror'i bulamiyor,
+    // offline kapatista lokal mirror status=open + cached_tables occupied KALIYORDU (masa dolu
+    // gorunmeye devam). Simdi server_id fallback ile mirror da cozulur ve GERCEK local_id kullanilir.
+    Map<String, dynamic>? localTicket = await _localDb.getLocalTicket(ticketId);
+    localTicket ??= await _localDb.getLocalTicketByServerId(ticketId);
+    final resolvedLocalId = localTicket != null
+        ? (localTicket['local_id'] as int? ?? ticketId)
+        : ticketId;
     final serverId = localTicket != null ? localTicket['server_id'] as int? : null;
 
     // ONLINE + (saf server ticket VEYA cache'lenmis sync edilmis) -> direkt backend POST
@@ -769,7 +777,7 @@ class ApiService {
           // Lokal cache'te de kapat (masa anlik bosalsin)
           if (localTicket != null) {
             await _localDb.closeLocalTicket(
-              localTicketId: ticketId,
+              localTicketId: resolvedLocalId,
               paymentMethod: paymentMethod,
               discountAmount: discountAmount,
               discountType: discountType,
@@ -787,9 +795,9 @@ class ApiService {
 
     // OFFLINE veya henuz sync olmamis lokal ticket -> lokal kapat + sync queue
     if (localTicket != null) {
-      print('[API] Local ticket kapatiliyor: $ticketId (server_id=$serverId)');
+      print('[API] Local ticket kapatiliyor: $resolvedLocalId (server_id=$serverId)');
       await _localDb.closeLocalTicket(
-        localTicketId: ticketId,
+        localTicketId: resolvedLocalId,
         paymentMethod: paymentMethod,
         discountAmount: discountAmount,
         discountType: discountType,
@@ -838,8 +846,13 @@ class ApiService {
     String? reason,
     int? waiterId,
   }) async {
-    // Lokal cache'te kayit varsa al — server_id'sine bakacagiz
-    final localTicket = await _localDb.getLocalTicket(ticketId);
+    // Lokal cache'te kayit varsa al — server_id'sine bakacagiz.
+    // 6 Tem 2026 FINAL-FIX E: mirror adisyonlar icin server_id fallback (closeTicket ile ayni).
+    Map<String, dynamic>? localTicket = await _localDb.getLocalTicket(ticketId);
+    localTicket ??= await _localDb.getLocalTicketByServerId(ticketId);
+    final resolvedLocalId = localTicket != null
+        ? (localTicket['local_id'] as int? ?? ticketId)
+        : ticketId;
     final serverId = localTicket != null ? localTicket['server_id'] as int? : null;
 
     // ONLINE + (saf server ticket VEYA lokal cache'i sync edilmis ticket) -> direkt backend'e POST
@@ -859,7 +872,7 @@ class ApiService {
           // Lokal cache'te de void isaretle ki masa hemen bosalsin
           if (localTicket != null) {
             await _localDb.voidLocalTicket(
-              localTicketId: ticketId,
+              localTicketId: resolvedLocalId,
               waiterId: waiterId ?? 1,
               reason: reason,
             );
@@ -878,9 +891,9 @@ class ApiService {
 
     // OFFLINE veya henuz sync olmamis (server_id NULL) lokal ticket -> sadece lokal void + queue
     if (localTicket != null) {
-      print('[API] Local ticket iptal ediliyor: $ticketId (server_id=$serverId)');
+      print('[API] Local ticket iptal ediliyor: $resolvedLocalId (server_id=$serverId)');
       await _localDb.voidLocalTicket(
-        localTicketId: ticketId,
+        localTicketId: resolvedLocalId,
         waiterId: waiterId ?? 1,
         reason: reason,
       );
@@ -1184,8 +1197,25 @@ class ApiService {
   /// Güvenlik: Sadece GET isteği, veri değişikliği yok
   Future<List<Map<String, dynamic>>> getPrinters() async {
     if (!_connectivity.isOnline) {
-      print('[API] getPrinters: Çevrimdışı, boş liste dönüyor');
-      return [];
+      // 6 Tem 2026 FINAL-FIX F: offline'da BOS liste yerine cached_printers'tan don.
+      // Eski davranis: bos liste -> _printSummaryReceipt 'Yazici bulunamadi' -> musteriye
+      // KAPANIS/OZET FISI OFFLINE HIC verilemiyordu (mutfak fisi ayni yazicilari lokal
+      // cache'ten zaten cozuyordu — tutarsizdi). Ayni sekil/anahtarlarla ('ip') map edilir.
+      print('[API] getPrinters: Çevrimdışı, cached_printers dönüyor');
+      final cached = await _localDb.getCachedPrinters();
+      return cached.map((p) {
+        final ip = p['ip_address']?.toString() ?? '';
+        if (!_isValidIpAddress(ip)) return null;
+        return <String, dynamic>{
+          'id': p['id'],
+          'name': p['name']?.toString() ?? 'Yazıcı',
+          'ip': ip,
+          'port': p['port'] is int ? p['port'] : 9100,
+          'type': p['type']?.toString() ?? 'thermal',
+          'departments': [],
+          'is_active': p['is_active'] == 1,
+        };
+      }).whereType<Map<String, dynamic>>().toList();
     }
 
     try {
@@ -1334,18 +1364,20 @@ class ApiService {
           final localItemIds = items.map((i) => i['local_id']).whereType<int>().toList();
           if (localItemIds.isNotEmpty) {
             await _localDb.markLocalItemsPrinted(localItemIds);
+            // 🟠 FINAL-FIX B: DOGRU id uzaylariyla enqueue. Eski kod ticketId'yi (offline ticket'ta
+            // LOKAL id!) server_id kolonuna yaziyordu -> yanlis URL'e POST -> backend printed=0
+            // kalir -> online devamda CIFT FIS. Simdi gercek local_id + (varsa) gercek server_id.
+            final tLocalId = result['_local_ticket_id'] as int?;
+            final tServerId = result['_server_ticket_id'] as int?;
+            if (tLocalId != null) {
+              await _localDb.enqueueMarkPrinted(
+                localTicketId: tLocalId,
+                serverTicketId: tServerId,
+                itemLocalIds: localItemIds,
+                waiterId: waiterId,
+              );
+            }
           }
-          // Online olunca backend'e printed=1 sync icin enqueue
-          await _localDb.enqueueServerTicketAction(
-            action: 'mark_printed',
-            entityType: 'ticket',
-            serverId: ticketId, // server_id resolve sync sirasinda
-            payload: {
-              'item_local_ids': localItemIds,
-              if (waiterId != null) 'waiter_id': waiterId,
-            },
-            description: 'Mutfak fisi offline yazdirildi (#$ticketId)',
-          );
         }
         return result;
       } catch (e) {
@@ -1699,6 +1731,10 @@ class ApiService {
         'waiter_name': ticketRow['waiter_name'],
       },
       'printerGroups': printerGroups.values.toList(),
+      // 🟠 6 Tem 2026 FINAL-FIX B: mark_printed enqueue'sunun DOGRU id uzaylarini bilmesi icin
+      // cozulen ticket'in gercek local_id + server_id'si (ic kullanim, UI'da gosterilmez).
+      '_local_ticket_id': ticketRow['local_id'],
+      '_server_ticket_id': ticketRow['server_id'],
     };
   }
 

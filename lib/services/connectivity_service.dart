@@ -91,20 +91,19 @@ class ConnectivityService {
     }
   }
 
-  /// GET {base}/health — IPv4 force (memory: saha IPv6 olu network), 2.5sn timeout.
-  /// true = 2xx/3xx (backend ayakta), false = timeout/hata/5xx.
+  /// GET {base}/health — 2.5sn timeout. true = 2xx/3xx (backend ayakta), false = timeout/hata/5xx.
+  /// 🔴 6 Tem 2026 FINAL-FIX A (KRİTİK): Eski kod connectionFactory ile DUZ TCP soket donduruyordu;
+  /// baseUrl https oldugu icin TLS el sikismasi HIC yapilmiyordu -> Cloudflare 'plain HTTP to HTTPS
+  /// port' HTTP 400 -> probe HEP false -> uygulama ACILISTAN ITIBAREN KALICI OFFLINE kaliyordu
+  /// (canli testle dogrulandi: ayni kod 400, curl 200). connectionFactory KALDIRILDI — TLS default
+  /// akista dogru calisir. IPv4 force ZATEN global: main.dart HttpOverrides.global lookup override'i
+  /// TUM HttpClient'lara uygulanir (memory feedback_flutter_ipv4_force korunuyor).
   Future<bool> _pingHealth(String base) async {
     HttpClient? client;
     try {
       final uri = Uri.parse('$base/health');
       client = HttpClient();
       client.connectionTimeout = const Duration(milliseconds: 2500);
-      // IPv4 force (CF IPv6 saha routing yok — memory feedback_flutter_ipv4_force).
-      client.connectionFactory = (u, proxyHost, proxyPort) async {
-        final addrs = await InternetAddress.lookup(u.host, type: InternetAddressType.IPv4);
-        if (addrs.isEmpty) throw const SocketException('IPv4 yok');
-        return Socket.startConnect(addrs.first, u.port);
-      };
       final request = await client.getUrl(uri).timeout(const Duration(milliseconds: 2500));
       final response = await request.close().timeout(const Duration(milliseconds: 2500));
       await response.drain<void>();

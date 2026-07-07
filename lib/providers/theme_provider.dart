@@ -145,4 +145,15 @@ class ThemeProvider extends ChangeNotifier {
     _brandLogoUrl = null;
     notifyListeners();
   }
+
+  // Tenant degisince cache'lenmis temayi prefs'ten sil (eski marka/logo/renk kalmasin).
+  Future<void> clearThemePrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('theme_primary_color');
+      await prefs.remove('theme_secondary_color');
+      await prefs.remove('theme_brand_name');
+      await prefs.remove('theme_brand_logo');
+    } catch (_) {}
+  }
 }

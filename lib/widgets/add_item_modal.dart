@@ -100,9 +100,10 @@ class _AddItemModalState extends State<AddItemModal> {
       const offlineAllowed = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket'];
       return offlineAllowed.contains(permission);
     }
-    final permissions = widget.waiter?['permissions'] as Map<String, dynamic>?;
-    if (permissions == null) return true;
-    return permissions[permission] == true;
+    // permissions Map beklenir ama offline cache'te List ([]) gelebilir (crash koruması).
+    final raw = widget.waiter?['permissions'];
+    if (raw is! Map) return true; // List/null -> yetki bilgisi yok say, izin ver (eski davranış)
+    return raw[permission] == true;
   }
 
   @override
@@ -1376,6 +1377,24 @@ class _AddItemModalState extends State<AddItemModal> {
       ),
     );
     if (confirmed != true) return;
+
+    // OFFLINE: parçalı ödeme (payItems) yok. Tüm ürünler tek ödeme yöntemiyle kapanır (closeTicket
+    // offline'ı destekler). payItems'a düşersek "internet gerekli" der -> offline nakit/kart imkansız olurdu.
+    if (!widget.apiService.isOnline) {
+      try {
+        await widget.apiService.closeTicket(
+          ticketId: widget.ticketId,
+          paymentMethod: paymentMethod,
+          waiterId: widget.waiterId,
+        );
+        _showSuccess('Hesap kapatıldı (çevrimdışı)');
+        widget.onItemAdded();
+        widget.onClose();
+      } catch (e) {
+        _showError('Hesap kapatılamadı: $e');
+      }
+      return;
+    }
 
     try {
       final result = await widget.apiService.payItems(
@@ -2876,7 +2895,7 @@ class _AddItemModalState extends State<AddItemModal> {
         splashColor: theme.primaryColor.withOpacity(0.3),
         highlightColor: theme.primaryColor.withOpacity(0.15),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 64),
+          constraints: const BoxConstraints(minHeight: 68),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
@@ -2885,6 +2904,7 @@ class _AddItemModalState extends State<AddItemModal> {
             ),
           ),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               if (emoji.isNotEmpty)

@@ -493,12 +493,21 @@ class ApiService {
         return response.data;
       } on DioException catch (e) {
         if (e.response?.statusCode == 404) {
-          // Server'da ticket yok - local'deki açık ticket'ı da kapat
+          // Server'da ticket yok - local'deki açık ticket'ı da kapat.
           final localTicket = await _localDb.getLocalTicketByTable(tableId);
           if (localTicket != null && localTicket['status'] == 'open') {
-            // Server'da yoksa local'de de kapatılmalı (sync edilmiş demek)
-            print('[API] Server\'da ticket yok, local ticket kapatılıyor...');
-            await _localDb.markTicketAsSynced(localTicket['local_id'] ?? localTicket['id']);
+            final localId = (localTicket['local_id'] ?? localTicket['id']) as int;
+            // 🔴 7 Tem (Fable KRİTİK): create-sync'i HÂLÂ kuyrukta bekleyen offline masayı
+            // KAPATMA. Reconnect penceresinde backend henüz görmediği için 404 döner; kapatırsak
+            // masa lokalde kapanır ama create sonra push edilip server'da HAYALET açık ticket kalır
+            // = ciro kaybı. Sadece bekleyen sync YOKSA (gerçekten kapanmış) kapat.
+            final hasPending = await _localDb.hasPendingSyncForTicket(localId);
+            if (!hasPending) {
+              print('[API] Server\'da ticket yok, local ticket kapatılıyor...');
+              await _localDb.markTicketAsSynced(localId);
+            } else {
+              print('[API] Masa $tableId 404 ama create-sync bekliyor, kapatma ATLANDI');
+            }
           }
           // 6 Tem 2026 (offline fix Adim 3): masa kapandi (server'da ticket yok) -> bu masanin
           // MIRROR'lanmis (server_id'li, sync BEKLEMEYEN) kayitlarini sil ki lokal DB sismesin.
@@ -527,14 +536,19 @@ class ApiService {
         'id': localTicket['server_id'] ?? localTicket['local_id'] ?? localTicket['id'],
         'local_id': localTicket['local_id'] ?? localTicket['id'],
         'table_id': localTicket['table_id'],
+        'table_number': localTicket['table_number'],
         'waiter_id': localTicket['waiter_id'],
-        'waiter_name': 'Garson',
+        // v11: gerçek garson adı (getLocalTicket COALESCE JOIN'den gelir); yoksa 'Garson' fallback.
+        'waiter_name': localTicket['waiter_name']?.toString() ?? 'Garson',
+        'section_name': localTicket['section_name'],
         'customer_count': localTicket['customer_count'],
+        'guest_count': localTicket['customer_count'],
         'ticket_number': localTicket['ticket_number'],
         'status': localTicket['status'],
         'subtotal': localTicket['subtotal'] ?? localTicket['total'] ?? 0,
         'total_amount': localTicket['total'] ?? localTicket['total_amount'] ?? 0,
         'discount_amount': localTicket['discount_amount'] ?? 0,
+        'discount_type': localTicket['discount_type'],
         'created_at': localTicket['created_at'] ?? localTicket['opened_at'],
         'duration_minutes': _calculateDuration(localTicket['opened_at']),
         'items': localTicket['items'] ?? [],
@@ -630,6 +644,7 @@ class ApiService {
       quantity: quantity,
       notes: notes,
       waiterId: waiterId ?? 1,
+      portion: portion,
     );
 
     _logService.logAction('Urun eklendi (offline)', details: {
@@ -686,13 +701,27 @@ class ApiService {
     }
 
     // OFFLINE — sync queue'ya update_item ekle, server_id resolve sync sirasinda yapilir
+    // 🔴 7 Tem 2026 (Fable teshis): eski enqueue IKI id-uzayi hatasi tasiyordu:
+    // (1) UI offline goruntude item['id'] = LOKAL id verir (getLocalTicket id=local_id) ->
+    //     sync bunu SERVER id sanip yanlis URL'e PUT ediyordu (404 retry -> dead_letter = kayip).
+    // (2) payload'da 'local_ticket_id' olmadigi + local_id kolonu NULL oldugu icin
+    //     cleanup/404/mirror pending-guard'lari bu kaydi GOREMIYORDU.
+    // FIX: lokal ticket+item cozulur; payload'a local_ticket_id/item_local_id yazilir
+    // (guard'lar payload LIKE '%"local_ticket_id":X%' ile eslesir), gercek server id
+    // biliniyorsa o kullanilir; bilinmiyorsa sync aninda item_local_id ile yeniden cozulur.
+    final updResolved = await _resolveLocalTicketAndItem(ticketId, itemId);
     _logService.logAction('Urun guncellendi (offline-queued)', details: {'ticket_id': ticketId, 'item_id': itemId, 'quantity': quantity});
+    // 🔴 Fable O1: item'ın bekleyen add_item'ına bağla -> _failIfParentDead guard çalışsın (zombi önle).
+    final updDep = updResolved.itemLocalId != null ? await _localDb.pendingAddItemSyncId(updResolved.itemLocalId!) : null;
     await _localDb.enqueueServerTicketAction(
       action: 'update_item',
       entityType: 'ticket_item',
-      serverId: itemId, // backend itemId'yi PUT path'inde kullanacak
+      serverId: updResolved.itemServerId ?? itemId, // gercek server id varsa o; yoksa eski davranis (sync'te re-resolve)
+      dependsOnSyncId: updDep,
       payload: {
-        'ticket_id': ticketId,
+        'ticket_id': updResolved.ticketServerId ?? ticketId,
+        if (updResolved.ticketLocalId != null) 'local_ticket_id': updResolved.ticketLocalId,
+        if (updResolved.itemLocalId != null) 'item_local_id': updResolved.itemLocalId,
         if (quantity != null) 'quantity': quantity,
         if (notes != null) 'notes': notes,
         if (waiterId != null) 'waiter_id': waiterId,
@@ -702,6 +731,17 @@ class ApiService {
       },
       description: 'Urun #$itemId offline guncellendi',
     );
+    // 🔴 Fable: offline güncelleme LOKAL item'a da yansısın (fiş/tahsilat/tutar uyuşmazlığını önle).
+    // Sadece görünüm/lokal — sync payload MUTLAK unit_price ile backend'e ayrıca gider (değişmez).
+    if (updResolved.itemLocalId != null) {
+      await _localDb.updateLocalItemFields(
+        localItemId: updResolved.itemLocalId!,
+        localTicketId: updResolved.ticketLocalId,
+        unitPrice: unitPrice,
+        quantity: quantity,
+        notes: notes,
+      );
+    }
     return {'success': true, 'offline': true, 'queued': true};
   }
 
@@ -733,19 +773,70 @@ class ApiService {
     }
 
     // OFFLINE — sync queue'ya delete_item (backend cancel_item) ekle
+    // 🔴 7 Tem 2026 (Fable teshis): update_item ile ayni id-uzayi + guard-gorunmezlik fix'i
+    // (aciklama updateTicketItem offline dalinda).
+    final delResolved = await _resolveLocalTicketAndItem(ticketId, itemId);
     _logService.logAction('Urun silindi (offline-queued)', details: {'ticket_id': ticketId, 'item_id': itemId, 'cancel_reason': cancelReason});
+    final delDep = delResolved.itemLocalId != null ? await _localDb.pendingAddItemSyncId(delResolved.itemLocalId!) : null;
     await _localDb.enqueueServerTicketAction(
       action: 'delete_item',
       entityType: 'ticket_item',
-      serverId: itemId,
+      serverId: delResolved.itemServerId ?? itemId,
+      dependsOnSyncId: delDep,
       payload: {
-        'ticket_id': ticketId,
+        'ticket_id': delResolved.ticketServerId ?? ticketId,
+        if (delResolved.ticketLocalId != null) 'local_ticket_id': delResolved.ticketLocalId,
+        if (delResolved.itemLocalId != null) 'item_local_id': delResolved.itemLocalId,
         'cancel_reason': cancelReason ?? 'Musteri istegi',
         if (waiterId != null) 'waiter_id': waiterId,
       },
       description: 'Urun #$itemId offline silindi',
     );
+    // 🔴 Fable: offline iptal LOKAL item'a yansısın (kartta/toplamda anında düşsün).
+    if (delResolved.itemLocalId != null) {
+      await _localDb.cancelLocalItemOffline(delResolved.itemLocalId!, localTicketId: delResolved.ticketLocalId);
+    }
     return {'success': true, 'offline': true, 'queued': true};
+  }
+
+  /// 7 Tem 2026 (Fable): UI'dan gelen ticketId/itemId hangi id-uzayinda olursa olsun
+  /// (offline goruntude LOKAL, online goruntude SERVER) her iki uzayin id'lerini coz.
+  /// Bulunamazsa alanlar null doner ve cagiran eski davranisa (verbatim id) duser.
+  Future<({int? ticketLocalId, int? ticketServerId, int? itemLocalId, int? itemServerId})>
+      _resolveLocalTicketAndItem(int ticketId, int itemId) async {
+    try {
+      Map<String, dynamic>? lt = await _localDb.getLocalTicket(ticketId);
+      lt ??= await _localDb.getLocalTicketByServerId(ticketId);
+      if (lt == null) {
+        return (ticketLocalId: null, ticketServerId: null, itemLocalId: null, itemServerId: null);
+      }
+      final tLocal = lt['local_id'] as int?;
+      final tServer = lt['server_id'] as int?;
+      int? iLocal;
+      int? iServer;
+      final items = (lt['items'] as List?) ?? const [];
+      // Once LOKAL uzay eslesmesi (offline UI item['id'] = local_id verir); yoksa server uzayi.
+      for (final it in items) {
+        if (it is Map && it['local_id'] == itemId) {
+          iLocal = it['local_id'] as int?;
+          iServer = it['server_id'] as int?;
+          break;
+        }
+      }
+      if (iLocal == null) {
+        for (final it in items) {
+          if (it is Map && it['server_id'] == itemId) {
+            iLocal = it['local_id'] as int?;
+            iServer = it['server_id'] as int?;
+            break;
+          }
+        }
+      }
+      return (ticketLocalId: tLocal, ticketServerId: tServer, itemLocalId: iLocal, itemServerId: iServer);
+    } catch (e) {
+      print('[API] _resolveLocalTicketAndItem hatasi (fallback verbatim id): $e');
+      return (ticketLocalId: null, ticketServerId: null, itemLocalId: null, itemServerId: null);
+    }
   }
 
   Future<Map<String, dynamic>> closeTicket({
@@ -1307,12 +1398,13 @@ class ApiService {
 
   // Tum acik adisyonlarin acik item'larini tek sorguda getir
   Future<List<dynamic>> getPendingOrders() async {
-    if (!_connectivity.isOnline) return [];
+    // v11: offline'da mirror'lanan item'lardan doldur (eskiden boş liste dönüyordu).
+    if (!_connectivity.isOnline) return await _localDb.getPendingOrdersOffline();
     try {
       final response = await _dio.get('/api/pos/tickets/pending-orders');
       return (response.data['rows'] as List?) ?? [];
     } on DioException catch (_) {
-      return [];
+      return await _localDb.getPendingOrdersOffline(); // fake-online kurtarma
     } catch (_) {
       return [];
     }
@@ -1324,8 +1416,9 @@ class ApiService {
     required int itemId,
     int? waiterId,
   }) async {
+    // v11: offline'da item'ı local'de teslim işaretle + sync_queue'ya mark_served ekle.
     if (!_connectivity.isOnline) {
-      return {'success': false, 'error': 'Internet gerekli'};
+      return await _localDb.markItemServedOffline(itemId, ticketId: ticketId, waiterId: waiterId);
     }
     try {
       final response = await _dio.post(
@@ -1639,6 +1732,11 @@ class ApiService {
   /// Hatalı işlemi sil
   Future<void> deleteSyncItem(int syncId) async {
     await _syncService.deleteSyncItem(syncId);
+  }
+
+  /// Bir işleme bağımlı (henüz sync olmamış) alt işlemler — manuel silme uyarısı için (Fable Fix 4).
+  Future<List<Map<String, dynamic>>> getDependentSyncItems(int syncId) async {
+    return await _localDb.getDependentSyncItems(syncId);
   }
 
   /// Tüm hatalı işlemleri temizle

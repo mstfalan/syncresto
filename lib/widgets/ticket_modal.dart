@@ -92,10 +92,11 @@ class _TicketModalState extends State<TicketModal> {
       return offlineAllowedPermissions.contains(permission);
     }
 
-    // Online modda garsonun yetkilerini kontrol et
-    final permissions = widget.waiter['permissions'] as Map<String, dynamic>?;
-    if (permissions == null) return false; // Yetki bilgisi yoksa varsayılan olarak izin verme
-    return permissions[permission] == true;
+    // Online modda garsonun yetkilerini kontrol et.
+    // permissions Map beklenir ama offline cache'te List ([]) gelebilir (crash koruması).
+    final raw = widget.waiter['permissions'];
+    if (raw is! Map) return false; // List/null -> yetki bilgisi yok, varsayılan izin verme
+    return raw[permission] == true;
   }
 
   Future<void> _loadTicket({bool autoOpenAddItem = false}) async {

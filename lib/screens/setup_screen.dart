@@ -6,6 +6,7 @@ import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
 import '../services/license_service.dart';
 import '../services/local_db_service.dart';
+import '../services/image_cache_service.dart';
 import '../providers/theme_provider.dart';
 import 'pin_login_screen.dart';
 
@@ -73,19 +74,22 @@ class _SetupScreenState extends State<SetupScreen> {
           await licSvc.clearLicense();
         } catch (_) {}
 
-        // 6 Tem 2026 (offline fix Adim 3, MULTI-TENANT guvenlik): Bu cihaza BASKA bir bayinin
-        // key'i giriliyorsa (tenant degisimi), eski bayinin TUM lokal verisini (ticket/item/
-        // mirror/cache) temizle. Aksi halde eski bayinin table_id'leri yeni bayininkiyle
-        // cakisir = multi-tenant sizinti (baska bayinin masasi/adisyonu gorunur). SADECE key
-        // gercekten degistiyse temizle (ayni key tekrar girilirse veri kaybi olmasin).
-        final previousKey = widget.storageService.getApiKey();
-        if (previousKey != null && previousKey.isNotEmpty && previousKey != apiKey) {
-          print('[Setup] Tenant/key degisti -> eski bayinin lokal verisi temizleniyor');
+        // MULTI-TENANT guvenlik (7 Tem 2026): tenant degisimini KEY HASH'i ile tespit et
+        // (setup ekranina gelmeden once key silinmis olabilir -> eski previousKey==null ile
+        // wipe ATLANIYORDU = eski bayinin cache/adisyon/sync_queue'su yeni tenant'a sizardi).
+        // Hash clear'larda silinmez; hangi yoldan gelinirse gelinsin degisim yakalanir.
+        final prevHash = widget.storageService.getTenantHash();
+        final newHash = widget.storageService.hashKey(apiKey);
+        if (prevHash != null && prevHash != newHash) {
+          print('[Setup] Tenant degisti (hash farkli) -> eski bayinin TUM verisi temizleniyor');
+          try { await LocalDbService().clearAllTenantData(); } catch (e) { print('[Setup] SQLite temizleme hatasi: $e'); }
+          try { await ImageCacheService().clearCache(); } catch (e) { print('[Setup] Gorsel cache temizleme hatasi: $e'); }
+          try { await widget.storageService.clearWaiterSession(); } catch (_) {}
           try {
-            await LocalDbService().clearAllTenantData();
-          } catch (e) {
-            print('[Setup] Tenant veri temizleme hatasi: $e');
-          }
+            final tp = Provider.of<ThemeProvider>(context, listen: false);
+            tp.resetToDefaults();
+            await tp.clearThemePrefs();
+          } catch (e) { print('[Setup] Tema temizleme hatasi: $e'); }
         }
 
         await widget.storageService.saveApiUrl(apiUrl);
@@ -98,6 +102,15 @@ class _SetupScreenState extends State<SetupScreen> {
           await widget.storageService.saveBackendUrl(imageBaseUrl);
           widget.apiService.setBackendUrl(imageBaseUrl);
         }
+
+        // Yeni firmanin temasini (renk/logo/marka) HEMEN yukle -> login ekrani ESKI firma temasiyla
+        // acilmasin (settings validate-key'de gelmiyor, ayri /pos/settings cagrisi gerekiyor).
+        try {
+          final settings = await widget.apiService.getSettings();
+          if (mounted) {
+            Provider.of<ThemeProvider>(context, listen: false).updateFromSettings(settings);
+          }
+        } catch (e) { print('[Setup] Tema on-yukleme atlandi: $e'); }
 
         if (mounted) {
           // Navigate to PIN login

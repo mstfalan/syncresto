@@ -9,6 +9,7 @@ import '../services/connectivity_service.dart';
 import '../services/version_service.dart';
 import '../services/log_service.dart';
 import '../services/license_service.dart';
+import '../services/image_cache_service.dart';
 import '../providers/theme_provider.dart';
 import '../widgets/update_modal.dart';
 import 'pin_login_screen.dart';
@@ -329,6 +330,10 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
     } catch (e) {
       print('[Setup] Cache temizleme hatası: $e');
     }
+
+    try {
+      await ImageCacheService().clearCache(); // disk logo/urun gorselleri (eski tenant kalmasin)
+    } catch (_) {}
 
     try {
       await _licenseService.clearLicense();

@@ -87,11 +87,18 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
   }
 
   Future<void> _deleteItem(int syncId) async {
+    // Fable Fix 4: bu işleme bağımlı (henüz sync olmamış) alt işlemler var mı? Varsa kullanıcı bilsin —
+    // silinen işlemle birlikte bağımlıları da iptal olur (yetim kalmasın).
+    final deps = await widget.apiService.getDependentSyncItems(syncId);
+    final depCount = deps.length;
+    final msg = depCount > 0
+        ? 'Bu işlemi silerseniz ona bağlı $depCount işlem de iptal olacak (henüz sunucuya gönderilmemiş). Bu işlem geri alınamaz. Devam edilsin mi?'
+        : 'Bu islemi silmek istediginize emin misiniz? Bu islem geri alinamaz.';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Islemi Sil'),
-        content: const Text('Bu islemi silmek istediginize emin misiniz? Bu islem geri alinamaz.'),
+        title: Text(depCount > 0 ? 'İşlemi ve Bağlılarını Sil' : 'Islemi Sil'),
+        content: Text(msg),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -839,6 +846,7 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
                   ),
                 ),
               ),
+              // Tekrar Dene: sadece hatalı (failed) işlemlerde.
               if (!isPending) ...[
                 IconButton(
                   onPressed: () => _retryItem(syncId),
@@ -849,15 +857,16 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
                   color: theme.primaryColor,
                 ),
                 const SizedBox(width: 8),
-                IconButton(
-                  onPressed: () => _deleteItem(syncId),
-                  icon: const Icon(Icons.delete_outline, size: 20),
-                  tooltip: 'Sil',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                  color: Colors.red,
-                ),
               ],
+              // Sil: HEM bekleyen HEM hatalı işlemlerde — takılan işlem manuel kaldırılabilsin.
+              IconButton(
+                onPressed: () => _deleteItem(syncId),
+                icon: const Icon(Icons.delete_outline, size: 20),
+                tooltip: 'Sil',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                color: Colors.red,
+              ),
             ],
           ),
           if (timeAgo.isNotEmpty || retryCount > 0 || errorMessage != null)

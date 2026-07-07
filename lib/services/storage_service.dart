@@ -20,18 +20,28 @@ class StorageService {
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
 
-    // Dosya bazlı yedek - sadece URL bilgileri (API key YAZILMAZ)
+    // Dosya bazlı yedek — URL + API key (key obfuscate edilir, duz metin degil).
     try {
       final dir = await getApplicationSupportDirectory();
       _backupFile = File('${dir.path}/pos_settings.json');
 
-      // SharedPreferences boşsa yedekten URL'leri geri yükle
-      if (getApiUrl() == null) {
+      // prefs'te KEY yoksa (bozulma/0-byte/rebrand) yedekten geri yukle — kendi kendini iyilestirme.
+      if (getApiKey() == null || getApiUrl() == null) {
         final backup = _readBackupSecure();
         if (backup != null) {
-          if (backup[_apiUrlKey] != null) await _prefs.setString(_apiUrlKey, backup[_apiUrlKey]);
-          if (backup[_backendUrlKey] != null) await _prefs.setString(_backendUrlKey, backup[_backendUrlKey]);
-          if (kDebugMode) print('[Storage] URL ayarlari yedekten geri yuklendi');
+          if (getApiUrl() == null && backup[_apiUrlKey] != null) {
+            await _prefs.setString(_apiUrlKey, backup[_apiUrlKey]);
+          }
+          if (backup[_backendUrlKey] != null && getBackendUrl() == null) {
+            await _prefs.setString(_backendUrlKey, backup[_backendUrlKey]);
+          }
+          if (getApiKey() == null && backup[_apiKeyKey] != null) {
+            await _prefs.setString(_apiKeyKey, _deobfuscate(backup[_apiKeyKey]));
+            if (backup[_apiKeyNameKey] != null) {
+              await _prefs.setString(_apiKeyNameKey, backup[_apiKeyNameKey]);
+            }
+            if (kDebugMode) print('[Storage] API key yedekten geri yuklendi');
+          }
         }
       }
     } catch (e) {
@@ -51,15 +61,46 @@ class StorageService {
   Future<void> _saveBackup() async {
     if (_backupFile == null) return;
     try {
+      final key = getApiKey();
       final data = {
         _apiUrlKey: getApiUrl(),
         _backendUrlKey: getBackendUrl(),
+        // API key obfuscate (duz metin degil). Yeni key girilince _saveBackup cagrilir -> yedek guncellenir.
+        if (key != null) _apiKeyKey: _obfuscate(key),
+        if (getApiKeyName() != null) _apiKeyNameKey: getApiKeyName(),
       };
       final jsonStr = jsonEncode(data);
       final hmac = _generateHmac(jsonStr);
-      await _backupFile!.writeAsString(jsonEncode({'data': data, 'hmac': hmac}));
+      final payload = jsonEncode({'data': data, 'hmac': hmac});
+      // Atomik yaz: temp'e yaz + flush + rename (yedek sert-kapanmada bozulmasin).
+      final tmp = File('${_backupFile!.path}.tmp');
+      final raf = await tmp.open(mode: FileMode.write);
+      await raf.writeString(payload);
+      await raf.flush();
+      await raf.close();
+      await tmp.rename(_backupFile!.path);
     } catch (e) {
       if (kDebugMode) print('[Storage] Yedekleme hatasi: $e');
+    }
+  }
+
+  // Cihaza ozel salt ile XOR obfuscate (duz metin onleme — kriptografik guvenlik DEGIL, kurtarma amacli).
+  static const String _obfKey = 'SyncRestoPOS_KeyObf_2026';
+  String _obfuscate(String plain) {
+    final k = utf8.encode(_obfKey);
+    final b = utf8.encode(plain);
+    final out = List<int>.generate(b.length, (i) => b[i] ^ k[i % k.length]);
+    return base64.encode(out);
+  }
+
+  String _deobfuscate(String obf) {
+    try {
+      final k = utf8.encode(_obfKey);
+      final b = base64.decode(obf);
+      final out = List<int>.generate(b.length, (i) => b[i] ^ k[i % k.length]);
+      return utf8.decode(out);
+    } catch (_) {
+      return obf; // eski/plain yedek — oldugu gibi don
     }
   }
 
@@ -93,8 +134,14 @@ class StorageService {
   Future<void> saveApiKey(String apiKey, String name) async {
     await _prefs.setString(_apiKeyKey, apiKey);
     await _prefs.setString(_apiKeyNameKey, name);
+    await _prefs.setString(_tenantHashKey, hashKey(apiKey)); // atomik: key ile birlikte hash
     await _saveBackup();
   }
+
+  // Tenant kimligi (key hash) — clear'larda SILINMEZ, tenant-degisim tespiti icin kalir.
+  static const String _tenantHashKey = 'pos_tenant_key_hash';
+  String hashKey(String apiKey) => sha256.convert(utf8.encode(apiKey)).toString();
+  String? getTenantHash() => _prefs.getString(_tenantHashKey);
 
   Future<void> saveApiUrl(String url) async {
     await _prefs.setString(_apiUrlKey, url);

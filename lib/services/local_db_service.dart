@@ -46,7 +46,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 9, // v9 (7 Tem 2026): LAN-senkron — local_tickets'e owner_device_id/lan_lease_until/lan_origin
+      version: 11, // v11 (7 Tem 2026): offline-parity — waiter_name/section_name + item added_by/delivered/portion/payment
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -168,6 +168,8 @@ class LocalDbService {
         capacity INTEGER DEFAULT 4,
         status TEXT DEFAULT 'available',
         current_ticket_id INTEGER,
+        current_total REAL,
+        ticket_opened_at TEXT,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -233,7 +235,9 @@ class LocalDbService {
         offline_permissions TEXT,
         owner_device_id TEXT,
         lan_lease_until TEXT,
-        lan_origin TEXT DEFAULT 'self'
+        lan_origin TEXT DEFAULT 'self',
+        waiter_name TEXT,
+        section_name TEXT
       )
     ''');
 
@@ -256,6 +260,15 @@ class LocalDbService {
         synced_at TEXT,
         printed INTEGER DEFAULT 0,
         created_at TEXT NOT NULL,
+        added_by INTEGER,
+        added_by_name TEXT,
+        delivered_at TEXT,
+        delivered_by INTEGER,
+        delivered_by_name TEXT,
+        portion TEXT,
+        payment_status TEXT,
+        payment_method TEXT,
+        skip_pos_print INTEGER DEFAULT 0,
         FOREIGN KEY (local_ticket_id) REFERENCES local_tickets(local_id)
       )
     ''');
@@ -499,6 +512,49 @@ class LocalDbService {
       }
       print('[LocalDb] v9 LAN-senkron kolonlari eklendi (owner_device_id/lan_lease_until/lan_origin)');
     }
+
+    // v10 (7 Tem 2026): cached_tables'a current_total + ticket_opened_at. Online sync'te backend'in
+    // gonderdigi masa tutari cache'lenir -> offline'a gecince masa tutarlari KAYBOLMAZ (eskiden
+    // sadece canli server cevabinda vardi, cache'te YOKTU).
+    if (oldVersion < 10) {
+      for (final col in [
+        'ALTER TABLE cached_tables ADD COLUMN current_total REAL',
+        'ALTER TABLE cached_tables ADD COLUMN ticket_opened_at TEXT',
+      ]) {
+        try {
+          await db.execute(col);
+        } catch (e) {
+          print('[LocalDb] v10 kolon zaten var: $e');
+        }
+      }
+      print('[LocalDb] v10 cached_tables tutar kolonlari eklendi (current_total/ticket_opened_at)');
+    }
+
+    // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
+    // local_tickets: garson/salon adi. local_ticket_items: ekleyen/teslim eden garson, porsiyon,
+    // odeme durumu, mutfak-gizle. Hepsi nullable/DEFAULT'lu additive -> sync_queue/FIFO etkilenmez.
+    if (oldVersion < 11) {
+      for (final col in [
+        'ALTER TABLE local_tickets ADD COLUMN waiter_name TEXT',
+        'ALTER TABLE local_tickets ADD COLUMN section_name TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN added_by INTEGER',
+        'ALTER TABLE local_ticket_items ADD COLUMN added_by_name TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN delivered_at TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN delivered_by INTEGER',
+        'ALTER TABLE local_ticket_items ADD COLUMN delivered_by_name TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN portion TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN payment_status TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN payment_method TEXT',
+        'ALTER TABLE local_ticket_items ADD COLUMN skip_pos_print INTEGER DEFAULT 0',
+      ]) {
+        try {
+          await db.execute(col);
+        } catch (e) {
+          print('[LocalDb] v11 kolon zaten var: $e');
+        }
+      }
+      print('[LocalDb] v11 offline-parity kolonlari eklendi');
+    }
   }
 
   // ==================== TRANSACTION RETRY HELPER (19 May 2026) ====================
@@ -591,9 +647,11 @@ class LocalDbService {
           'image': prod['image'],
           'is_active': prod['is_active'] ?? 1,
           'is_out_of_stock': prod['is_out_of_stock'] ?? 0,
-          'extras': prod['extras'] is String ? prod['extras'] : (prod['extras'] != null ? prod['extras'].toString() : null),
+          // 🔴 Fable: eski kod List.toString() -> gecersiz JSON ([{id: 199, name: ...}] tirnaksiz) ->
+          // offline parse EDILEMEZ -> varyant popup acilmaz + product_detail crash. jsonEncode dogru JSON yazar.
+          'extras': prod['extras'] is String ? prod['extras'] : (prod['extras'] != null ? jsonEncode(prod['extras']) : null),
           'show_variants_pos': prod['show_variants_pos'] ?? 0,
-          'variants': prod['variants'] is String ? prod['variants'] : (prod['variants'] != null ? prod['variants'].toString() : null),
+          'variants': prod['variants'] is String ? prod['variants'] : (prod['variants'] != null ? jsonEncode(prod['variants']) : null),
           'printer_id': prod['printer_id'], // v8: offline mutfak fisi icin
           'cached_at': now,
         });
@@ -604,7 +662,30 @@ class LocalDbService {
   // Ürünleri getir
   Future<List<Map<String, dynamic>>> getCachedProducts() async {
     final db = await database;
-    return await db.query('cached_products', where: 'is_active = 1');
+    final rows = await db.query('cached_products', where: 'is_active = 1');
+    // 🔴 Fable: variants/extras TEXT olarak saklanir; tuketiciler (pos_screen, add_item_modal,
+    // product_detail_modal) List bekler. Decode et (offline varyant popup + crash fix).
+    // sqflite row READ-ONLY -> once kopyala, sonra mutasyon.
+    return rows.map((row) {
+      final m = Map<String, dynamic>.from(row);
+      m['variants'] = _decodeJsonList(m['variants']);
+      m['extras'] = _decodeJsonList(m['extras']);
+      return m;
+    }).toList();
+  }
+
+  // TEXT (JSON) -> List; parse edilemeyen eski bozuk kayit -> []. num/bool gibi degilse guvenli.
+  List<dynamic> _decodeJsonList(dynamic v) {
+    if (v is List) return v;
+    if (v is String && v.isNotEmpty) {
+      try {
+        final d = jsonDecode(v);
+        return d is List ? d : [];
+      } catch (_) {
+        return [];
+      }
+    }
+    return [];
   }
 
   // 12 Haz 2026: hash-diff yardımcısı — gelen listenin deterministik hash'i.
@@ -686,6 +767,10 @@ class LocalDbService {
           'capacity': table['capacity'] ?? 4,
           'status': table['status'] ?? 'available',
           'current_ticket_id': table['current_ticket_id'],
+          // v10: masa tutari + acilis (online sync'te sakla -> offline'a gecince kaybolmaz).
+          // Backend current_total'i String ('580.00') VEYA num donebilir -> guvenli parse.
+          'current_total': _parseMoney(table['current_total']),
+          'ticket_opened_at': table['ticket_opened_at']?.toString(),
           'cached_at': now,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
@@ -762,7 +847,7 @@ class LocalDbService {
     // JOIN cached_products: printer_id'yi de al
     final r = await db.rawQuery('''
       SELECT i.local_id, i.server_id, i.product_id, i.product_name, i.quantity,
-             i.unit_price, i.notes,
+             i.unit_price, i.notes, i.portion,
              p.printer_id
         FROM local_ticket_items i
    LEFT JOIN cached_products p ON p.id = i.product_id
@@ -790,8 +875,11 @@ class LocalDbService {
     final db = await database;
     // 🔴 7 Tem 2026 (LAN Faz 2 — Fable D1): lan_origin='lan' satirlar PRINT akisina GIRMEZ
     // (savunma-derinligi; LAN ticket'larinin item'i yok ama print kalbi tutarli filtreli olsun).
+    // v11: COALESCE(JOIN, mirror-kolon) — JOIN offline-açılan ticket'i cached_waiters'tan çözer;
+    // mirror kolonu (t.waiter_name) cache'te olmayan/silinmiş garsonu kurtarır. JOIN öncelik = print davranışı aynı.
     final r = await db.rawQuery('''
-      SELECT t.*, s.name as section_name, s.summary_printer_id, w.name as waiter_name
+      SELECT t.*, COALESCE(s.name, t.section_name) as section_name, s.summary_printer_id,
+             COALESCE(w.name, t.waiter_name) as waiter_name
         FROM local_tickets t
    LEFT JOIN cached_tables tb ON tb.id = t.table_id
    LEFT JOIN cached_sections s ON s.id = tb.section_id
@@ -1012,6 +1100,11 @@ class LocalDbService {
       }
     }
 
+    // 🔴 Fable: taşımadan ÖNCE kaynak ticket'ı oku (taşındıktan sonra kaybolur — recalc için gerekli).
+    final srcRow = await db.query('local_ticket_items', columns: ['local_ticket_id'],
+        where: 'local_id = ? OR server_id = ?', whereArgs: [itemId, itemId], limit: 1);
+    final sourceLocalTicketId = srcRow.isNotEmpty ? srcRow.first['local_ticket_id'] as int? : null;
+
     // Item'i hedef adisyona taşı (local_ticket_items üzerinden)
     await db.update(
       'local_ticket_items',
@@ -1019,6 +1112,11 @@ class LocalDbService {
       where: 'local_id = ? OR server_id = ?',
       whereArgs: [itemId, itemId],
     );
+
+    // Kaynak + hedef ticket total'larını güncelle (taşınan item her ikisinin tutarını değiştirir).
+    if (sourceLocalTicketId != null) await recalcTicketTotals(sourceLocalTicketId);
+    final tgt = resolvedTargetLocalId ?? resolvedTargetTicketId;
+    if (tgt != null) await recalcTicketTotals(tgt);
 
     return {
       'target_ticket_id': resolvedTargetTicketId,
@@ -1044,11 +1142,17 @@ class LocalDbService {
   // Yerel adisyonu getir
   Future<Map<String, dynamic>?> getLocalTicket(int localId) async {
     final db = await database;
-    final results = await db.query(
-      'local_tickets',
-      where: 'local_id = ?',
-      whereArgs: [localId],
-    );
+    // v11: COALESCE(JOIN, mirror-kolon) — offline-açılan ticket'ta bile garson/salon adı cached'ten çözülür.
+    final results = await db.rawQuery('''
+      SELECT t.*, COALESCE(w.name, t.waiter_name) AS waiter_name,
+             COALESCE(s.name, t.section_name) AS section_name
+        FROM local_tickets t
+   LEFT JOIN cached_waiters w ON w.id = t.waiter_id
+   LEFT JOIN cached_tables tb ON tb.id = t.table_id
+   LEFT JOIN cached_sections s ON s.id = tb.section_id
+       WHERE t.local_id = ?
+       LIMIT 1
+    ''', [localId]);
 
     if (results.isEmpty) return null;
 
@@ -1057,12 +1161,15 @@ class LocalDbService {
     // local_id'yi id olarak da ekle (uyumluluk için)
     ticket['id'] = ticket['local_id'];
 
-    // Kalemleri de getir
-    final items = await db.query(
-      'local_ticket_items',
-      where: 'local_ticket_id = ?',
-      whereArgs: [localId],
-    );
+    // Kalemleri de getir — v11: added_by/delivered_by garson adlarını cached_waiters'tan çöz.
+    final items = await db.rawQuery('''
+      SELECT i.*, COALESCE(wa.name, i.added_by_name) AS added_by_name,
+             COALESCE(wd.name, i.delivered_by_name) AS delivered_by_name
+        FROM local_ticket_items i
+   LEFT JOIN cached_waiters wa ON wa.id = i.added_by
+   LEFT JOIN cached_waiters wd ON wd.id = i.delivered_by
+       WHERE i.local_ticket_id = ?
+    ''', [localId]);
 
     // Item'lara da id alanı ekle
     final processedItems = items.map((item) {
@@ -1123,6 +1230,7 @@ class LocalDbService {
     int quantity = 1,
     String? notes,
     int waiterId = 1,
+    String? portion,
   }) async {
     final localId = await addTicketItem(
       localTicketId: localTicketId,
@@ -1131,6 +1239,8 @@ class LocalDbService {
       unitPrice: unitPrice,
       quantity: quantity,
       notes: notes,
+      waiterId: waiterId, // v11: ekleyen garson (rapor için) — önceden iletilmiyordu
+      portion: portion,
     );
     return {'id': localId, 'success': true};
   }
@@ -1144,6 +1254,8 @@ class LocalDbService {
     int quantity = 1,
     String? notes,
     String? extras,
+    int? waiterId,
+    String? portion,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
@@ -1159,6 +1271,8 @@ class LocalDbService {
       'status': 'pending',
       'created_at': now,
       'synced': 0,
+      'added_by': waiterId, // v11: ekleyen garson (garson performans raporu)
+      'portion': portion,
     });
 
     // Ticket'ın sync_id'sini al (bağımlılık için)
@@ -1180,12 +1294,77 @@ class LocalDbService {
         'unit_price': unitPrice,
         'quantity': quantity,
         'notes': notes,
+        if (waiterId != null) 'waiter_id': waiterId, // v11: backend key adı waiter_id
+        if (portion != null) 'portion': portion,
       },
       description: 'Masa $tableNumber: $productName x$quantity eklendi',
       dependsOnSyncId: dependsOn,
     );
 
+    // 🔴 Fable: offline ürün eklenince ticket total GÜNCELLENMİYORDU (0 kalıyordu) -> masa tutarı
+    // görünmüyordu. Recalc: total item'lardan hesaplansın (masa kartında + merge'de doğru tutar).
+    await recalcTicketTotals(localTicketId);
+
     return localItemId;
+  }
+
+  /// v11 Fable: offline ürün güncellemesini LOKAL item'a yansıt (fiş/tutar uyuşmazlığı önle).
+  /// Sadece gelen (non-null) alanları günceller. Sonra ticket total'ını recalc eder.
+  Future<void> updateLocalItemFields({
+    required int localItemId,
+    int? localTicketId,
+    double? unitPrice,
+    int? quantity,
+    String? notes,
+  }) async {
+    final db = await database;
+    final fields = <String, dynamic>{};
+    if (unitPrice != null) fields['unit_price'] = unitPrice;
+    if (quantity != null) fields['quantity'] = quantity;
+    if (notes != null) fields['notes'] = notes;
+    if (fields.isNotEmpty) {
+      await db.update('local_ticket_items', fields, where: 'local_id = ?', whereArgs: [localItemId]);
+    }
+    // Ticket'ı çöz (verilmemişse item'dan) ve recalc.
+    int? tid = localTicketId;
+    if (tid == null) {
+      final r = await db.query('local_ticket_items', columns: ['local_ticket_id'],
+          where: 'local_id = ?', whereArgs: [localItemId], limit: 1);
+      if (r.isNotEmpty) tid = r.first['local_ticket_id'] as int?;
+    }
+    if (tid != null) await recalcTicketTotals(tid);
+  }
+
+  /// v11 Fable: offline ürün iptalini LOKAL item'a yansıt (status='cancelled') + recalc.
+  Future<void> cancelLocalItemOffline(int localItemId, {int? localTicketId}) async {
+    final db = await database;
+    await db.update('local_ticket_items', {'status': 'cancelled'},
+        where: 'local_id = ?', whereArgs: [localItemId]);
+    int? tid = localTicketId;
+    if (tid == null) {
+      final r = await db.query('local_ticket_items', columns: ['local_ticket_id'],
+          where: 'local_id = ?', whereArgs: [localItemId], limit: 1);
+      if (r.isNotEmpty) tid = r.first['local_ticket_id'] as int?;
+    }
+    if (tid != null) await recalcTicketTotals(tid);
+  }
+
+  /// Bir local ticket'ın subtotal/total'ını item'larından yeniden hesapla (offline tutar).
+  /// Formül getLocalTicket + closeLocalTicket ile BİREBİR aynı (tutarlılık).
+  Future<void> recalcTicketTotals(int localTicketId) async {
+    final db = await database;
+    final r = await db.rawQuery('''
+      SELECT COALESCE(SUM(unit_price * quantity), 0) AS sub
+        FROM local_ticket_items
+       WHERE local_ticket_id = ? AND status != 'cancelled'
+    ''', [localTicketId]);
+    final subtotal = (r.first['sub'] as num?)?.toDouble() ?? 0.0;
+    final tk = await db.query('local_tickets', columns: ['discount_amount'],
+        where: 'local_id = ?', whereArgs: [localTicketId], limit: 1);
+    final discount = tk.isNotEmpty ? ((tk.first['discount_amount'] as num?)?.toDouble() ?? 0.0) : 0.0;
+    await db.update('local_tickets',
+        {'subtotal': subtotal, 'total': subtotal - discount},
+        where: 'local_id = ?', whereArgs: [localTicketId]);
   }
 
   // Adisyon kalemini iptal et
@@ -1248,15 +1427,18 @@ class LocalDbService {
     return 0.0;
   }
 
-  /// 🟡 6 Tem 2026 FINAL-FIX D: Bu ticket'a ait SON bekleyen add_item sync kaydinin id'si.
-  /// close/void bu id'ye bagimli yapilir -> close, kendi item'larindan SONRA backend'e gider.
-  /// Aksi halde close (prio 1) item'lardan (prio 0) ONCE gidiyordu -> backend final_total'i
-  /// 0 itemla COALESCE(total,subtotal,0)=0 kilitliyordu -> offline adisyonlar raporda 0 TL (ciro kaybi).
+  /// 🟡 6 Tem 2026 FINAL-FIX D: Bu ticket'a ait SON bekleyen item-değiştiren sync kaydinin id'si.
+  /// close/void bu id'ye bagimli yapilir -> close, kendi item islemlerinden SONRA backend'e gider.
+  /// Aksi halde close (prio 1) item'lardan ONCE gidiyordu -> backend final_total'i eksik kilitliyordu.
+  /// 🔴 7 Tem (Fable K1): SADECE add_item degil, update_item + delete_item de kapsanmali. Aksi halde
+  /// "ekle -> miktar degistir -> kapat" akisinda close, update_item'i beklemeden gider -> backend
+  /// final_total ESKI miktar/fiyat uzerinden kilitlenir -> musteri farkli oder, rapor farkli gosterir.
   Future<int?> _lastPendingItemSyncId(int localTicketId) async {
     final db = await database;
     final r = await db.rawQuery('''
       SELECT id FROM sync_queue
-       WHERE action = 'add_item' AND status IN ('pending','in_progress')
+       WHERE action IN ('add_item','update_item','delete_item')
+         AND status IN ('pending','in_progress')
          AND (payload LIKE ? OR payload LIKE ?)
        ORDER BY id DESC LIMIT 1
     ''', ['%"local_ticket_id":$localTicketId,%', '%"local_ticket_id":$localTicketId}%']);
@@ -1300,11 +1482,15 @@ class LocalDbService {
     // Masayı boşalt
     await db.update(
       'cached_tables',
-      {'status': 'empty', 'current_ticket_id': null},
+      {'status': 'empty', 'current_ticket_id': null, 'current_total': null},
       where: 'id = ?',
       whereArgs: [ticket['table_id']],
     );
     print('[LocalDb] Masa boşaltıldı (close): ${ticket['table_id']}');
+    // Masa kapandı -> "FİŞ ÇIKMADI" göstergesi kalmasın. try/catch: bu HİÇBİR koşulda close sync'ini
+    // kesmesin (Fable — best-effort, aksi halde DB hatası ciro sapmasına yol açabilir).
+    final closeTid = ticket['table_id'] is int ? ticket['table_id'] as int : int.tryParse('${ticket['table_id']}');
+    if (closeTid != null) { try { await clearPrintQueueForTable(closeTid); } catch (_) {} }
 
     // Ödeme yöntemi label
     final paymentLabel = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı';
@@ -1355,11 +1541,14 @@ class LocalDbService {
     // Masayı boşalt
     await db.update(
       'cached_tables',
-      {'status': 'empty', 'current_ticket_id': null},
+      {'status': 'empty', 'current_ticket_id': null, 'current_total': null},
       where: 'id = ?',
       whereArgs: [ticket['table_id']],
     );
     print('[LocalDb] Masa boşaltıldı (void): ${ticket['table_id']}');
+    // Masa iptal edildi -> "FİŞ ÇIKMADI" göstergesi kalmasın (best-effort, sync'i kesmesin).
+    final voidTid = ticket['table_id'] is int ? ticket['table_id'] as int : int.tryParse('${ticket['table_id']}');
+    if (voidTid != null) { try { await clearPrintQueueForTable(voidTid); } catch (_) {} }
 
     // Sync kuyruğuna ekle - ticket create'e bağımlı
     // reason artik payload'da: garson sebep secti (panel_pos_cancel_reasons'tan)
@@ -1386,6 +1575,7 @@ class LocalDbService {
     required Map<String, dynamic> payload,
     String entityType = 'ticket',  // 'ticket' veya 'ticket_item'
     String? description,
+    int? dependsOnSyncId,          // 🔴 Fable O1: _failIfParentDead guard'ının çalışması için
   }) async {
     final db = await database;
     // Duplicate guard
@@ -1393,8 +1583,23 @@ class LocalDbService {
         where: "action = ? AND entity_type = ? AND server_id = ? AND status IN ('pending', 'in_progress')",
         whereArgs: [action, entityType, serverId]);
     if (existing.isNotEmpty) {
-      print('[LocalDb] enqueueServerTicketAction: zaten kuyrukta — $action #$serverId');
-      return (existing.first['id'] as int?);
+      final existId = existing.first['id'] as int?;
+      // 🔴 Fable: update_item için payload MERGE (son-yazan-kazanır). Eski kod ikinci çağrıyı YUTUYORDU
+      // -> ardışık iki değişiklikte (varyant sonra not) ikincisi KALICI kaybolur (para/veri kaybı).
+      // close/void/delete için merge YOK (idempotent — aynı işlem iki kez yapılmamalı).
+      if (action == 'update_item' && existId != null) {
+        try {
+          final merged = Map<String, dynamic>.from(jsonDecode(existing.first['payload'] as String? ?? '{}'));
+          for (final k in ['quantity', 'notes', 'unit_price', 'extras_amount', 'waiter_id']) {
+            if (payload[k] != null) merged[k] = payload[k];
+          }
+          await db.update('sync_queue', {'payload': jsonEncode(merged)}, where: 'id = ?', whereArgs: [existId]);
+          print('[LocalDb] enqueueServerTicketAction: update_item payload MERGE — #$serverId');
+        } catch (_) {}
+      } else {
+        print('[LocalDb] enqueueServerTicketAction: zaten kuyrukta — $action #$serverId');
+      }
+      return existId;
     }
     return await addToSyncQueueWithReturn(
       action: action,
@@ -1403,7 +1608,18 @@ class LocalDbService {
       payload: payload,
       priority: 1,
       description: description ?? 'Server $entityType #$serverId offline $action',
+      dependsOnSyncId: dependsOnSyncId,
     );
+  }
+
+  /// Bir item'ın bekleyen add_item sync id'sini bul (update/delete_item depends_on için — Fable O1).
+  Future<int?> pendingAddItemSyncId(int itemLocalId) async {
+    final db = await database;
+    final r = await db.query('sync_queue',
+        columns: ['id'],
+        where: "action = 'add_item' AND status IN ('pending','in_progress') AND local_id = ?",
+        whereArgs: [itemLocalId], limit: 1);
+    return r.isNotEmpty ? r.first['id'] as int? : null;
   }
 
   /// 🟠 6 Tem 2026 FINAL-FIX B: Offline basilan mutfak fisinin printed=1 sync'ini DOGRU id
@@ -1627,13 +1843,17 @@ class LocalDbService {
           where: 'server_id = ?', whereArgs: [serverId], limit: 1);
 
       // Ticket alanlari (offline sema ile eslesir)
+      // v11: backend guest_count doner (customer_count yanit'ta YOK) — eski kod hep 1 yaziyordu.
+      final gc = serverTicket['guest_count'] ?? serverTicket['customer_count'];
       final ticketRow = <String, dynamic>{
         'server_id': serverId,
         'ticket_number': serverTicket['ticket_number']?.toString() ?? 'SRV-$serverId',
         'table_id': serverTicket['table_id'],
         'table_number': serverTicket['table_number']?.toString(),
         'waiter_id': serverTicket['waiter_id'] ?? 0,
-        'customer_count': serverTicket['customer_count'] ?? 1,
+        'waiter_name': serverTicket['waiter_name']?.toString(),
+        'section_name': serverTicket['section_name']?.toString(),
+        'customer_count': gc is num ? gc.toInt() : int.tryParse('${gc ?? 1}') ?? 1,
         'status': serverTicket['status']?.toString() ?? 'open',
         // 🟡 6 Tem 2026 DÜZELTME 3 (ORTA-PRINT): backend fiyat alanini num VEYA String donebilir.
         // Eski kod `(x as num?)?.toDouble()` String'de 0'a dusuruyordu; total'da operator onceligi
@@ -1641,6 +1861,7 @@ class LocalDbService {
         // -> upsertServerTicket TAMAMEN atlanir -> o masaya offline fis kaynagi OLUSMAZ. Guvenli parse:
         'subtotal': _parseMoney(serverTicket['subtotal']),
         'discount_amount': _parseMoney(serverTicket['discount_amount']),
+        'discount_type': serverTicket['discount_type']?.toString(),
         'total': _parseMoney(serverTicket['total_amount'] ?? serverTicket['total']),
         'opened_at': serverTicket['opened_at']?.toString() ??
             serverTicket['created_at']?.toString() ?? now,
@@ -1651,23 +1872,49 @@ class LocalDbService {
       int localTicketId;
       if (existing.isNotEmpty) {
         localTicketId = existing.first['local_id'] as int;
-        // GUVENLIK: offline-olusturulan (server_id NULL iken sync bekleyen) kayit BURAYA DUSMEZ
-        // cunku where server_id=? ile ariyoruz; mirror sadece zaten server_id'li kaydi gunceller.
-        await txn.update('local_tickets', ticketRow,
-            where: 'local_id = ?', whereArgs: [localTicketId]);
+        final localStatus = existing.first['status'] as String?;
+        // 🔴 7 Tem (Fable bulk-mirror bulgusu): masa OFFLINE kapatildi (yerel status=closed/voided)
+        // ama close-sync HENUZ pending. Backend fake-online'da hala 'open' donerse mirror KOSULSUZ
+        // status='open' yazip kapatmayi GERI ALIYORDU (masa ~10sn tekrar dolu + cift-close riski).
+        // Yerel kapali + pending close/void varsa status/synced'i EZME (offline kapatma sonucu korunur).
+        bool preserveClose = false;
+        if (localStatus == 'closed' || localStatus == 'voided') {
+          final pc = await txn.rawQuery('''
+            SELECT sq.id FROM sync_queue sq
+             WHERE sq.action IN ('close','void') AND sq.status IN ('pending','in_progress')
+               AND sq.local_id = ? LIMIT 1
+          ''', [localTicketId]);
+          preserveClose = pc.isNotEmpty;
+        }
+        if (preserveClose) {
+          final safeRow = Map<String, dynamic>.from(ticketRow)
+            ..remove('status')..remove('synced')..remove('synced_at');
+          await txn.update('local_tickets', safeRow,
+              where: 'local_id = ?', whereArgs: [localTicketId]);
+        } else {
+          // GUVENLIK: offline-olusturulan (server_id NULL iken sync bekleyen) kayit BURAYA DUSMEZ
+          // cunku where server_id=? ile ariyoruz; mirror sadece zaten server_id'li kaydi gunceller.
+          await txn.update('local_tickets', ticketRow,
+              where: 'local_id = ?', whereArgs: [localTicketId]);
+        }
       } else {
-        ticketRow['created_at'] = now;
+        ticketRow['created_at'] = serverTicket['created_at']?.toString() ?? now;
         localTicketId = await txn.insert('local_tickets', ticketRow);
       }
 
       // ITEM MIRROR: server item'larini server_id ile eslestir, printed durumunu KORU.
       final items = serverTicket['items'];
+      final serverItemIds = <int>{}; // v11: hayalet-iptal temizligi icin gelen item id'leri
+      bool itemIdParseSafe = true; // 🔴 Fable D1: bir item id parse edilemezse hayalet-iptal ATLA (yikim onle)
       if (items is List) {
         for (final raw in items) {
           if (raw is! Map) continue;
           final it = Map<String, dynamic>.from(raw);
-          final itemServerId = it['id'];
-          if (itemServerId == null || itemServerId is! int) continue;
+          // id int VEYA String ('187123') gelebilir (tenant backend sürümüne göre) — güvenli parse.
+          final rawId = it['id'];
+          final itemServerId = rawId is int ? rawId : int.tryParse('${rawId ?? ''}');
+          if (itemServerId == null) { itemIdParseSafe = false; continue; }
+          serverItemIds.add(itemServerId);
 
           // Bu item lokalde (server_id ile) var mi? printed'i korumak icin.
           final existItem = await txn.query('local_ticket_items',
@@ -1684,24 +1931,69 @@ class LocalDbService {
             'product_id': it['product_id'] ?? 0,
             'product_name': it['product_name']?.toString() ?? '',
             'quantity': (it['quantity'] as num?)?.toInt() ?? 1,
-            'unit_price': (it['unit_price'] as num?)?.toDouble() ??
-                (it['price'] as num?)?.toDouble() ?? 0,
-            'custom_price': (it['custom_price'] as num?)?.toDouble(),
+            // 🔴 Fable O2: backend fiyat String ('230.00') VEYA num donebilir; eski cast String'de 0
+            // yaziyordu -> recalcTicketTotals bu 0'i toplayip masa/kapama tutarini COKERTIRDI. Guvenli parse.
+            'unit_price': _parseMoney(it['unit_price'] ?? it['price']),
+            'custom_price': it['custom_price'] != null ? _parseMoney(it['custom_price']) : null,
             'notes': it['notes']?.toString(),
-            'extras': it['extras'] is String ? it['extras'] : (it['extras'] != null ? it['extras'].toString() : null),
+            'extras': it['extras'] is String ? it['extras'] : (it['extras'] != null ? jsonEncode(it['extras']) : null),
             'status': it['status']?.toString() ?? 'pending',
+            // v11 offline-parity: ekleyen/teslim eden garson, porsiyon, odeme durumu, mutfak-gizle.
+            'portion': it['portion']?.toString(),
+            'payment_status': it['payment_status']?.toString(),
+            'payment_method': it['payment_method']?.toString(),
+            'delivered_at': it['delivered_at']?.toString(),
+            'delivered_by': (it['delivered_by'] as num?)?.toInt(),
+            'delivered_by_name': it['delivered_by_name']?.toString(),
+            'added_by': (it['waiter_id'] as num?)?.toInt(), // backend item alan adi waiter_id
+            'added_by_name': it['added_by_name']?.toString(),
+            'skip_pos_print': (it['skip_pos_print'] == true || it['skip_pos_print'] == 1) ? 1 : 0,
             'printed': existingPrinted, // KORUNUR
             'synced': 1,
             'synced_at': now,
           };
 
           if (existItem.isNotEmpty) {
+            final exLocalId = existItem.first['local_id'] as int;
+            // v11 mark_served PRESERVE: bu item icin bekleyen teslim-toggle varsa mirror delivered_*'i
+            // EZMESIN (offline toggle sonucu korunur, backend henuz gormemis olabilir).
+            final pendingServed = await txn.query('sync_queue',
+                where: "action = 'mark_served' AND status IN ('pending','in_progress') AND local_id = ?"
+                       " AND (payload LIKE ? OR payload LIKE ?)",
+                whereArgs: [localTicketId, '%"item_local_id":$exLocalId,%', '%"item_local_id":$exLocalId}%'],
+                limit: 1);
+            if (pendingServed.isNotEmpty) {
+              itemRow.remove('delivered_at');
+              itemRow.remove('delivered_by');
+              itemRow.remove('delivered_by_name');
+            }
             await txn.update('local_ticket_items', itemRow,
-                where: 'local_id = ?', whereArgs: [existItem.first['local_id']]);
+                where: 'local_id = ?', whereArgs: [exLocalId]);
           } else {
-            itemRow['created_at'] = now;
+            itemRow['created_at'] = it['created_at']?.toString() ?? now; // gerçek eklenme anı (bekleme süresi)
             await txn.insert('local_ticket_items', itemRow);
           }
+        }
+        // v11 HAYALET-IPTAL: backend 'cancelled' item'i HIC dondurmez -> gelen listede OLMAYAN
+        // mirror item (server_id'li, sync olmus) online iptal edilmis demektir -> offline'da da iptal
+        // isaretle (yoksa detayda geri gelir + total sisirir). server_id NULL (offline-eklenen) satira DOKUNMA.
+        // 🔴 Fable O2: az-once add_item sync'i tamamlanmis item BAYAT mirror cevabinda olmayabilir ->
+        // pending/in_progress add_item olan item'lari HARIC tut (yanlislikla iptal edilmesin, yaris fix).
+        final pendingAdds = await txn.rawQuery('''
+          SELECT local_id FROM sync_queue
+           WHERE action = 'add_item' AND status IN ('pending','in_progress')
+        ''');
+        final protectItemIds = pendingAdds.map((r) => r['local_id']).whereType<int>().toList();
+        final protectClause = protectItemIds.isEmpty ? '' : ' AND local_id NOT IN (${protectItemIds.join(",")})';
+        final keepIds = serverItemIds.isEmpty ? '(-1)' : '(${serverItemIds.join(",")})';
+        // Fable D1: bir item id parse edilemediyse (beklenmedik format) hayalet-iptal ATLA — yoksa
+        // eksik keepIds ile aktif item'lar yanlislikla iptal edilir (yikici).
+        if (itemIdParseSafe) {
+          await txn.rawUpdate('''
+            UPDATE local_ticket_items SET status = 'cancelled'
+             WHERE local_ticket_id = ? AND server_id IS NOT NULL AND synced = 1
+               AND status != 'cancelled' AND server_id NOT IN $keepIds$protectClause
+          ''', [localTicketId]);
         }
       }
     }), opName: 'upsertServerTicket');
@@ -1818,6 +2110,17 @@ class LocalDbService {
     print('[LocalDb] Masa durumu güncellendi: $tableId -> $status');
   }
 
+  /// Bu local ticket için sync_queue'da bekleyen (pending/in_progress) işlem var mı?
+  /// 404-yanlış-kapatma guard'ı için (create henüz push edilmemiş masayı kapatma).
+  Future<bool> hasPendingSyncForTicket(int localTicketId) async {
+    final db = await database;
+    final r = await db.query('sync_queue',
+        where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+        whereArgs: [localTicketId, '%"local_ticket_id":$localTicketId,%', '%"local_ticket_id":$localTicketId}%'],
+        limit: 1);
+    return r.isNotEmpty;
+  }
+
   // Local ticket'ı kapatılmış olarak işaretle (server'da artık yok)
   Future<void> markTicketAsSynced(int localTicketId) async {
     final db = await database;
@@ -1871,6 +2174,27 @@ class LocalDbService {
     }
   }
 
+  /// 7 Tem 2026: Bulk-mirror temizligi. Su an backend'de ACIK olan masalar DISINDAKI tum
+  /// mirror'lanmis (server_id'li, sync BEKLEMEYEN) ticket'lari sil -> kapanan masa iceriği
+  /// lokalden temizlenir, DB ŞİŞMEZ. Offline-olusturulan/pending kayitlara DOKUNMAZ.
+  Future<void> pruneMirroredTicketsExcept(Set<int> openTableIds) async {
+    final db = await database;
+    final mirrored = await db.query('local_tickets',
+        columns: ['local_id', 'table_id'],
+        where: 'server_id IS NOT NULL');
+    for (final t in mirrored) {
+      final tableId = t['table_id'] as int?;
+      if (tableId != null && openTableIds.contains(tableId)) continue; // hala acik -> koru
+      final localId = t['local_id'] as int;
+      final pending = await db.query('sync_queue',
+          where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+          whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%'], limit: 1);
+      if (pending.isNotEmpty) continue; // sync bekliyor -> dokunma
+      await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
+      await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
+    }
+  }
+
   /// 6 Tem 2026 (offline fix Adim 3 + multi-tenant guvenlik): Cihazin key'i/tenant'i degisince
   /// (bayi degisimi) TUM lokal ticket/item/mirror + cache verisini temizle. Aksi halde eski
   /// bayinin table_id'leri yeni bayininkiyle CAKISIR (multi-tenant sizinti). setup/login akisi
@@ -1891,6 +2215,7 @@ class LocalDbService {
       await txn.delete('cached_printers');
       await txn.delete('cached_waiters');
       await txn.delete('cached_lookups');
+      try { await txn.delete('cached_settings'); } catch (_) {} // tenant tema/marka ayari
     }), opName: 'clearAllTenantData');
     print('[LocalDb] Tenant verisi temizlendi (bayi/key degisimi)');
   }
@@ -1910,12 +2235,22 @@ class LocalDbService {
 
     for (final ticket in closedTickets) {
       final localId = ticket['local_id'] as int;
+      final srvId = ticket['server_id'] as int?;
 
-      // Bu ticket için pending sync işlemi var mı kontrol et
+      // Bu ticket için pending sync işlemi var mı kontrol et. 🔴 Fable Fix 3: update_item/delete_item
+      // payload'i 'ticket_id'(server) VEYA 'local_ticket_id'/'ticket_local_id' kullanabilir; hepsini
+      // kapsa yoksa esleme verisi pending kayit dururken silinir (eski id=17 gibi zombi'nin koku).
       final pendingSync = await db.query(
         'sync_queue',
-        where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
-        whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%'],
+        where: "status IN ('pending', 'in_progress') AND ("
+               "local_id = ? OR payload LIKE ? OR payload LIKE ? OR payload LIKE ? OR payload LIKE ?"
+               "${srvId != null ? " OR payload LIKE ? OR payload LIKE ?" : ""})",
+        whereArgs: [
+          localId,
+          '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%',
+          '%"ticket_local_id":$localId,%', '%"ticket_local_id":$localId}%',
+          if (srvId != null) ...['%"ticket_id":$srvId,%', '%"ticket_id":$srvId}%'],
+        ],
       );
 
       if (pendingSync.isNotEmpty) {
@@ -2137,14 +2472,45 @@ class LocalDbService {
   }
 
   // Hatalı işlemi sil
-  Future<void> deleteSyncItem(int syncId) async {
+  /// Bir sync kaydına bağımlı işlem var mı? (manuel silme uyarısı — Fable Fix 4).
+  /// deleteSyncItem cascade ile aynı status seti (pending/in_progress/failed) — UI sayısı gerçekle örtüşsün.
+  Future<List<Map<String, dynamic>>> getDependentSyncItems(int syncId) async {
     final db = await database;
-    await db.delete(
-      'sync_queue',
-      where: 'id = ?',
-      whereArgs: [syncId],
-    );
-    print('[LocalDb] Sync item silindi: $syncId');
+    return await db.query('sync_queue',
+        columns: ['id', 'action', 'description'],
+        where: "depends_on_sync_id = ? AND status IN ('pending','in_progress','failed')",
+        whereArgs: [syncId]);
+  }
+
+  /// Sync kaydını sil. 🔴 Fable Fix 4: pending-sil butonu artık bağımlı işlemleri de ele almalı —
+  /// aksi halde silinen create'e bağımlı add_item/close YETİM kalır (satış verisi sessiz kaybolur).
+  /// cascade=true ise bağımlıları da siler; false ise bağımlıları 'failed' işaretler (kullanıcı görsün).
+  Future<void> deleteSyncItem(int syncId, {bool cascade = true}) async {
+    final db = await database;
+    // Bu kayda bağımlı olan tüm alt işlemleri bul (zincir — recursive değil ama tek seviye yeterli
+    // çünkü add_item -> create'e, close -> create'e bağımlı; hepsi doğrudan bu syncId'ye bakar).
+    final deps = await db.query('sync_queue',
+        columns: ['id'],
+        where: "depends_on_sync_id = ? AND status IN ('pending','in_progress','failed')",
+        whereArgs: [syncId]);
+    if (deps.isNotEmpty) {
+      final depIds = deps.map((r) => r['id'] as int).toList();
+      if (cascade) {
+        // Bağımlıları da sil (kullanıcı "bu işlemi ve bağlılarını iptal et" dedi).
+        for (final id in depIds) {
+          await deleteSyncItem(id, cascade: true); // rekürsif zincir temizliği
+        }
+      } else {
+        // Bağımlıları failed işaretle (yetim kalmasın, kullanıcı görsün).
+        for (final id in depIds) {
+          await db.update('sync_queue',
+              {'status': 'failed', 'error_message': 'Bağımlı olduğu işlem manuel silindi'},
+              where: 'id = ?', whereArgs: [id]);
+        }
+      }
+    }
+    await db.delete('sync_queue', where: 'id = ?', whereArgs: [syncId]);
+    print('[LocalDb] Sync item silindi: $syncId (bağımlı: ${deps.length}, cascade: $cascade)');
   }
 
   // Tüm hatalı işlemleri sil
@@ -2250,6 +2616,129 @@ class LocalDbService {
     ''');
   }
 
+  /// v11 (7 Tem 2026): Masa takip ekrani offline kaynagi. Acik masalarin (mirror + offline-acilan)
+  /// iptal EDILMEMIS item'larini backend pending-orders sekline map'ler. Garson adlari cached_waiters
+  /// JOIN ile cozulur. Ekran kendi siralama/filtresini yapar. LAN yansimalari (lan_origin='lan') HARIC.
+  Future<List<Map<String, dynamic>>> getPendingOrdersOffline() async {
+    final db = await database;
+    return await db.rawQuery('''
+      SELECT
+        t.table_id AS table_id,
+        COALESCE(t.table_number, 'M' || t.table_id) AS table_number,
+        COALESCE(s.name, t.section_name) AS section_name,
+        COALESCE(t.server_id, t.local_id) AS ticket_id,
+        t.ticket_number AS ticket_number,
+        t.local_id AS _local_ticket_id,
+        COALESCE(i.server_id, i.local_id) AS item_id,
+        i.local_id AS _local_item_id,
+        i.product_name AS product_name,
+        i.quantity AS quantity,
+        i.notes AS notes,
+        i.delivered_at AS delivered_at,
+        COALESCE(wd.name, i.delivered_by_name) AS delivered_by_name,
+        COALESCE(wa.name, i.added_by_name) AS added_by_name,
+        i.created_at AS item_created_at,
+        i.printed AS printed
+      FROM local_tickets t
+      JOIN local_ticket_items i ON i.local_ticket_id = t.local_id
+ LEFT JOIN cached_tables tb ON tb.id = t.table_id
+ LEFT JOIN cached_sections s ON s.id = tb.section_id
+ LEFT JOIN cached_waiters wa ON wa.id = i.added_by
+ LEFT JOIN cached_waiters wd ON wd.id = i.delivered_by
+     WHERE t.status = 'open' AND COALESCE(t.lan_origin,'self') = 'self'
+       AND i.status != 'cancelled'
+     ORDER BY i.created_at
+    ''');
+  }
+
+  /// v11: Masa takip ekrani offline teslim toggle. itemId/ticketId = server_id VEYA local_id (ekran
+  /// COALESCE gonderir). item'i lokalde delivered_at null<->now yapar + mark_served sync_queue'ya ekler.
+  /// 🔴 Fable O1: item aramasi TICKET'a daraltilir (id-cakismasi -> yanlis urun toggle onlenir).
+  Future<Map<String, dynamic>> markItemServedOffline(int itemId, {int? ticketId, int? waiterId}) async {
+    final db = await database;
+    // Once ticket'i coz (server_id VEYA local_id) -> item aramasini o ticket'a daralt.
+    int? scopeLocalTicketId;
+    if (ticketId != null) {
+      final tk = await db.query('local_tickets', columns: ['local_id'],
+          where: 'local_id = ? OR server_id = ?', whereArgs: [ticketId, ticketId], limit: 1);
+      if (tk.isNotEmpty) scopeLocalTicketId = tk.first['local_id'] as int?;
+    }
+    final scope = scopeLocalTicketId != null ? ' AND local_ticket_id = $scopeLocalTicketId' : '';
+    // itemId'yi cöz: once server_id, sonra local_id — ama TICKET kapsaminda.
+    var rows = await db.query('local_ticket_items',
+        where: 'server_id = ?$scope', whereArgs: [itemId], limit: 1);
+    if (rows.isEmpty) {
+      rows = await db.query('local_ticket_items',
+          where: 'local_id = ?$scope', whereArgs: [itemId], limit: 1);
+    }
+    if (rows.isEmpty) return {'success': false, 'error': 'Item bulunamadi'};
+    final item = rows.first;
+    final localItemId = item['local_id'] as int;
+    final localTicketId = item['local_ticket_id'] as int;
+    final itemServerId = item['server_id'] as int?;
+    final currentlyDelivered = item['delivered_at'] != null;
+    final now = DateTime.now().toIso8601String();
+
+    // Toggle: teslim edildi <-> geri al
+    final newDeliveredAt = currentlyDelivered ? null : now;
+    String? deliveredByName;
+    if (!currentlyDelivered && waiterId != null) {
+      final w = await db.query('cached_waiters', columns: ['name'], where: 'id = ?', whereArgs: [waiterId], limit: 1);
+      if (w.isNotEmpty) deliveredByName = w.first['name'] as String?;
+    }
+    await db.update('local_ticket_items', {
+      'delivered_at': newDeliveredAt,
+      'delivered_by': currentlyDelivered ? null : waiterId,
+      'delivered_by_name': currentlyDelivered ? null : deliveredByName,
+    }, where: 'local_id = ?', whereArgs: [localItemId]);
+
+    // 🔴 Fable K1: Ayni item icin ONCEKI pending mark_served'i sil (in_progress'e dokunma — ucusta).
+    // Backend endpoint KOSULSUZ TOGGLE (delivered_at NULL<->NOW) -> ardisik iki toggle net-sifir OLMALI.
+    // Silinen pending VARSA yeni kayit EKLEME: iki flip birbirini goturur, tek POST kalirsa backend'i
+    // yanlis yone cevirir (cift-tik sapmasi). Silinen yoksa (ilk toggle) normal enqueue.
+    final deleted = await db.delete('sync_queue',
+        where: "action = 'mark_served' AND status = 'pending' AND local_id = ?"
+               " AND (payload LIKE ? OR payload LIKE ?)",
+        whereArgs: [localTicketId, '%"item_local_id":$localItemId,%', '%"item_local_id":$localItemId}%']);
+
+    // Uçuşta (in_progress) mark_served var mı? Varsa yeni pending gerekli (uçuştaki flip'i dengeler).
+    final inFlight = await db.query('sync_queue',
+        columns: ['id'],
+        where: "action = 'mark_served' AND status = 'in_progress' AND local_id = ?"
+               " AND (payload LIKE ? OR payload LIKE ?)",
+        whereArgs: [localTicketId, '%"item_local_id":$localItemId,%', '%"item_local_id":$localItemId}%'],
+        limit: 1);
+
+    // Silinen pending VAR ve uçuşta olan YOK -> net-sifir, enqueue etme.
+    if (deleted > 0 && inFlight.isEmpty) {
+      return {'success': true, 'action': newDeliveredAt != null ? 'delivered' : 'undelivered', 'offline': true};
+    }
+
+    // dependsOn: item'in add_item'i (ITEM bazli — _lastPendingItemSyncId TICKET bazli, yanlis).
+    final addSync = await db.query('sync_queue',
+        columns: ['id'],
+        where: "action = 'add_item' AND status IN ('pending','in_progress') AND local_id = ?",
+        whereArgs: [localItemId], limit: 1);
+    final dependsOn = addSync.isNotEmpty ? addSync.first['id'] as int? : null;
+
+    await addToSyncQueue(
+      action: 'mark_served',
+      entityType: 'ticket_item',
+      localId: localTicketId, // ticket local_id (mirror-prune guard'lari bunu gorur — E2)
+      payload: {
+        'item_local_id': localItemId,
+        if (itemServerId != null) 'item_server_id': itemServerId,
+        'ticket_local_id': localTicketId,
+        if (waiterId != null) 'waiter_id': waiterId,
+        'delivered': newDeliveredAt != null,
+      },
+      description: 'Kalem teslim toggle (offline)',
+      dependsOnSyncId: dependsOn,
+    );
+
+    return {'success': true, 'action': newDeliveredAt != null ? 'delivered' : 'undelivered', 'offline': true};
+  }
+
   /// 7 Tem 2026 (LAN Faz 2 — Fable K1): Bu masa SADECE LAN yansimasiyla mi dolu?
   /// (bu cihazin kendi acik self ticket'i YOK ama baska cihazdan yansiyan lan_origin='lan' VAR).
   /// true -> masa SALT-OKUNUR: garson uzerine YENI adisyon acmamali (cift kayit/ciro karismasi).
@@ -2275,11 +2764,34 @@ class LocalDbService {
     final closedTableIds = await getOfflineClosedTableIds();
     final openTableIds = await getOfflineOpenTableIds();
 
-    if (closedTableIds.isEmpty && openTableIds.isEmpty) {
+    // Açık masaların tutarını local_tickets.total'dan al (backend current_total offline/fake-online'da gelmez).
+    // Hem offline-oluşturulan (server_id NULL) hem mirror'lanmış (server_id VAR) açık ticket'lar dahil.
+    final db = await database;
+    final totalsByTable = <int, double>{};
+    // 🔴 Fable: eff_total = total>0 ise total, yoksa subtotal>0 ise subtotal, yoksa item'lardan hesapla.
+    // Eski `total ?? subtotal` calismiyordu cunku SQLite DEFAULT'u 0.0 (NULL degil) -> ?? atlamiyordu.
+    final openRows = await db.rawQuery('''
+      SELECT t.table_id AS table_id,
+             COALESCE(NULLIF(t.total,0), NULLIF(t.subtotal,0),
+               (SELECT SUM(i.unit_price * i.quantity) FROM local_ticket_items i
+                 WHERE i.local_ticket_id = t.local_id AND i.status != 'cancelled'), 0) AS eff_total
+        FROM local_tickets t
+       WHERE t.status = 'open' AND COALESCE(t.lan_origin,'self') = 'self'
+    ''');
+
+    if (closedTableIds.isEmpty && openTableIds.isEmpty && openRows.isEmpty) {
       return serverTables;
     }
 
     print('[LocalDb] Offline değişiklikler birleştiriliyor - kapalı: $closedTableIds, açık: $openTableIds');
+
+    for (final r in openRows) {
+      final tid = r['table_id'] as int?;
+      if (tid == null) continue;
+      final t = (r['eff_total'] as num?)?.toDouble() ?? 0.0;
+      // Ayni masada birden cok acik self ticket (mirror + offline-yeni) -> TOPLA (uzerine yazma).
+      if (t > 0) totalsByTable[tid] = (totalsByTable[tid] ?? 0) + t;
+    }
 
     return serverTables.map((table) {
       final tableId = table['id'] as int;
@@ -2298,7 +2810,16 @@ class LocalDbService {
       else if (closedTableIds.contains(tableId)) {
         newTable['status'] = 'empty';
         newTable['current_ticket_id'] = null;
+        newTable['current_total'] = null;
         print('[LocalDb] Masa $tableId offline kapatıldı, empty gösteriliyor');
+      }
+
+      // Tutar: backend current_total boş/0 ise local ticket total'ından doldur (offline/fake-online).
+      final serverTotal = _parseMoney(newTable['current_total']); // String veya num güvenli
+      final localTotal = totalsByTable[tableId];
+      if (serverTotal <= 0 && localTotal != null && localTotal > 0 &&
+          newTable['status'] != 'empty') {
+        newTable['current_total'] = localTotal;
       }
 
       return newTable;
@@ -2487,6 +3008,35 @@ class LocalDbService {
     final db = await database;
     final count = await db.delete('print_queue', where: "status = 'failed'");
     print('[LocalDb] $count başarısız print job silindi');
+  }
+
+  /// 🔴 7 Tem 2026: Bir masa kapatılınca o masanın bekleyen/başarısız kitchen fişlerini temizle.
+  /// Aksi halde masa boşalsa bile "FİŞ ÇIKMADI" göstergesi (getPrintFailedTableIds) kalıyordu.
+  /// print_queue'da table_id kolonu yok -> receipt_data JSON'ından çöz (getPrintFailedTableIds mantığı).
+  /// SADECE verilen masanın kitchen kaydı silinir; başka masaların/tamamlanmışların fişine DOKUNMAZ.
+  Future<void> clearPrintQueueForTable(int tableId) async {
+    final db = await database;
+    final rows = await db.query('print_queue',
+        columns: ['id', 'receipt_data'],
+        where: "print_type = 'kitchen' AND status IN ('pending', 'failed')");
+    final idsToDelete = <int>[];
+    for (final r in rows) {
+      final raw = r['receipt_data'];
+      if (raw is! String) continue;
+      try {
+        final decoded = jsonDecode(raw);
+        final ticket = decoded is Map ? decoded['ticket'] : null;
+        final tid = ticket is Map ? ticket['table_id'] : null;
+        final parsed = tid is int ? tid : int.tryParse('${tid ?? ''}');
+        if (parsed == tableId) idsToDelete.add(r['id'] as int);
+      } catch (_) {}
+    }
+    for (final id in idsToDelete) {
+      await db.delete('print_queue', where: 'id = ?', whereArgs: [id]);
+    }
+    if (idsToDelete.isNotEmpty) {
+      print('[LocalDb] Masa $tableId kapatıldı, ${idsToDelete.length} bekleyen fiş kaydı temizlendi');
+    }
   }
 
   // Tamamlanmış eski işleri temizle (1 saatten eski)

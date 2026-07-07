@@ -13,7 +13,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 enum LogLevel { info, warning, error }
 
 /// Log türü
-enum LogType { error, sync, syncError, login, action, update, general }
+enum LogType { error, sync, syncError, login, action, update, general, lan }
 
 /// Tek bir log kaydı
 class LogEntry {
@@ -430,6 +430,8 @@ class LogService {
         return LogType.action;
       case 'update':
         return LogType.update;
+      case 'lan':
+        return LogType.lan;
       default:
         return LogType.general;
     }

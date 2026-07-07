@@ -253,6 +253,8 @@ class LanSyncService {
   // ---------------- CLIENT (digerlerini bul + dogrula) ----------------
 
   bool _scanning = false; // FIX (Fable #3): re-entry guard — tarama uste binmesin (fd tukenmesi katlanmasin)
+  String _lastPeerSig = '__init__'; // log firtinasi onleme: peer listesi degisince logla
+  final Set<String> _rejectedLogged = {}; // ayni yabanci'yi tekrar tekrar loglama
 
   Future<void> _runDiscovery() async {
     if (!_enabled || _apiKey == null) return;
@@ -283,11 +285,18 @@ class LanSyncService {
       }
 
       _peersController.add(peers);
-      print('[LanSync] Kesif tamam: ${_peers.length} dogrulanmis peer (ayni bayi)');
-      _log('discovery', msg: 'Kesif tamam: ${_peers.length} peer (ayni bayi)', extra: {
-        'subnet': subnet.prefix,
-        'peers': peers.map((p) => {'id': p.deviceId, 'ip': p.ip, 'port': p.port}).toList(),
-      });
+      // LOG FIRTINASI ONLEME (Mustafa uyarisi + selftest dersi): keşif her 15sn calisir ama
+      // discovery logunu SADECE peer listesi DEGISTIGINDE bas (ayni durumu tekrar tekrar loglama).
+      // Boylece kararli durumda sunucuya log gitmez; sadece cihaz gelince/gidince 1 log.
+      final sig = (peers.map((p) => p.deviceId).toList()..sort()).join(',');
+      if (sig != _lastPeerSig) {
+        _lastPeerSig = sig;
+        print('[LanSync] Peer listesi degisti: ${_peers.length} peer');
+        _log('discovery', msg: 'Peer listesi degisti: ${_peers.length} peer (ayni bayi)', extra: {
+          'subnet': subnet.prefix,
+          'peers': peers.map((p) => {'id': p.deviceId, 'ip': p.ip, 'port': p.port}).toList(),
+        });
+      }
     } finally {
       _scanning = false;
     }
@@ -343,8 +352,12 @@ class LanSyncService {
       // Simdi peer'in ispatini dogrula (ayni bayi mi). Sabit-zaman (Fable #9).
       final proof = r2['proof']?.toString();
       if (proof == null || !_constantTimeEquals(proof, expected)) {
-        _log('peer_rejected', msg: 'Peer REDDEDILDI (farkli bayi): $ip:$port', warn: true,
-            extra: {'peer_ip': ip, 'peer_port': port});
+        // Ayni yabanciyi her 15sn loglamayalim (firtina onleme) — ip:port bazli tek log.
+        final k = '$ip:$port';
+        if (_rejectedLogged.add(k)) {
+          _log('peer_rejected', msg: 'Peer REDDEDILDI (farkli bayi): $ip:$port', warn: true,
+              extra: {'peer_ip': ip, 'peer_port': port});
+        }
         return true;
       }
       final peerDeviceId = r2['device_id']?.toString();

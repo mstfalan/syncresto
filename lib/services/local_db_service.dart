@@ -46,7 +46,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 8, // v8: cached_printers + printer_id (products) + summary_printer_id (sections) — offline mutfak fisi
+      version: 9, // v9 (7 Tem 2026): LAN-senkron — local_tickets'e owner_device_id/lan_lease_until/lan_origin
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -230,7 +230,10 @@ class LocalDbService {
         synced INTEGER DEFAULT 0,
         synced_at TEXT,
         created_at TEXT NOT NULL,
-        offline_permissions TEXT
+        offline_permissions TEXT,
+        owner_device_id TEXT,
+        lan_lease_until TEXT,
+        lan_origin TEXT DEFAULT 'self'
       )
     ''');
 
@@ -473,6 +476,28 @@ class LocalDbService {
       } catch (e) {
         print('[LocalDb] cached_printers zaten var: $e');
       }
+    }
+
+    // v9 (7 Tem 2026): LAN-SENKRON. local_tickets'e cihaz-sahiplik + LAN-kaynak kolonlari.
+    // owner_device_id: masayi acan/sahip cihazin id'si (lease icin). lan_lease_until: sahiplik suresi.
+    // lan_origin: 'self' (bu cihaz olusturdu) VEYA 'lan' (baska cihazdan yansidi).
+    // KRITIK AYRIM (Faz 2): lan_origin='lan' satirlar mergeTablesWithOfflineChanges (UI) yoluyla masayi
+    // DOLU GOSTERIR (Kasa2 gorsun) AMA getPendingSyncItems (backend push) bunlari ALMAZ -> LAN'dan
+    // yansiyan masa bu cihazin sync_queue'suyla backend'e GITMEZ (cift-kayit onlenir). Bu ayrim
+    // create sirasinda sync_queue'ya HIC eklememe ile saglanir (Faz 2), UI merge'e dokunulmaz.
+    if (oldVersion < 9) {
+      for (final col in [
+        'ALTER TABLE local_tickets ADD COLUMN owner_device_id TEXT',
+        'ALTER TABLE local_tickets ADD COLUMN lan_lease_until TEXT',
+        "ALTER TABLE local_tickets ADD COLUMN lan_origin TEXT DEFAULT 'self'",
+      ]) {
+        try {
+          await db.execute(col);
+        } catch (e) {
+          print('[LocalDb] v9 kolon zaten var: $e');
+        }
+      }
+      print('[LocalDb] v9 LAN-senkron kolonlari eklendi (owner_device_id/lan_lease_until/lan_origin)');
     }
   }
 

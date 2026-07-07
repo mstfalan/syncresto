@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'sync_service.dart';
+import 'lan_sync_service.dart';
 import 'log_service.dart';
 import 'websocket_service.dart';
 
@@ -111,6 +112,14 @@ class ApiService {
     _connectivity.setProbeBaseUrl(_baseUrl);
     await _connectivity.init();
     _syncService.init(_dio);
+
+    // 7 Tem 2026 (LAN-senkron Faz 0): flag + device_id oku. Flag KAPALI (default) ise hicbir sey
+    // yapmaz — mevcut akis aynen. device_id yoksa (henuz validateApiKey olmadi) graceful.
+    try {
+      await LanSyncService().init();
+    } catch (e) {
+      print('[API] LanSync init atlandi (guvenli): $e');
+    }
 
     // Online ise cache'i guncelle
     if (_connectivity.isOnline) {

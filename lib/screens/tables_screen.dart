@@ -515,6 +515,25 @@ class _TablesScreenState extends State<TablesScreen> {
       ticket = ticketData;
     }
 
+    // 🔴 7 Tem 2026 (LAN Faz 2 — Fable K1/KRİTİK): Masa SADECE LAN yansimasiyla dolu ise
+    // (baska kasada acik, bu cihaz sadece goruyor) uzerine YENI adisyon ACTIRMA -> cift kayit/
+    // ciro karismasi olur. Masayi ACAN cihaz backend'e sync eder. Bu cihazda SALT-OKUNUR: uyar.
+    if (ticket == null) {
+      final lanOnly = await LocalDbService().hasLanOnlyOpenTicket(tableId);
+      if (lanOnly) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Bu masa başka kasada açık (ağ üzerinden görüntüleniyor). İşlem o kasadan yapılmalı.'),
+              backgroundColor: Color(0xFFB45309),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
     if (ticket != null) {
       // Adisyon var → direkt ürün ekle ekranını aç
       final ticketId = (ticket['id'] as num?)?.toInt() ?? (ticket['local_id'] as num?)?.toInt();

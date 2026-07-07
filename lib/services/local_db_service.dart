@@ -788,13 +788,15 @@ class LocalDbService {
   /// çakışan bir local_id varsa bile server_id eşleşen kazanır. Caller ayrıca table_id guard yapar.
   Future<Map<String, dynamic>?> getLocalTicketWithSection(int ticketId) async {
     final db = await database;
+    // 🔴 7 Tem 2026 (LAN Faz 2 — Fable D1): lan_origin='lan' satirlar PRINT akisina GIRMEZ
+    // (savunma-derinligi; LAN ticket'larinin item'i yok ama print kalbi tutarli filtreli olsun).
     final r = await db.rawQuery('''
       SELECT t.*, s.name as section_name, s.summary_printer_id, w.name as waiter_name
         FROM local_tickets t
    LEFT JOIN cached_tables tb ON tb.id = t.table_id
    LEFT JOIN cached_sections s ON s.id = tb.section_id
    LEFT JOIN cached_waiters w ON w.id = t.waiter_id
-       WHERE t.local_id = ? OR t.server_id = ?
+       WHERE (t.local_id = ? OR t.server_id = ?) AND COALESCE(t.lan_origin,'self') = 'self'
     ORDER BY (t.server_id = ?) DESC, t.local_id ASC
        LIMIT 1
     ''', [ticketId, ticketId, ticketId]);
@@ -972,11 +974,12 @@ class LocalDbService {
     int? resolvedTargetTicketId = targetTicketId;
     int? resolvedTargetLocalId;
 
-    // Hedef masada open ticket var mı (lokal cache)?
+    // Hedef masada open ticket var mı (lokal cache)? LAN yansimasi (lan_origin='lan') HEDEF OLAMAZ —
+    // aksi halde self item baska cihazin masasina baglanir, sync muhasebesinden kaybolur (Fable O1).
     if (resolvedTargetTicketId == null) {
       final existing = await db.query(
         'local_tickets',
-        where: 'table_id = ? AND status = ?',
+        where: "table_id = ? AND status = ? AND COALESCE(lan_origin,'self') = 'self'",
         whereArgs: [targetTableId, 'open'],
         limit: 1,
       );
@@ -1090,9 +1093,13 @@ class LocalDbService {
     // offline-yeni (server_id NULL) acik ticket olabilir. ORDER BY olmadan rastgele secince
     // item/kapama YANLIS ticket'a gidiyordu. Deterministik: offline-yeni (server_id NULL) ONCELIKLI
     // (garsonun fiilen uzerinde calistigi adisyon), ayni tipte en yeni (local_id DESC).
+    // 🔴 7 Tem 2026 (LAN Faz 2 — Fable KRITIK): lan_origin='lan' (baska cihazdan yansiyan) satirlar
+    // BU AKISA GIRMEZ. Aksi halde garson LAN masasina dokununca onun local_id'siyle islem acar ->
+    // sync_queue'ya girer -> synced=1 tuzagi -> ciro kaybi/yanlis ticket. LAN masasi SALT-OKUNUR:
+    // sadece UI'da dolu gorunur (getOfflineOpenTableIds), islem icin ASLA donmez.
     final results = await db.query(
       'local_tickets',
-      where: 'table_id = ? AND status = ?',
+      where: "table_id = ? AND status = ? AND COALESCE(lan_origin,'self') = 'self'",
       whereArgs: [tableId, 'open'],
       orderBy: '(server_id IS NULL) DESC, local_id DESC',
     );
@@ -1980,10 +1987,11 @@ class LocalDbService {
       final serverTicketId = table['current_ticket_id'];
       final status = table['status']?.toString() ?? 'empty';
 
-      // Local'de bu masa için açık ticket var mı?
+      // Local'de bu masa için açık ticket var mı? LAN yansimalari (lan_origin='lan') HARIC —
+      // onlar baska cihazin masasi, bu cihazin sync'i onlara dokunmaz (Fable Faz 2 duzeltmesi).
       final localTickets = await db.query(
         'local_tickets',
-        where: 'table_id = ? AND status = ?',
+        where: "table_id = ? AND status = ? AND COALESCE(lan_origin,'self') = 'self'",
         whereArgs: [tableId, 'open'],
       );
 
@@ -2156,12 +2164,11 @@ class LocalDbService {
   Future<Set<int>> getOfflineClosedTableIds() async {
     final db = await database;
 
-    // Closed veya voided olup, henüz sync olmamış ticketlar
-    // synced = sync_id (0 değilse bir bağımlılık var demek), server_id = null (henüz sunucuya sync olmamış)
+    // Closed veya voided olup, henüz sync olmamış ticketlar. LAN yansimalari (lan_origin='lan') HARIC.
     final results = await db.query(
       'local_tickets',
       columns: ['table_id'],
-      where: "status IN ('closed', 'voided') AND server_id IS NULL",
+      where: "status IN ('closed', 'voided') AND server_id IS NULL AND COALESCE(lan_origin,'self') = 'self'",
     );
 
     return results.map((r) => r['table_id'] as int).toSet();
@@ -2179,6 +2186,86 @@ class LocalDbService {
     );
 
     return results.map((r) => r['table_id'] as int).toSet();
+  }
+
+  // ==================== LAN-SENKRON (Faz 2) ====================
+  // 7 Tem 2026: LAN'dan yansiyan masalar. lan_origin='lan' -> UI'da DOLU gorunur (getOfflineOpenTableIds
+  // server_id NULL filtreler, LAN masalari da dahil) AMA sync_queue'ya GIRMEZ -> backend'e GITMEZ
+  // (masayi ACAN cihaz sync eder, Mustafa karari). Cift-kayit imkansiz.
+
+  /// LAN'dan gelen bir masa ozetini lokale yansit (sync_queue'ya DOKUNMAZ). Idempotent (ticket_number key).
+  Future<void> upsertLanTicket({
+    required String ticketNumber,
+    required int tableId,
+    String? tableNumber,
+    required String ownerDeviceId,
+    String status = 'open',
+    double total = 0,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    final existing = await db.query('local_tickets',
+        where: "ticket_number = ? AND lan_origin = 'lan'", whereArgs: [ticketNumber], limit: 1);
+    final row = {
+      'ticket_number': ticketNumber,
+      'table_id': tableId,
+      'table_number': tableNumber,
+      'waiter_id': 0,
+      'status': status,
+      'total': total,
+      'opened_at': now,
+      'owner_device_id': ownerDeviceId,
+      'lan_origin': 'lan',
+      'synced': 1, // LAN masasi bu cihazin sync'ine ait DEGIL (sync_queue'ya girmez)
+    };
+    if (existing.isNotEmpty) {
+      await db.update('local_tickets', row,
+          where: 'local_id = ?', whereArgs: [existing.first['local_id']]);
+    } else {
+      row['created_at'] = now;
+      await db.insert('local_tickets', row);
+    }
+  }
+
+  /// Su an LAN'da acik olan ticket_number'lar disindaki tum LAN masalarini sil (kapananlar temizlenir).
+  Future<void> pruneLanTickets(Set<String> activeTicketNumbers) async {
+    final db = await database;
+    final all = await db.query('local_tickets',
+        columns: ['local_id', 'ticket_number'], where: "lan_origin = 'lan'");
+    for (final t in all) {
+      final tn = t['ticket_number']?.toString();
+      if (tn == null || !activeTicketNumbers.contains(tn)) {
+        await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [t['local_id']]);
+      }
+    }
+  }
+
+  /// Bu cihazin ACIK offline masalarinin ozeti (LAN yayini icin — lider yollar). Sadece lan_origin='self'.
+  Future<List<Map<String, dynamic>>> getSelfOpenTicketsForLan() async {
+    final db = await database;
+    return await db.rawQuery('''
+      SELECT ticket_number, table_id, table_number, status, total
+        FROM local_tickets
+       WHERE status = 'open' AND COALESCE(lan_origin,'self') = 'self'
+    ''');
+  }
+
+  /// 7 Tem 2026 (LAN Faz 2 — Fable K1): Bu masa SADECE LAN yansimasiyla mi dolu?
+  /// (bu cihazin kendi acik self ticket'i YOK ama baska cihazdan yansiyan lan_origin='lan' VAR).
+  /// true -> masa SALT-OKUNUR: garson uzerine YENI adisyon acmamali (cift kayit/ciro karismasi).
+  /// Masayi ACAN cihaz backend'e sync eder; bu cihaz sadece gorur.
+  Future<bool> hasLanOnlyOpenTicket(int tableId) async {
+    final db = await database;
+    final self = await db.query('local_tickets',
+        columns: ['local_id'],
+        where: "table_id = ? AND status = 'open' AND COALESCE(lan_origin,'self') = 'self'",
+        whereArgs: [tableId], limit: 1);
+    if (self.isNotEmpty) return false; // kendi acik ticket'i var -> normal akis
+    final lan = await db.query('local_tickets',
+        columns: ['local_id'],
+        where: "table_id = ? AND status = 'open' AND lan_origin = 'lan'",
+        whereArgs: [tableId], limit: 1);
+    return lan.isNotEmpty;
   }
 
   // Sunucu tablosunu offline değişikliklerle birleştir

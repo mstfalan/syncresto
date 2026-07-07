@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'log_service.dart';
+import 'local_db_service.dart';
 
 /// LAN'da bulunan + tenant-dogrulanmis bir POS cihazi.
 class LanPeer {
@@ -11,8 +12,9 @@ class LanPeer {
   final String ip;
   final int port;
   final String? deviceName;
+  final bool isMain; // "ana kasa" isaretli mi (lider seciminde oncelikli)
   DateTime lastSeen;
-  LanPeer({required this.deviceId, required this.ip, required this.port, this.deviceName})
+  LanPeer({required this.deviceId, required this.ip, required this.port, this.deviceName, this.isMain = false})
       : lastSeen = DateTime.now();
 }
 
@@ -80,6 +82,12 @@ class LanSyncService {
     _initDone = true;
     await _reloadPrefs();
     print('[LanSync] init: enabled=$_enabled, deviceId=${_deviceId ?? "(yok)"}');
+    // 🔴 7 Tem (Fable K3): Flag KAPALI olsa bile bir kez LAN satirlarini temizle. LAN acikken
+    // sert kapanma (dispose calismaz) sonrasi kalintili lan_origin='lan' satirlar getOfflineOpenTableIds'e
+    // sizip hayalet dolu masa + cift kayit uretebilir. Flag OFF = LAN satiri SIFIR garantisi.
+    try {
+      await _localDb.pruneLanTickets(const {});
+    } catch (_) {}
     if (!_enabled) return;
     await _start();
   }
@@ -91,6 +99,7 @@ class LanSyncService {
       _enabled = prefs.getBool(_flagKey) ?? false;
       _deviceId = prefs.getString(_deviceIdKey);
       _apiKey = prefs.getString(_apiKeyPref);
+      _cachedIsMain = (prefs.getString(_mainDeviceKey) ?? 'auto') == 'this';
     } catch (e) {
       print('[LanSync] pref okuma hatasi (guvenli: kapali): $e');
       _enabled = false;
@@ -109,6 +118,131 @@ class LanSyncService {
     _runDiscovery();
     _discoveryTimer?.cancel();
     _discoveryTimer = Timer.periodic(const Duration(seconds: 15), (_) => _runDiscovery());
+    // Faz 2: masa senkronu (5sn) — lider secilir, acik masalar peer'lere yayilir/cekilir.
+    _syncTimer?.cancel();
+    _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) => _runTableSync());
+    // 7 Tem (Fable re-audit DÜŞÜK-1): init prune LAN satirlarini siler; periyodik sync ILK tetigi
+    // 5sn sonra. Ilk kesif bitince (~1.5sn) bir kez erken sync -> LAN masalari daha hizli geri gelir
+    // (boot flicker ~5sn -> ~1.5sn). Timer degil tek-atis; hata LAN akisini bloklamaz.
+    Timer(const Duration(milliseconds: 1500), () { _runTableSync().catchError((_) {}); });
+  }
+
+  Timer? _syncTimer;
+  bool _syncing = false;
+  final _localDb = LocalDbService();
+
+  /// HIBRIT lider secimi (DETERMINISTIK — oylama YOK, herkes ayni sonuca varir = kavga YOK).
+  /// Kural: "ana kasa" isaretli cihaz(lar) varsa -> onlarin en kucuk device_id'si lider.
+  /// Yoksa -> tum cihazlarin (biz + peer'ler) en kucuk device_id'si lider.
+  /// Doner: lider device_id (bu cihaz lider ise _deviceId).
+  Future<String?> _electLeader() async {
+    if (_deviceId == null) return null;
+    final iAmMain = await isThisMainDevice();
+    // Aday havuzu: kendimiz + dogrulanmis peer'lar.
+    final all = <String>{_deviceId!, ..._peers.keys};
+    // Ana-kasa isaretli cihazlar: kendimiz (biliyoruz) + peer'lerin main bayragi (handshake'te tasinir).
+    final mains = <String>{
+      if (iAmMain) _deviceId!,
+      ..._peers.values.where((p) => p.isMain).map((p) => p.deviceId),
+    };
+    final pool = mains.isNotEmpty ? mains : all;
+    final sorted = pool.toList()..sort();
+    return sorted.isEmpty ? null : sorted.first;
+  }
+
+  /// Masa senkronu: lider isek acik masalarimizi peer'lere yayariz; degilsek liderden cekeriz.
+  Future<void> _runTableSync() async {
+    if (!_enabled || _syncing || _deviceId == null) return;
+    if (_peers.isEmpty) {
+      // Tek cihaz -> LAN yansimasi gereksiz; onceki LAN masalarini temizle (varsa).
+      await _localDb.pruneLanTickets(const {});
+      return;
+    }
+    _syncing = true;
+    try {
+      final leader = await _electLeader();
+      if (leader == _deviceId) {
+        // BIZ LIDERIZ: peer'ler bizden cekecek (pull modeli — biz sadece sunucu tarafinda cevap veririz).
+        // Aktif yayin gerekmez; state_request'e _handleMessage cevap verir.
+        // 🔴 7 Tem (Fable K2): client iken biriken kendi LAN satirlarimizi TEMIZLE. Lider kendi
+        // self masalarini yayinlar; LAN yansimasina ihtiyaci yok. Aksi halde hayalet dolu masa kalir.
+        await _localDb.pruneLanTickets(const {});
+        return;
+      }
+      // ISTEMCIYIZ: liderden acik masalari CEK ve lokale yansit (lan_origin='lan').
+      final leaderPeer = _peers[leader];
+      if (leaderPeer == null) {
+        // 🔴 7 Tem (Fable K2): lider secilemedi ama peer var -> eski liderin LAN masalari hayalet
+        // kalmasin. Ulasilamayan lidere ait yansimalari temizle.
+        await _localDb.pruneLanTickets(const {});
+        return;
+      }
+      final tickets = await _fetchLeaderTables(leaderPeer);
+      if (tickets == null) return; // lidere ulasilamadi -> mevcut LAN masalari kalsin
+      final active = <String>{};
+      for (final t in tickets) {
+        final tn = t['ticket_number']?.toString();
+        final tid = t['table_id'];
+        if (tn == null || tid is! int) continue;
+        active.add(tn);
+        await _localDb.upsertLanTicket(
+          ticketNumber: tn,
+          tableId: tid,
+          tableNumber: t['table_number']?.toString(),
+          ownerDeviceId: leader ?? '',
+          status: t['status']?.toString() ?? 'open',
+          total: (t['total'] is num) ? (t['total'] as num).toDouble() : 0,
+        );
+      }
+      await _localDb.pruneLanTickets(active); // kapanan LAN masalarini temizle
+    } catch (e) {
+      print('[LanSync] Masa senkron hatasi: $e');
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  /// Liderden acik masalari cek (state_request). Auth: peer zaten kesifte HMAC-dogrulanmis.
+  Future<List<Map<String, dynamic>>?> _fetchLeaderTables(LanPeer leader) async {
+    Socket? socket;
+    StreamSubscription? sub;
+    try {
+      socket = await Socket.connect(leader.ip, leader.port, timeout: const Duration(milliseconds: 600));
+      final inbox = StreamController<Map<String, dynamic>>();
+      final buf = <int>[];
+      sub = socket.listen((data) {
+        buf.addAll(data);
+        if (buf.length > 65536) { buf.clear(); return; } // state cevabi buyuk olabilir (cok masa)
+        int nl;
+        while ((nl = buf.indexOf(10)) != -1) {
+          final lb = buf.sublist(0, nl);
+          buf.removeRange(0, nl + 1);
+          try {
+            final m = jsonDecode(utf8.decode(lb, allowMalformed: true));
+            if (m is Map<String, dynamic> && !inbox.isClosed) inbox.add(m);
+          } catch (_) {}
+        }
+      }, onError: (_) { if (!inbox.isClosed) inbox.close(); },
+         onDone: () { if (!inbox.isClosed) inbox.close(); }, cancelOnError: true);
+
+      // state_request'e proof ekle (liderin ayni bayi oldugumuzu bilmesi icin nonce degil, statik degil —
+      // her istekte challenge/verify pahali; kesifte zaten dogrulandik. Basit: nonce+hmac tek atis).
+      final nonce = _randomNonce();
+      _send(socket, {'type': 'state_request', 'nonce': nonce, 'proof': _hmac(nonce)});
+      final reply = await inbox.stream.first
+          .timeout(const Duration(milliseconds: 1000), onTimeout: () => <String, dynamic>{});
+      if (reply['type'] != 'state' || reply['tables'] is! List) return null;
+      // 🔴 7 Tem (Fable O3): liderin cevabini da HMAC ile dogrula (bizim nonce'umuza). Boylece
+      // lider IP:port'unu ele geciren sahte cihaz kanitsiz masa listesi ENJEKTE EDEMEZ.
+      final leaderProof = reply['proof']?.toString() ?? '';
+      if (!_constantTimeEquals(leaderProof, _hmac(nonce))) return null; // kanitsiz cevap -> yansitma
+      return (reply['tables'] as List).whereType<Map<String, dynamic>>().toList();
+    } catch (_) {
+      return null;
+    } finally {
+      await sub?.cancel();
+      socket?.destroy();
+    }
   }
 
   // ---------------- SERVER (bu cihazi dinlenebilir yap) ----------------
@@ -243,10 +377,24 @@ class LanSyncService {
           'device_id': _deviceId,
           'device_name': null,
           'port': _listenPort,
+          'is_main': _cachedIsMain, // lider seciminde peer'in bilmesi icin
         });
       }
+    } else if (type == 'state_request') {
+      // Faz 2: peer (dogrulanmis, ayni bayi) acik masalarimizi istiyor. HMAC ile teyit (yabanci cekemesin).
+      final nonce = msg['nonce']?.toString() ?? '';
+      final got = msg['proof']?.toString() ?? '';
+      if (nonce.isEmpty || nonce.length > 128) return;
+      if (!_constantTimeEquals(got, _hmac(nonce))) return; // yanlis bayi -> state VERME
+      // 🔴 7 Tem (Fable O3): cevaba da kendi HMAC kanitimizi koy (client nonce'una) -> client
+      // liderin ayni bayi oldugunu dogrular; lider IP'sini ele geciren sahte cihaz masa enjekte edemez.
+      _localDb.getSelfOpenTicketsForLan().then((tables) {
+        _send(socket, {'type': 'state', 'tables': tables, 'proof': _hmac(nonce)});
+      }).catchError((_) {});
     }
   }
+
+  bool _cachedIsMain = false; // isThisMainDevice() cache (senkron erisim icin, prefs'ten periyodik tazelenir)
 
   final Map<Socket, _Pending> _pending = {};
 
@@ -363,12 +511,11 @@ class LanSyncService {
       final peerDeviceId = r2['device_id']?.toString();
       if (peerDeviceId == null || peerDeviceId == _deviceId) return true;
       final replyPort = (r2['port'] is int) ? r2['port'] as int : port;
-      final existing = _peers[peerDeviceId];
-      if (existing != null) {
-        existing.lastSeen = DateTime.now();
-      } else {
-        _peers[peerDeviceId] = LanPeer(deviceId: peerDeviceId, ip: ip, port: replyPort,
-            deviceName: r2['device_name']?.toString());
+      final isMain = r2['is_main'] == true;
+      final isNew = !_peers.containsKey(peerDeviceId);
+      _peers[peerDeviceId] = LanPeer(deviceId: peerDeviceId, ip: ip, port: replyPort,
+          deviceName: r2['device_name']?.toString(), isMain: isMain);
+      if (isNew) {
         _log('peer_found', msg: 'Peer dogrulandi (ayni bayi): $ip:$replyPort', extra: {
           'peer_ip': ip, 'peer_port': replyPort, 'peer_device_id': peerDeviceId,
         });
@@ -477,6 +624,7 @@ class LanSyncService {
   Future<void> setThisMainDevice(bool isMain) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_mainDeviceKey, isMain ? 'this' : 'auto');
+    _cachedIsMain = isMain;
   }
 
   Future<bool> isThisMainDevice() async {
@@ -487,10 +635,14 @@ class LanSyncService {
   void dispose() {
     _discoveryTimer?.cancel();
     _discoveryTimer = null;
+    _syncTimer?.cancel();
+    _syncTimer = null;
     _server?.close();
     _server = null;
     _listenPort = null;
     _peers.clear();
+    // LAN kapaninca yansimis masalari temizle (UI'da hayalet kalmasin).
+    _localDb.pruneLanTickets(const {}).catchError((_) {});
   }
 }
 

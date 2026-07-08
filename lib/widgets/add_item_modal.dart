@@ -3237,7 +3237,7 @@ class _AddItemModalState extends State<AddItemModal> {
         splashColor: theme.primaryColor.withOpacity(0.3),
         highlightColor: theme.primaryColor.withOpacity(0.15),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 72),
+          constraints: const BoxConstraints(minHeight: 68),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
@@ -3250,21 +3250,24 @@ class _AddItemModalState extends State<AddItemModal> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               if (emoji.isNotEmpty)
-                Text(emoji, style: const TextStyle(fontSize: 22))
+                Text(emoji, style: const TextStyle(fontSize: 20))
               else if (icon != null)
-                Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 22),
-              const SizedBox(height: 3),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(
-                  label,
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: isSelected ? Colors.white : Colors.grey[800],
-                    fontSize: 12,
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 20),
+              const SizedBox(height: 2),
+              // Flexible: 2 satir label parent yuksekligini asarsa taşma yerine sıkışır (0.385px overflow fix).
+              Flexible(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: isSelected ? Colors.white : Colors.grey[800],
+                      fontSize: 12,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                    ),
                   ),
                 ),
               ),

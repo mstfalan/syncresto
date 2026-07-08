@@ -268,13 +268,12 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Combo kurali AKTIF mi: combo_enabled + gecerli indirim (hediye VEYA yuzde VEYA sabit).
   /// combo_enabled ama indirim tanimsizsa (calculator eligible=false) combo ekrani ACILMAZ.
+  /// Combo AKTIF mi: combo_enabled=true YETER. Indirim tipi (hediye/yuzde/sabit) ZORUNLU DEGIL —
+  /// isletme indirimi urun FIYATINA gomebilir ("2 al" combo urun zaten indirimli fiyatli girilmis).
+  /// O durumda combo ekrani yine acilir (N urun sec), ekstra indirim comboCalculator'dan GELMEZ
+  /// (eligible=false, dogru — indirim fiyatta). Indirim tipi VARSA calcCartCombos ayrica duser.
   bool _comboIsActive(Map<String, dynamic> product) {
-    final enabled = product['combo_enabled'] == true || product['combo_enabled'] == 1;
-    if (!enabled) return false;
-    final g = _safeInt(product['combo_gift_qty']) ?? 0;
-    final pct = _safeDouble(product['combo_discount_percent']);
-    final amt = _safeDouble(product['combo_discount_amount']);
-    return g > 0 || pct > 0 || amt > 0;
+    return product['combo_enabled'] == true || product['combo_enabled'] == 1;
   }
 
   /// Combo kural ozeti: N (secilecek), G (hediye), mod, repeat, stepPerSet (bir set icin secilecek adet),
@@ -296,7 +295,8 @@ class _AddItemModalState extends State<AddItemModal> {
     } else if (amt > 0) {
       label = '₺${amt % 1 == 0 ? amt.toInt() : amt} indirim';
     } else {
-      label = 'Combo';
+      // Indirim tipi yok — indirim urun FIYATINA gomulu. Sadece N urun sec (ekstra indirim yok).
+      label = '$n ürün seç';
     }
     return {'N': n, 'G': g, 'giftMode': giftMode, 'repeat': repeat, 'stepPerSet': stepPerSet, 'label': label};
   }

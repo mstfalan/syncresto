@@ -3227,7 +3227,7 @@ class _AddItemModalState extends State<AddItemModal> {
         splashColor: theme.primaryColor.withOpacity(0.3),
         highlightColor: theme.primaryColor.withOpacity(0.15),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 68),
+          constraints: const BoxConstraints(minHeight: 72),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border.all(

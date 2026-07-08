@@ -162,7 +162,10 @@ class _AddItemModalState extends State<AddItemModal> {
         if (mounted && cats.isNotEmpty) setState(() => _categories = cats);
       }).catchError((_) {});
       widget.apiService.getProducts().then((prods) {
-        if (mounted && prods.isNotEmpty) setState(() { _products = prods; _filteredProducts = prods; });
+        // Taze veri (combo_* dahil güncel) gelince _products'i tazele + AKTIF FILTREYI KORU.
+        // Eski: _filteredProducts=prods -> filtre kaybolur + combo kural degisikligi ekranda ESKI
+        // kalabilirdi. _filterProducts kendi setState'i ile kategori/arama uygular -> taze combo yansir.
+        if (mounted && prods.isNotEmpty) { _products = prods; _filterProducts(); }
       }).catchError((_) {});
     } catch (e) {
       // Cache de yoksa API'den dene
@@ -248,6 +251,13 @@ class _AddItemModalState extends State<AddItemModal> {
   /// COMBO: urun combo_enabled + gecerli kural ise combo secim ekrani (kurala gore N/N+G varyant sec).
   /// Ayar 'variantOnTap' ACIK + urun VARYANTLI ise: once varyant dialogu ac, secilen varyantla ekle.
   Future<void> _addProductDirectly(Map<String, dynamic> product) async {
+    // GUNCEL kopya: kart eski render edilmis olabilir; _products taze combo_* tasir (arka plan sync).
+    // Tiklama aninda id ile en guncel urunu al -> combo kurali GUNCEL uygulanir (eski kural kalmaz).
+    final pid = _safeInt(product['id']);
+    if (pid != null) {
+      final fresh = _products.where((p) => _safeInt(p['id']) == pid).firstOrNull;
+      if (fresh != null) product = fresh;
+    }
     // COMBO SECIM (Fable denetimli): combo_enabled + gecerli kural -> combo secim ekrani.
     // Karar: extra hediye BACKEND uretir (panel/web birebir) — POS N odenen kalem ekler, hediyeyi
     // close handler'i giftLines ile olusturur. Boylece cifte-hediye/reload sorunu YOK.

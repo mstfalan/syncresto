@@ -404,8 +404,11 @@ class _AddItemModalState extends State<AddItemModal> {
         final vname = v['name']?.toString() ?? '';
         // Sadece POZITIF modifier parantezde; negatif/sifir -> sadece ad (combo baz-sifirla saçma degil).
         final lbl = mod > 0 ? '$vname (+${mod.toStringAsFixed(0)}TL)' : vname;
-        // Kart onizleme fiyati: negatif modifier -> baz (paket payi eklemede), pozitif -> baz+mod.
-        final previewPrice = mod > 0 ? basePrice + mod : basePrice;
+        // Kart ONIZLEME fiyati (Mustafa): baz+mod<=0 (varyant tek basina bedava/sifir) -> kartta ₺0 goster
+        // (garson tek-basina fiyat 0'i gorur). GERCEK fiyat eklemede paket bolmesiyle (940/N) yazilir.
+        // Pozitif modifier -> baz+mod (gercek varyant fiyati).
+        final varStandalone = basePrice + mod;
+        final previewPrice = varStandalone > 0 ? varStandalone : 0.0;
         return {'name': vname, 'price': previewPrice, 'note': lbl, 'mod': mod};
       }),
     ];

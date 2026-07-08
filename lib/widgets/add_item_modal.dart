@@ -1727,9 +1727,18 @@ class _AddItemModalState extends State<AddItemModal> {
     // offline'ı destekler). payItems'a düşersek "internet gerekli" der -> offline nakit/kart imkansız olurdu.
     if (!widget.apiService.isOnline) {
       try {
+        // COMBO OFFLINE (Mustafa: offline'da combo UYGULANSIN): backend yok -> combo indirimini POS
+        // uygula. calcCartCombos indirimi (yuzde/sabit/hediye-within) + mevcut manuel indirim toplanip
+        // discountAmount olarak gecer. closeLocalTicket total=subtotal-discountAmount yazar. Online'da
+        // backend close kendi hesaplar (bu dala GIRMEZ). Paket-bolme kalem fiyatinda; combo indirimi
+        // AYRI (calcCartCombos paket-bolunmus kalemlerden yuzde/sabit hesaplar). Cift degil: bolme=fiyat,
+        // indirim=yuzde/sabit ustune (panel/web birebir).
+        final offlineDiscount = _ticketDiscount + _comboDiscount;
         await widget.apiService.closeTicket(
           ticketId: widget.ticketId,
           paymentMethod: paymentMethod,
+          discountAmount: offlineDiscount,
+          discountType: _comboDiscount > 0 ? 'amount' : _ticketDiscountType,
           waiterId: widget.waiterId,
         );
         _showSuccess('Hesap kapatıldı (çevrimdışı)');
@@ -1810,9 +1819,14 @@ class _AddItemModalState extends State<AddItemModal> {
         try { await _printSummaryReceipt(paymentMethod); } catch (_) {}
       }
 
+      // COMBO OFFLINE: offline kapanista combo+manuel indirimi gecir (backend yok). Online'da backend
+      // close kendi hesaplar -> discount gecirme (cift olmasin). _closeTicket ile ayni mantik.
+      final offline = !widget.apiService.isOnline;
       await widget.apiService.closeTicket(
         ticketId: widget.ticketId,
         paymentMethod: paymentMethod,
+        discountAmount: offline ? (_ticketDiscount + _comboDiscount) : 0,
+        discountType: offline ? (_comboDiscount > 0 ? 'amount' : _ticketDiscountType) : null,
         waiterId: widget.waiterId,
       );
 

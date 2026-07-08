@@ -91,15 +91,10 @@ Future<Map<String, dynamic>> tryGrantLease(Database db,
       final curOwner = r['owner_device_id']?.toString();
       final leaseStr = r['lan_lease_until']?.toString();
       final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
-      if (leaseUntil == null && curOwner == null) {
-        if (curOwner == claimant) {
-          myRow = r;
-        } else {
-          return {'granted': false, 'reason': 'unleased_open', 'owner': curOwner};
-        }
-        continue;
-      }
       if (curOwner == claimant) { myRow = r; continue; }
+      if (curOwner == null && leaseUntil == null) {
+        return {'granted': false, 'reason': 'unleased_open', 'owner': curOwner};
+      }
       if (leaseUntil != null && leaseUntil.isAfter(now)) {
         return {'granted': false, 'owner': curOwner, 'reason': 'held', 'until': leaseStr};
       }
@@ -203,6 +198,12 @@ void main() {
       final r = await tryGrantLease(db, tableId: 7, claimant: 'B', leaseTtl: const Duration(seconds: 45));
       expect(r['granted'], true);
       expect(r['takeover'], true);
+    });
+    test('K1 FIX: owner-damgali kendi masasina renew -> granted (unleased_open DEGIL)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-5-X', 'table_id': 5, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      final r = await tryGrantLease(db, tableId: 5, claimant: 'A', leaseTtl: const Duration(seconds: 60), isRenew: true);
+      expect(r['granted'], true);
+      expect(r['takeover'], false);
     });
     test('canli lease baska owner -> deny', () async {
       await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'lan', 'owner_device_id': 'A', 'lan_lease_until': future(30)});

@@ -970,6 +970,8 @@ class LocalDbService {
     required int waiterId,
     required String tableNumber,
     int customerCount = 1,
+    String? ownerDeviceId,
+    int? leaseTtlMs,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
@@ -988,7 +990,7 @@ class LocalDbService {
       'cancel_item': true,
     });
 
-    final localId = await db.insert('local_tickets', {
+    final row = <String, dynamic>{
       'ticket_number': ticketNumber,
       'table_id': tableId,
       'table_number': tableNumber,
@@ -999,7 +1001,13 @@ class LocalDbService {
       'created_at': now,
       'synced': 0,
       'offline_permissions': offlinePermissions,
-    });
+    };
+    if (ownerDeviceId != null) {
+      row['owner_device_id'] = ownerDeviceId;
+      row['lan_lease_until'] =
+          DateTime.now().add(Duration(milliseconds: leaseTtlMs ?? 60000)).toIso8601String();
+    }
+    final localId = await db.insert('local_tickets', row);
 
     // 🟡 6 Tem 2026 FINAL-FIX D: Ayni masada BEKLEYEN close/void varsa yeni create ONA bagimli olsun.
     // Boylece kullanici senaryosu (offline masa kapat -> ayni masayi tekrar ac) tam zincir olur:
@@ -2683,12 +2691,10 @@ class LocalDbService {
         final curOwner = r['owner_device_id']?.toString();
         final leaseStr = r['lan_lease_until']?.toString();
         final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
-        if (leaseUntil == null && curOwner == null) {
-          if (curOwner == claimant) { myRow = r; }
-          else { return {'granted': false, 'reason': 'unleased_open', 'owner': curOwner}; }
-          continue;
-        }
         if (curOwner == claimant) { myRow = r; continue; }
+        if (curOwner == null && leaseUntil == null) {
+          return {'granted': false, 'reason': 'unleased_open', 'owner': curOwner};
+        }
         if (leaseUntil != null && leaseUntil.isAfter(now)) {
           return {'granted': false, 'owner': curOwner, 'reason': 'held', 'until': leaseStr};
         }

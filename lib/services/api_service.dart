@@ -447,11 +447,15 @@ class ApiService {
     );
     final tableNumber = table['table_number']?.toString() ?? tableId.toString();
 
+    final lan = LanSyncService();
+    final lanOwner = lan.enabled ? lan.deviceId : null;
     final localTicketId = await _localDb.createLocalTicket(
       tableId: tableId,
       waiterId: waiterId,
       customerCount: customerCount,
       tableNumber: tableNumber,
+      ownerDeviceId: lanOwner,
+      leaseTtlMs: lanOwner != null ? LanSyncService.leaseTtl.inMilliseconds : null,
     );
 
     // Oluşturulan ticket'ı getir

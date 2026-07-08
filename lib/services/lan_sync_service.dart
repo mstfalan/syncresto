@@ -162,11 +162,8 @@ class LanSyncService {
     try {
       final leader = await _electLeader();
       if (leader == _deviceId) {
-        // BIZ LIDERIZ: peer'ler bizden cekecek (pull modeli — biz sadece sunucu tarafinda cevap veririz).
-        // Aktif yayin gerekmez; state_request'e _handleMessage cevap verir.
-        // 🔴 7 Tem (Fable K2): client iken biriken kendi LAN satirlarimizi TEMIZLE. Lider kendi
-        // self masalarini yayinlar; LAN yansimasina ihtiyaci yok. Aksi halde hayalet dolu masa kalir.
         await _localDb.pruneLanTickets(const {});
+        await _renewOwnLeases();
         return;
       }
       // ISTEMCIYIZ: liderden acik masalari CEK ve lokale yansit (lan_origin='lan').
@@ -200,6 +197,22 @@ class LanSyncService {
     } finally {
       _syncing = false;
     }
+  }
+
+  /// Bu cihazin acik self masalari icin lease damgasini tazele (lider isek dogrudan defter).
+  Future<void> _renewOwnLeases() async {
+    if (_deviceId == null) return;
+    try {
+      final mine = await _localDb.getSelfOpenTicketsForLan();
+      for (final t in mine) {
+        final tid = t['table_id'];
+        if (t['owner_device_id']?.toString() != _deviceId) continue;
+        if (tid is int) {
+          await _localDb.tryGrantLease(
+            tableId: tid, claimant: _deviceId!, leaseTtl: leaseTtl, isRenew: true);
+        }
+      }
+    } catch (_) {}
   }
 
   /// Liderden acik masalari cek (state_request). Auth: peer zaten kesifte HMAC-dogrulanmis.
@@ -237,6 +250,75 @@ class LanSyncService {
       final leaderProof = reply['proof']?.toString() ?? '';
       if (!_constantTimeEquals(leaderProof, _hmac(nonce))) return null; // kanitsiz cevap -> yansitma
       return (reply['tables'] as List).whereType<Map<String, dynamic>>().toList();
+    } catch (_) {
+      return null;
+    } finally {
+      await sub?.cancel();
+      socket?.destroy();
+    }
+  }
+
+  /// Masaya yazma-oncesi lease iste. flag OFF -> true (Faz 2 aynen). Lider isek dogrudan defter;
+  /// degilsek lidere lease_claim yolla. Lider ulasilamazsa true (offline yazmaya izin — split-brain
+  /// riski salt-okunur yansima + backend merge ile karsilanir; kilitli kalmasindan iyidir).
+  Future<bool> claimTable(int tableId, {bool isRenew = false}) async {
+    if (!_enabled || _deviceId == null) return true;
+    final leader = await _electLeader();
+    if (leader == _deviceId) {
+      final res = await _localDb.tryGrantLease(
+        tableId: tableId, claimant: _deviceId!, leaseTtl: leaseTtl, isRenew: isRenew);
+      return res['granted'] == true;
+    }
+    final leaderPeer = _peers[leader];
+    if (leaderPeer == null) return true;
+    final res = await _sendLeaseMsg(leaderPeer, isRenew ? 'lease_renew' : 'lease_claim', tableId);
+    if (res == null) return true;
+    return res['ok'] == true;
+  }
+
+  Future<bool> releaseTable(int tableId) async {
+    if (!_enabled || _deviceId == null) return true;
+    final leader = await _electLeader();
+    if (leader == _deviceId) {
+      await _localDb.clearLease(tableId, _deviceId!);
+      return true;
+    }
+    final leaderPeer = _peers[leader];
+    if (leaderPeer == null) return true;
+    await _sendLeaseMsg(leaderPeer, 'lease_release', tableId);
+    return true;
+  }
+
+  Future<Map<String, dynamic>?> _sendLeaseMsg(LanPeer leader, String type, int tableId) async {
+    Socket? socket;
+    StreamSubscription? sub;
+    try {
+      socket = await Socket.connect(leader.ip, leader.port, timeout: const Duration(milliseconds: 600));
+      final inbox = StreamController<Map<String, dynamic>>();
+      final buf = <int>[];
+      sub = socket.listen((data) {
+        buf.addAll(data);
+        if (buf.length > 8192) { buf.clear(); return; }
+        int nl;
+        while ((nl = buf.indexOf(10)) != -1) {
+          final lb = buf.sublist(0, nl);
+          buf.removeRange(0, nl + 1);
+          try {
+            final m = jsonDecode(utf8.decode(lb, allowMalformed: true));
+            if (m is Map<String, dynamic> && !inbox.isClosed) inbox.add(m);
+          } catch (_) {}
+        }
+      }, onError: (_) { if (!inbox.isClosed) inbox.close(); },
+         onDone: () { if (!inbox.isClosed) inbox.close(); }, cancelOnError: true);
+
+      final nonce = _randomNonce();
+      _send(socket, {'type': type, 'nonce': nonce, 'proof': _hmac(nonce), 'table_id': tableId, 'claimant': _deviceId});
+      final reply = await inbox.stream.first
+          .timeout(const Duration(milliseconds: 1000), onTimeout: () => <String, dynamic>{});
+      if (reply['type'] != 'lease_result') return null;
+      final leaderProof = reply['proof']?.toString() ?? '';
+      if (!_constantTimeEquals(leaderProof, _hmac(nonce))) return null;
+      return reply;
     } catch (_) {
       return null;
     } finally {
@@ -391,6 +473,49 @@ class LanSyncService {
       _localDb.getSelfOpenTicketsForLan().then((tables) {
         _send(socket, {'type': 'state', 'tables': tables, 'proof': _hmac(nonce)});
       }).catchError((_) {});
+    } else if (type == 'lease_claim' || type == 'lease_renew' || type == 'lease_release') {
+      _handleLeaseMessage(socket, type, msg);
+    }
+  }
+
+  static const Duration leaseTtl = Duration(seconds: 45);
+
+  Future<void> _handleLeaseMessage(Socket socket, String type, Map<String, dynamic> msg) async {
+    final nonce = msg['nonce']?.toString() ?? '';
+    final got = msg['proof']?.toString() ?? '';
+    if (nonce.isEmpty || nonce.length > 128) return;
+    if (!_constantTimeEquals(got, _hmac(nonce))) return;
+    final tableId = msg['table_id'];
+    final claimant = msg['claimant']?.toString();
+    if (tableId is! int || claimant == null || claimant.isEmpty) {
+      _send(socket, {'type': 'lease_result', 'ok': false, 'reason': 'bad_request', 'proof': _hmac(nonce)});
+      return;
+    }
+    final leader = await _electLeader();
+    if (leader != _deviceId) {
+      _send(socket, {'type': 'lease_result', 'ok': false, 'reason': 'not_leader', 'leader': leader, 'proof': _hmac(nonce)});
+      return;
+    }
+    try {
+      if (type == 'lease_release') {
+        await _localDb.clearLease(tableId, claimant);
+        _send(socket, {'type': 'lease_result', 'ok': true, 'released': true, 'proof': _hmac(nonce)});
+        return;
+      }
+      final res = await _localDb.tryGrantLease(
+        tableId: tableId, claimant: claimant, leaseTtl: leaseTtl, isRenew: type == 'lease_renew');
+      final granted = res['granted'] == true;
+      _send(socket, {
+        'type': 'lease_result',
+        'ok': granted,
+        'owner': res['owner'],
+        'reason': res['reason'],
+        'takeover': res['takeover'] == true,
+        'lease_ms': granted ? leaseTtl.inMilliseconds : 0,
+        'proof': _hmac(nonce),
+      });
+    } catch (_) {
+      _send(socket, {'type': 'lease_result', 'ok': false, 'reason': 'error', 'proof': _hmac(nonce)});
     }
   }
 

@@ -105,14 +105,16 @@ class ComboCalculator {
 
   /// COMBO SECIM EKRANI yardimcisi (POS extra modu): kullanici N+G varyant secer; sepete SADECE N
   /// odenen kalem eklenir, en ucuz G HEDIYE slotu EKLENMEZ (backend close giftLines ile uretir —
-  /// panel/web birebir, cifte-hediye onler). Girdi: her pick {..., 'price': double}. Doner: odenen
-  /// pick listesi (en ucuz giftCount cikarilmis). within/percent/amount'ta giftCount=0 -> hepsi doner.
+  /// panel/web birebir, cifte-hediye onler). Doner: odenen pick listesi (en ucuz giftCount cikarilmis).
+  /// within/percent/amount'ta giftCount=0 -> hepsi doner.
+  /// B1 FIX (9 Tem): "en ucuz" GERCEK combo degerine gore (realValue = baz+mod), 'price' (kart onizleme
+  /// bedava=0) DEGIL — musteri lehine gercek en ucuz hediye. realValue yoksa price'a duser (geri uyum).
   static List<Map<String, dynamic>> paidPicksAfterGift(
       List<Map<String, dynamic>> picks, int giftCount) {
     if (giftCount <= 0 || picks.isEmpty) return List<Map<String, dynamic>>.from(picks);
-    // Index'leri fiyata gore artan sirala; en ucuz giftCount index'i "hediye" isaretle.
+    double sortVal(Map<String, dynamic> p) => _num(p.containsKey('realValue') ? p['realValue'] : p['price']);
     final idx = List<int>.generate(picks.length, (i) => i);
-    idx.sort((a, b) => _num(picks[a]['price']).compareTo(_num(picks[b]['price'])));
+    idx.sort((a, b) => sortVal(picks[a]).compareTo(sortVal(picks[b])));
     final giftIdx = idx.take(giftCount < picks.length ? giftCount : picks.length).toSet();
     final paid = <Map<String, dynamic>>[];
     for (int i = 0; i < picks.length; i++) {

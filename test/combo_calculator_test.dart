@@ -151,6 +151,20 @@ void main() {
       final paid = ComboCalculator.paidPicksAfterGift(picks, 1);
       expect(paid.length, 2, reason: 'sadece 1 hediye cikar');
     });
+    test('B1 FIX: realValue (baz+mod) gercek fiyata gore en ucuz hediye (mod DEGIL)', () {
+      // extra 2 al 1 hediye, baz 940: 1P(realValue 940) + 1P(940) + Buyuk(+100 realValue 1040)
+      // GERCEK en ucuz = 1P (940 < 1040) -> hediye 1P; odenen [1P, Buyuk]. (Telefon ile birebir).
+      final picks = [
+        {'name': '1P', 'realValue': 940.0, 'mod': 0.0},
+        {'name': '1P', 'realValue': 940.0, 'mod': 0.0},
+        {'name': 'Buyuk', 'realValue': 1040.0, 'mod': 100.0},
+      ];
+      final paid = ComboCalculator.paidPicksAfterGift(picks, 1);
+      expect(paid.length, 2);
+      // en ucuz 1P (940) hediye cikti -> odenen: bir 1P + Buyuk
+      expect(paid.any((p) => p['name'] == 'Buyuk'), true, reason: 'Buyuk (pahali) odenen kalir');
+      expect(paid.where((p) => p['name'] == '1P').length, 1, reason: 'bir 1P hediye cikti');
+    });
   });
 
   group('splitComboPackagePrice — combo paket fiyat bolme (baz + pozitif modifier / N)', () {

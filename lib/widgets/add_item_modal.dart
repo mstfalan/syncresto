@@ -397,18 +397,17 @@ class _AddItemModalState extends State<AddItemModal> {
     // GOSTERMEZ (saçma "(-940TL)" olmasin) — sadece varyant adi. POZITIF modifier (+100 gercek ek
     // ucret) parantez gosterir. Kart fiyati: paketten payi gosterilir (0 saçma). Odenen adet bilinmedigi
     // icin kart onizlemesinde baz+pozitif-mod gosterilir (kesin bolme eklemede).
+    // 'price' = kart onizleme (bedava ₺0, +mod). 'mod' = kanal modifier (paket bolme). 'realValue' =
+    // GERCEK combo degeri (baz+mod) — extra hediye "en ucuz" secimi BUNA gore (B1 fix: POS+telefon
+    // ayni, gercek fiyata gore en ucuz musteri lehine hediye).
     final options = <Map<String, dynamic>>[
-      {'name': '1 Porsiyon', 'price': basePrice, 'note': null, 'mod': 0.0},
+      {'name': '1 Porsiyon', 'price': basePrice, 'note': null, 'mod': 0.0, 'realValue': basePrice},
       ...variants.map((v) {
         final mod = _variantModifier(Map<String, dynamic>.from(v as Map));
         final vname = v['name']?.toString() ?? '';
-        // Sadece POZITIF modifier parantezde; negatif/sifir -> sadece ad (combo baz-sifirla saçma degil).
         final lbl = mod > 0 ? '$vname (+${mod.toStringAsFixed(0)}TL)' : vname;
-        // Kart ONIZLEME fiyati (Mustafa): combo'da varyant SADECE FARKINI gosterir (paket fiyati ana
-        // kartta). Bedava/negatif -> ₺0; POZITIF modifier -> sadece +mod (or +100), baz+mod DEGIL.
-        // GERCEK fiyat eklemede paket bolmesiyle (baz+pozitif-mod)/N yazilir.
         final previewPrice = mod > 0 ? mod : 0.0;
-        return {'name': vname, 'price': previewPrice, 'note': lbl, 'mod': mod};
+        return {'name': vname, 'price': previewPrice, 'note': lbl, 'mod': mod, 'realValue': basePrice + mod};
       }),
     ];
 

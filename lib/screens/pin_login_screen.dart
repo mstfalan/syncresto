@@ -450,6 +450,63 @@ class _PinLoginScreenState extends State<PinLoginScreen>
                                   ],
                                 ),
                               )),
+                        const Divider(),
+                        // Masa kilidi (lease) durumu — peer degisiminde otomatik yenilenir.
+                        FutureBuilder<Map<String, dynamic>>(
+                          future: lan.leaseStatus(),
+                          builder: (context, ls) {
+                            final data = ls.data;
+                            if (data == null) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 4),
+                                child: Text('Masa kilidi durumu yükleniyor…',
+                                    style: TextStyle(color: Colors.grey, fontSize: 13)),
+                              );
+                            }
+                            final mine = (data['mine'] as List?) ?? const [];
+                            final foreign = (data['foreign'] as List?) ?? const [];
+                            final heldCount = (data['heldCount'] as int?) ?? 0;
+                            String tbl(dynamic e) =>
+                                (e['table_number'] ?? 'M${e['table_id']}').toString();
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Masa Kilidi (lease)',
+                                    style: TextStyle(fontWeight: FontWeight.w600)),
+                                const SizedBox(height: 4),
+                                Row(children: [
+                                  Icon(Icons.lock, size: 15, color: Colors.green[700]),
+                                  const SizedBox(width: 6),
+                                  Expanded(child: Text(
+                                      mine.isEmpty
+                                          ? 'Bu kasada kilitli masa yok'
+                                          : 'Sizde: ${mine.map(tbl).join(", ")}',
+                                      style: const TextStyle(fontSize: 13))),
+                                ]),
+                                const SizedBox(height: 2),
+                                Row(children: [
+                                  Icon(Icons.lock_outline, size: 15, color: Colors.orange[800]),
+                                  const SizedBox(width: 6),
+                                  Expanded(child: Text(
+                                      foreign.isEmpty
+                                          ? 'Başka kasada kilitli masa yok'
+                                          : 'Diğer kasalarda: ${foreign.map(tbl).join(", ")}',
+                                      style: const TextStyle(fontSize: 13))),
+                                ]),
+                                if (heldCount > 0) ...[
+                                  const SizedBox(height: 2),
+                                  Row(children: [
+                                    Icon(Icons.sync_problem, size: 15, color: Colors.blue[700]),
+                                    const SizedBox(width: 6),
+                                    Expanded(child: Text(
+                                        'Teslim bekleyen: $heldCount kayıt (otomatik gönderilecek)',
+                                        style: TextStyle(fontSize: 13, color: Colors.blue[700]))),
+                                  ]),
+                                ],
+                              ],
+                            );
+                          },
+                        ),
                       ],
                     ],
                   );

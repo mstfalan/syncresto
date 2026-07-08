@@ -2912,6 +2912,39 @@ class LocalDbService {
     return false;
   }
 
+  /// LAN ayar ekrani icin lease durum ozeti (saf okuma, UI gostergesi). owner_device_id NULL ise
+  /// (Faz 2 mirror / demoted) durum bilgisi tasimaz — atlanir.
+  /// Doner: {'mine': [bu cihazin canli lease masalari], 'foreign': [baska cihazin canli lease masalari],
+  ///         'heldCount': kurtarma bekleyen (held+demoted) sync sayisi}
+  Future<Map<String, dynamic>> getLanLeaseStatus(String myDeviceId) async {
+    final db = await database;
+    final now = DateTime.now();
+    final rows = await db.query('local_tickets',
+        columns: ['table_id', 'table_number', 'owner_device_id', 'lan_lease_until', 'lan_origin'],
+        where: "owner_device_id IS NOT NULL AND status IN ('open','lease_hold') "
+            "AND lan_lease_until IS NOT NULL");
+    final mine = <Map<String, dynamic>>[];
+    final foreign = <Map<String, dynamic>>[];
+    for (final r in rows) {
+      final owner = r['owner_device_id']?.toString();
+      final leaseStr = r['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      if (owner == null || leaseUntil == null || !leaseUntil.isAfter(now)) continue;
+      final entry = {
+        'table_id': r['table_id'],
+        'table_number': r['table_number'],
+        'owner': owner,
+        'remaining_s': leaseUntil.difference(now).inSeconds,
+      };
+      (owner == myDeviceId ? mine : foreign).add(entry);
+    }
+    // Kurtarma bekleyen: demoted masalarin held sync'leri (reconcile teslim edecek).
+    final held = await db.rawQuery(
+        "SELECT COUNT(*) AS n FROM sync_queue WHERE status = 'held'");
+    final heldCount = (held.first['n'] as int?) ?? 0;
+    return {'mine': mine, 'foreign': foreign, 'heldCount': heldCount};
+  }
+
   /// v11 (7 Tem 2026): Masa takip ekrani offline kaynagi. Acik masalarin (mirror + offline-acilan)
   /// iptal EDILMEMIS item'larini backend pending-orders sekline map'ler. Garson adlari cached_waiters
   /// JOIN ile cozulur. Ekran kendi siralama/filtresini yapar. LAN yansimalari (lan_origin='lan') HARIC.

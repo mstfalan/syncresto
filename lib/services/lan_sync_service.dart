@@ -319,6 +319,14 @@ class LanSyncService {
     return granted;
   }
 
+  /// LAN ayar ekrani icin lease durum ozeti (UI gostergesi). flag OFF veya deviceId yoksa bos.
+  Future<Map<String, dynamic>> leaseStatus() async {
+    if (!_enabled || _deviceId == null) {
+      return {'mine': const [], 'foreign': const [], 'heldCount': 0};
+    }
+    return await _localDb.getLanLeaseStatus(_deviceId!);
+  }
+
   Future<bool> releaseTable(int tableId) async {
     if (!_enabled || _deviceId == null) return true;
     final leader = await _electLeader();

@@ -571,6 +571,13 @@ class _TablesScreenState extends State<TablesScreen> {
             waiterId: (widget.waiter['id'] as num).toInt(),
             customerCount: 1,
           );
+          if (result['lan_denied'] == true) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Bu masa başka kasada açık'), backgroundColor: Color(0xFFF59E0B)));
+            }
+            return;
+          }
           if (result['success'] == true) {
             // Yeni açılan ticket'ı al
             final newTicketData = await widget.apiService.getTableTicket(tableId);

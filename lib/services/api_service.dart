@@ -415,6 +415,13 @@ class ApiService {
     required int waiterId,
     int customerCount = 1,
   }) async {
+    final lan = LanSyncService();
+    if (lan.enabled) {
+      final canWrite = await lan.claimTable(tableId);
+      if (!canWrite) {
+        return {'success': false, 'lan_denied': true, 'error': 'Masa baska kasada acik'};
+      }
+    }
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.post('/api/pos/tickets/open', data: {
@@ -447,7 +454,6 @@ class ApiService {
     );
     final tableNumber = table['table_number']?.toString() ?? tableId.toString();
 
-    final lan = LanSyncService();
     final lanOwner = lan.enabled ? lan.deviceId : null;
     final localTicketId = await _localDb.createLocalTicket(
       tableId: tableId,

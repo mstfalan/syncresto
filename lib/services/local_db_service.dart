@@ -2163,17 +2163,21 @@ class LocalDbService {
   /// sync bekleyen) ticket'lara ASLA dokunmaz -> veri kaybi olmaz.
   Future<void> deleteMirroredTicketByTable(int tableId) async {
     final db = await database;
-    // Bu masadaki server_id'li (mirror) ticket'lari bul
+    // Bu masadaki server_id'li (mirror) ticket'lari bul. KRITIK-YENI-1 (Fable 3. tur): 'demoted'
+    // ticket'lar HARIC — held sync tasiyabilirler; mirror-temizlik onlari silerse held YETIM kalir
+    // (reconcile sadece demoted satirlari iter -> satir silindi -> ebedi ciro kaybi). demoted'in
+    // yasam dongusu SADECE quarantinePrune/reconcile'da (held/pending/failed cozulunce siler).
     final mirrored = await db.query('local_tickets',
         columns: ['local_id'],
-        where: 'table_id = ? AND server_id IS NOT NULL',
+        where: "table_id = ? AND server_id IS NOT NULL AND COALESCE(lan_origin,'self') != 'demoted'",
         whereArgs: [tableId]);
 
     for (final t in mirrored) {
       final localId = t['local_id'] as int;
-      // Guvenlik: bu ticket icin bekleyen sync var mi? (offline aksiyon uzerine mirror gelmis olabilir)
+      // Guvenlik: bu ticket icin bekleyen sync var mi? 'held' de dahil (KRITIK-YENI-1) — devredilmis
+      // ama teslim edilmemis satis silinmesin.
       final pending = await db.query('sync_queue',
-          where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+          where: "status IN ('pending', 'in_progress', 'held') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
           whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%']);
       if (pending.isNotEmpty) continue; // sync bekliyor -> dokunma
 
@@ -2187,15 +2191,17 @@ class LocalDbService {
   /// lokalden temizlenir, DB ŞİŞMEZ. Offline-olusturulan/pending kayitlara DOKUNMAZ.
   Future<void> pruneMirroredTicketsExcept(Set<int> openTableIds) async {
     final db = await database;
+    // KRITIK-YENI-1 (Fable 3. tur): 'demoted' HARIC — held sync tasiyabilir, silinirse yetim held.
     final mirrored = await db.query('local_tickets',
         columns: ['local_id', 'table_id'],
-        where: 'server_id IS NOT NULL');
+        where: "server_id IS NOT NULL AND COALESCE(lan_origin,'self') != 'demoted'");
     for (final t in mirrored) {
       final tableId = t['table_id'] as int?;
       if (tableId != null && openTableIds.contains(tableId)) continue; // hala acik -> koru
       final localId = t['local_id'] as int;
+      // 'held' de guard'a dahil (devredilmis satis teslim beklerken silinmesin).
       final pending = await db.query('sync_queue',
-          where: "status IN ('pending', 'in_progress') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+          where: "status IN ('pending', 'in_progress', 'held') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
           whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%'], limit: 1);
       if (pending.isNotEmpty) continue; // sync bekliyor -> dokunma
       await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
@@ -2623,6 +2629,15 @@ class LocalDbService {
     }
   }
 
+  /// LAN kapanis temizligi (dispose): TUM 'lan' + 'lease' yansima/placeholder satirlarini sil.
+  /// DUSUK-5 (Fable 3. tur): failover-cevrilmis owner-dolu 'lease'(status=open) da dahil (LAN yok artik).
+  /// 'demoted' ve 'self' DOKUNULMAZ — held sync tasiyabilir/gercek adisyon (veri kaybi yasak); onlar
+  /// reconcile/quarantine ile yonetilir.
+  Future<void> clearAllLanReflections() async {
+    final db = await database;
+    await db.delete('local_tickets', where: "lan_origin IN ('lan','lease')");
+  }
+
   /// K-1 FAILOVER: lider dalinda pruneLanTickets(const{}) yerine cagirilir. lan yansimalarindan
   /// CANLI foreign lease tasiyanlari (owner + lease_until>now) 'lease' placeholder'a DONUSTURUR —
   /// bunlar devralinan lease defteri kopyasi; yeni lider oldu(k)gumuzda bu masalarin korumasini
@@ -2654,10 +2669,11 @@ class LocalDbService {
   }
 
   /// demoted masalari temizle: teslim edilecek sync KALMADI (reconcile pending'e aldi + backend'e gitti,
-  /// veya un-hold oldu). Item de silinir (yetim birakma — Fable M4). Engel: held VEYA pending VEYA
-  /// in_progress sync (O-2: pending delete_item/update_item de teslim bekliyor, silinirse dead_letter =
-  /// iptal/ekleme backend'e hic gitmez). Ticket-scope: local_id=ticket VEYA payload local_ticket_id.
-  /// prune'dan AYRI (demoted != lan).
+  /// veya un-hold oldu). Item de silinir (yetim birakma — Fable M4). Engel: held/pending/in_progress
+  /// (O-2) VE failed/dead_letter (YENI-2 Fable 3. tur: kalici backend hatasinda dead_letter kurtarma
+  /// penceresi 30 gun korunmali; silinirse retry create'i offline_ticket_number=null gonderir = kayip).
+  /// dead_letter 30 gunde ayri temizlenince (dead_letter cleanup) bu demoted da prune'lanir.
+  /// Ticket-scope: local_id=ticket VEYA payload local_ticket_id VEYA item JOIN. prune'dan AYRI.
   Future<void> quarantinePrune() async {
     final db = await database;
     final demoted = await db.query('local_tickets',
@@ -2665,7 +2681,7 @@ class LocalDbService {
     for (final t in demoted) {
       final localId = t['local_id'] as int;
       final pending = await db.query('sync_queue',
-          where: "status IN ('held','pending','in_progress') "
+          where: "status IN ('held','pending','in_progress','failed','dead_letter') "
               "AND (local_id = ? OR CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) = ? "
               "OR local_id IN (SELECT local_id FROM local_ticket_items WHERE local_ticket_id = ?))",
           whereArgs: [localId, localId, localId], limit: 1);

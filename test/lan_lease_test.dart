@@ -243,7 +243,7 @@ Future<void> quarantinePrune(Database db) async {
   for (final t in demoted) {
     final localId = t['local_id'] as int;
     final pending = await db.query('sync_queue',
-        where: "status IN ('held','pending','in_progress') "
+        where: "status IN ('held','pending','in_progress','failed','dead_letter') "
             "AND (local_id = ? OR CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) = ? "
             "OR local_id IN (SELECT local_id FROM local_ticket_items WHERE local_ticket_id = ?))",
         whereArgs: [localId, localId, localId], limit: 1);
@@ -251,6 +251,29 @@ Future<void> quarantinePrune(Database db) async {
     await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
     await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
   }
+}
+
+// YENI-1: mirror-temizlik guard'lari 'demoted' + 'held'i tanir (uretimle birebir).
+Future<void> pruneMirroredTicketsExcept(Database db, Set<int> openTableIds) async {
+  final mirrored = await db.query('local_tickets',
+      columns: ['local_id', 'table_id'],
+      where: "server_id IS NOT NULL AND COALESCE(lan_origin,'self') != 'demoted'");
+  for (final t in mirrored) {
+    final tableId = t['table_id'] as int?;
+    if (tableId != null && openTableIds.contains(tableId)) continue;
+    final localId = t['local_id'] as int;
+    final pending = await db.query('sync_queue',
+        where: "status IN ('pending', 'in_progress', 'held') AND (local_id = ? OR payload LIKE ? OR payload LIKE ?)",
+        whereArgs: [localId, '%"local_ticket_id":$localId,%', '%"local_ticket_id":$localId}%'], limit: 1);
+    if (pending.isNotEmpty) continue;
+    await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
+    await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
+  }
+}
+
+// DUSUK-5: LAN kapanis temizligi (dispose) — lan+lease sil, demoted+self KORU.
+Future<void> clearAllLanReflections(Database db) async {
+  await db.delete('local_tickets', where: "lan_origin IN ('lan','lease')");
 }
 
 Future<List<Map<String, dynamic>>> getLanLedgerForBroadcast(Database db) async {
@@ -563,6 +586,67 @@ void main() {
       await db.insert('sync_queue', {'action': 'delete_item', 'entity_type': 'ticket_item', 'local_id': 500, 'payload': '{"item_local_id":$itemId}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
       await demoteSelfAfterLeaseLost(db, 7);
       expect((await db.query('sync_queue', where: "status='held'")).length, 1, reason: 'item_local_id JOIN ile held e alindi (O-1 kacagi kapandi)');
+    });
+  });
+
+  group('KRITIK-YENI-1: mirror-temizlik guard held/demoted tanir', () {
+    test('pruneMirroredTicketsExcept: HELD sync tasiyan demoted ticket SILINMEZ', () async {
+      // demoted + server_id DOLU + held add_item -> mirror-prune silmemeli (yoksa yetim held)
+      await db.insert('local_tickets', {'ticket_number': 'M-7', 'table_id': 7, 'server_id': 900, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'add_item', 'entity_type': 'ticket_item', 'local_id': 5, 'payload': '{"local_ticket_id":$tid}', 'status': 'held', 'created_at': DateTime.now().toIso8601String()});
+      await pruneMirroredTicketsExcept(db, const {}); // masa backend'de kapali (openTableIds bos)
+      expect((await db.query('local_tickets', where: 'table_id=7')).isNotEmpty, true, reason: 'demoted+held korunur');
+      expect((await db.query('sync_queue', where: "status='held'")).length, 1, reason: 'held yetim kalmadi');
+    });
+    test('pruneMirroredTicketsExcept: demoted ama SYNC YOK -> yine korunur (demoted dislama)', () async {
+      // demoted origin tek basina mirror-prune disinda (yasam dongusu quarantine da)
+      await db.insert('local_tickets', {'ticket_number': 'M-7', 'table_id': 7, 'server_id': 900, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      await pruneMirroredTicketsExcept(db, const {});
+      expect((await db.query('local_tickets', where: 'table_id=7')).isNotEmpty, true);
+    });
+    test('pruneMirroredTicketsExcept: normal mirror (self, sync yok, kapali) SILINIR (regresyon yok)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'M-9', 'table_id': 9, 'server_id': 901, 'status': 'open', 'lan_origin': 'self'});
+      await pruneMirroredTicketsExcept(db, const {});
+      expect((await db.query('local_tickets', where: 'table_id=9')).isEmpty, true, reason: 'temiz mirror hala temizlenir');
+    });
+  });
+
+  group('KRITIK-YENI-2: quarantine failed/dead_letter korur (kurtarma penceresi)', () {
+    test('FAILED sync varken demoted masa SILINMEZ (dead_letter retry penceresi korunur)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'D-7', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'failed', 'created_at': DateTime.now().toIso8601String()});
+      await quarantinePrune(db);
+      expect((await db.query('local_tickets', where: 'table_id=7')).isNotEmpty, true, reason: 'failed retry edilebilir, silinmemeli');
+    });
+    test('DEAD_LETTER sync varken de demoted masa SILINMEZ', () async {
+      await db.insert('local_tickets', {'ticket_number': 'D-7', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'dead_letter', 'created_at': DateTime.now().toIso8601String()});
+      await quarantinePrune(db);
+      expect((await db.query('local_tickets', where: 'table_id=7')).isNotEmpty, true);
+    });
+    test('completed sync -> masa temizlenir (dead_letter 30 gunde silinince prune devreye)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'D-7', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'completed', 'created_at': DateTime.now().toIso8601String()});
+      await quarantinePrune(db);
+      expect((await db.query('local_tickets', where: 'table_id=7')).isEmpty, true);
+    });
+  });
+
+  group('DUSUK-5: dispose LAN kapanis temizligi', () {
+    test('clearAllLanReflections: lan+lease sil, demoted+self KORU (veri kaybi yasak)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'L1', 'table_id': 1, 'status': 'open', 'lan_origin': 'lan', 'owner_device_id': 'B'});
+      await db.insert('local_tickets', {'ticket_number': 'L2', 'table_id': 2, 'status': 'open', 'lan_origin': 'lease', 'owner_device_id': 'B', 'lan_lease_until': future(30)});
+      await db.insert('local_tickets', {'ticket_number': 'D3', 'table_id': 3, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      await db.insert('local_tickets', {'ticket_number': 'S4', 'table_id': 4, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A'});
+      await clearAllLanReflections(db);
+      expect((await db.query('local_tickets', where: 'table_id=1')).isEmpty, true, reason: 'lan silindi');
+      expect((await db.query('local_tickets', where: 'table_id=2')).isEmpty, true, reason: 'lease silindi (failover kalintisi dahil)');
+      expect((await db.query('local_tickets', where: 'table_id=3')).isNotEmpty, true, reason: 'demoted KORUNUR (held olabilir)');
+      expect((await db.query('local_tickets', where: 'table_id=4')).isNotEmpty, true, reason: 'self KORUNUR (gercek adisyon)');
     });
   });
 }

@@ -240,7 +240,11 @@ class LanSyncService {
   }
 
   /// Istemci: kendi acik masalarini lidere lease_renew ile tazele. Red 'held' + yerel foreign-lease
-  /// teyidi -> korumali demote (held, geri donusumlu).
+  /// teyidi -> korumali demote (held, geri donusumlu). 'no_ticket' -> RE-CLAIM (YENI-3 Fable 3. tur):
+  /// lider tarafinda lease satiri yok (pruneLeaseZombies expired lease'i sildi, veya lider degisti/amnezi)
+  /// -> renew myRow bulamaz. Bu cihazin masada canli self ticket'i varken korumasiz kalmasin: yeni
+  /// lease_claim ile korumayi geri kur (bos masada grant olur; baskasi devraldiysa held/unleased doner,
+  /// dokunmaz).
   Future<void> _renewOwnLeasesViaLeader(LanPeer leader) async {
     if (_deviceId == null) return;
     try {
@@ -250,8 +254,12 @@ class LanSyncService {
         if (t['owner_device_id']?.toString() != _deviceId) continue;
         if (tid is! int) continue;
         final res = await _sendLeaseMsg(leader, 'lease_renew', tid);
-        if (res != null && res['reason'] == 'held') {
+        if (res == null) continue;
+        if (res['reason'] == 'held') {
           await _demoteCandidate(tid, res['owner']?.toString());
+        } else if (res['reason'] == 'no_ticket') {
+          // Lider'de lease kaydi yok -> korumayi geri kur (re-claim). Grant/deny lider karari.
+          await _sendLeaseMsg(leader, 'lease_claim', tid);
         }
       }
     } catch (_) {}
@@ -842,8 +850,9 @@ class LanSyncService {
     _server = null;
     _listenPort = null;
     _peers.clear();
-    // LAN kapaninca yansimis masalari temizle (UI'da hayalet kalmasin).
-    _localDb.pruneLanTickets(const {}).catchError((_) {});
+    // LAN kapaninca yansimis masalari + lease placeholder/kalintilari temizle (UI'da hayalet kalmasin).
+    // DUSUK-5 (Fable 3. tur): failover-cevrilmis owner-dolu 'lease'(status=open) satiri da gitmeli.
+    _localDb.clearAllLanReflections().catchError((_) {});
   }
 }
 

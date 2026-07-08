@@ -88,7 +88,8 @@ class _TicketModalState extends State<TicketModal> {
       // - add_item: Ürün ekleme
       // - close_ticket: Hesap kapatma (nakit/kart)
       // - void_ticket: Adisyon iptal
-      const offlineAllowedPermissions = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket'];
+      // - print_receipt: Mutfak/fiş yazdırma (offline lokal ESC/POS ile çalışır — 8 Tem 2026)
+      const offlineAllowedPermissions = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket', 'print_receipt'];
       return offlineAllowedPermissions.contains(permission);
     }
 

@@ -97,7 +97,10 @@ class _AddItemModalState extends State<AddItemModal> {
 
   bool _hasPermission(String permission) {
     if (!widget.apiService.isOnline) {
-      const offlineAllowed = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket'];
+      // 8 Tem 2026: 'print_receipt' EKLENDI. Offline'da mutfak yazicisi TCP ile dogrudan basar
+      // (printKitchen backend'i beklemez, printed=1 lokal set + printerService.printKitchenReceipt),
+      // "Yazdir"/"Yaz+Nakit/Kart" da lokal ESC/POS. Eksikligi butonlari PASIF birakiyordu (sikayet).
+      const offlineAllowed = ['open_ticket', 'add_item', 'close_ticket', 'void_ticket', 'print_receipt'];
       return offlineAllowed.contains(permission);
     }
     // permissions Map beklenir ama offline cache'te List ([]) gelebilir (crash koruması).

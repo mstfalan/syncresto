@@ -245,8 +245,16 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   /// Ürüne tıkla → varsayilan: direkt sepete ekle (varyant secimi sepetten "Varyant" butonu ile).
+  /// COMBO: urun combo_enabled + gecerli kural ise combo secim ekrani (kurala gore N/N+G varyant sec).
   /// Ayar 'variantOnTap' ACIK + urun VARYANTLI ise: once varyant dialogu ac, secilen varyantla ekle.
   Future<void> _addProductDirectly(Map<String, dynamic> product) async {
+    // COMBO SECIM (Fable denetimli): combo_enabled + gecerli kural -> combo secim ekrani.
+    // Karar: extra hediye BACKEND uretir (panel/web birebir) — POS N odenen kalem ekler, hediyeyi
+    // close handler'i giftLines ile olusturur. Boylece cifte-hediye/reload sorunu YOK.
+    if (_comboIsActive(product)) {
+      await _openComboSelectionDialog(product);
+      return;
+    }
     if (_variantOnTap) {
       final variants = (product['variants'] is List) ? product['variants'] as List : const [];
       if (variants.isNotEmpty) {
@@ -256,6 +264,41 @@ class _AddItemModalState extends State<AddItemModal> {
     }
     _addProductWithPrice(product, product['name']?.toString() ?? '',
       _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']));
+  }
+
+  /// Combo kurali AKTIF mi: combo_enabled + gecerli indirim (hediye VEYA yuzde VEYA sabit).
+  /// combo_enabled ama indirim tanimsizsa (calculator eligible=false) combo ekrani ACILMAZ.
+  bool _comboIsActive(Map<String, dynamic> product) {
+    final enabled = product['combo_enabled'] == true || product['combo_enabled'] == 1;
+    if (!enabled) return false;
+    final g = _safeInt(product['combo_gift_qty']) ?? 0;
+    final pct = _safeDouble(product['combo_discount_percent']);
+    final amt = _safeDouble(product['combo_discount_amount']);
+    return g > 0 || pct > 0 || amt > 0;
+  }
+
+  /// Combo kural ozeti: N (secilecek), G (hediye), mod, repeat, stepPerSet (bir set icin secilecek adet),
+  /// label. within/percent/amount -> N sec; extra -> N+G sec (G'si hediye, BACKEND uretir).
+  Map<String, dynamic> _comboTargetFor(Map<String, dynamic> product) {
+    final n = (_safeInt(product['combo_required_qty']) ?? 2).clamp(1, 10);
+    final g = (_safeInt(product['combo_gift_qty']) ?? 0);
+    final giftMode = product['combo_gift_mode'] == 'extra' ? 'extra' : 'within';
+    final repeat = product['combo_repeat'] != false;
+    final pct = _safeDouble(product['combo_discount_percent']);
+    final amt = _safeDouble(product['combo_discount_amount']);
+    // Bir set icin secilecek adet: extra -> N+G (G hediye slotu), digerleri -> N.
+    final stepPerSet = (g > 0 && giftMode == 'extra') ? n + g : n;
+    String label;
+    if (g > 0) {
+      label = giftMode == 'extra' ? '$n al $g hediye' : '$n al ${(n - g) < 1 ? 1 : (n - g)} öde';
+    } else if (pct > 0) {
+      label = '%${pct % 1 == 0 ? pct.toInt() : pct} indirim';
+    } else if (amt > 0) {
+      label = '₺${amt % 1 == 0 ? amt.toInt() : amt} indirim';
+    } else {
+      label = 'Combo';
+    }
+    return {'N': n, 'G': g, 'giftMode': giftMode, 'repeat': repeat, 'stepPerSet': stepPerSet, 'label': label};
   }
 
   /// Ayar ACIK iken: urune tiklaninca varyant sec, secilen varyantla sepete EKLE (mevcut item'i
@@ -308,6 +351,171 @@ class _AddItemModalState extends State<AddItemModal> {
         : vname;
     // Varyant adi displayName'e -> _addProductWithPrice note olarak yazar (mevcut kalip)
     _addProductWithPrice(product, '$productName ($label)', basePrice + mod, variantNote: label);
+  }
+
+  /// COMBO SECIM EKRANI (Fable denetimli). Kurala gore stepPerSet adet varyant sec (dinamik N/N+G).
+  /// Secilen ODENEN kalemler sepete eklenir (extra hediye BACKEND uretir — POS eklemez, cifte-hediye YOK).
+  /// comboCalculator indirimini _comboResult ile otomatik hesaplar (bu ekran indirim HESAPLAMAZ).
+  Future<void> _openComboSelectionDialog(Map<String, dynamic> product) async {
+    final t = _comboTargetFor(product);
+    final int stepPerSet = t['stepPerSet'] as int;
+    final bool repeat = t['repeat'] as bool;
+    final String label = t['label'] as String;
+    final String giftMode = t['giftMode'] as String;
+    final int giftPerSet = t['G'] as int;
+    final productName = product['name']?.toString() ?? '';
+    final basePrice = _safeDouble(
+      (product['restaurant_price'] != null && product['restaurant_price'] != 0)
+          ? product['restaurant_price'] : product['price']);
+    final variants = (product['variants'] is List) ? product['variants'] as List : const [];
+
+    // Secim opsiyonlari: "1 Porsiyon" (baz) + her varyant (baz+modifier).
+    final options = <Map<String, dynamic>>[
+      {'name': '1 Porsiyon', 'price': basePrice, 'note': null},
+      ...variants.map((v) {
+        final mod = _safeDouble(v['price_modifier']);
+        final vname = v['name']?.toString() ?? '';
+        final lbl = mod != 0 ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)' : vname;
+        return {'name': vname, 'price': basePrice + mod, 'note': lbl};
+      }),
+    ];
+
+    // Secilen kalemler (her secim bir opsiyon kopyasi). picks = [{name,price,note}].
+    final picks = <Map<String, dynamic>>[];
+    int setCount = 1;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final screen = MediaQuery.of(ctx).size;
+        final maxCols = ((screen.width * 0.92 - 40) / (_variantTileWidth + 10)).floor().clamp(1, 4);
+        final cols = maxCols.clamp(1, options.isEmpty ? 1 : options.length);
+        final dialogWidth = (cols * (_variantTileWidth + 10) + 40).clamp(360.0, screen.width * 0.92);
+        return StatefulBuilder(builder: (ctx, setSt) {
+          final target = stepPerSet * setCount;
+          final selected = picks.length;
+          final canAdd = selected == target && selected > 0;
+          // extra modda hediye vurgusu: secilen en ucuz (giftPerSet*setCount) tane bilgi amacli isaretlenir.
+          final giftCount = giftMode == 'extra' ? giftPerSet * setCount : 0;
+          return Dialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Container(
+              width: dialogWidth,
+              constraints: BoxConstraints(maxHeight: screen.height * 0.88),
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(children: [
+                    Expanded(child: Text(productName,
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+                    IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx, false)),
+                  ]),
+                  // Kural rozeti
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    margin: const EdgeInsets.only(top: 2, bottom: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.orange[50], borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange[300]!),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.local_offer, size: 15, color: Colors.orange[800]),
+                      const SizedBox(width: 6),
+                      Flexible(child: Text('COMBO: $label${repeat ? '  ·  Katlanabilir' : ''}',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.orange[900]))),
+                    ]),
+                  ),
+                  // Ilerleme
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    Text('$selected / $target seçildi',
+                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold,
+                            color: canAdd ? Colors.green[700] : Colors.grey[700])),
+                    if (giftCount > 0)
+                      Text('$giftCount hediye (en ucuz)', style: TextStyle(fontSize: 12, color: Colors.green[700])),
+                  ]),
+                  const SizedBox(height: 10),
+                  // Varyant/opsiyon kartlari — tikla, secim listesine ekle (hedefe kadar)
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: Wrap(
+                        spacing: 10, runSpacing: 10,
+                        children: options.map((opt) {
+                          final cnt = picks.where((p) => p['name'] == opt['name'] && p['price'] == opt['price']).length;
+                          return SizedBox(
+                            width: _variantTileWidth,
+                            child: _variantOptionTile(
+                              label: cnt > 0 ? '${opt['name']}  ×$cnt' : opt['name'] as String,
+                              price: opt['price'] as double,
+                              selected: cnt > 0,
+                              onTap: () {
+                                if (picks.length >= target) return; // hedefe ulasti -> ekleme yok
+                                setSt(() => picks.add(Map<String, dynamic>.from(opt)));
+                              },
+                              color: cnt > 0 ? Colors.green[700]! : Colors.orange[600]!,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  // Secilenler ozeti (tek satir + geri al)
+                  if (picks.isNotEmpty) ...[
+                    Wrap(spacing: 6, runSpacing: 6, children: [
+                      for (int i = 0; i < picks.length; i++)
+                        InputChip(
+                          label: Text('${picks[i]['name']}', style: const TextStyle(fontSize: 12)),
+                          onDeleted: () => setSt(() => picks.removeAt(i)),
+                          deleteIcon: const Icon(Icons.close, size: 15),
+                        ),
+                    ]),
+                    const SizedBox(height: 8),
+                  ],
+                  // Alt bar
+                  Row(children: [
+                    if (repeat && canAdd) ...[
+                      OutlinedButton.icon(
+                        onPressed: () => setSt(() => setCount++),
+                        icon: const Icon(Icons.add, size: 16),
+                        label: const Text('Set daha'),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: canAdd ? () => Navigator.pop(ctx, true) : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: canAdd ? Colors.green[700] : Colors.grey[300],
+                          foregroundColor: Colors.white, minimumSize: const Size(0, 48),
+                        ),
+                        child: Text(canAdd ? 'Sepete Ekle ($selected)' : 'Kalan: ${target - selected}'),
+                      ),
+                    ),
+                  ]),
+                ],
+              ),
+            ),
+          );
+        });
+      },
+    );
+
+    if (confirmed != true || picks.isEmpty) return; // iptal -> HIC kalem eklenmez
+    // KRITIK (Fable C + panel/web birebir): extra modda kullanici N+G secer ama sepete SADECE N ODENEN
+    // kalem eklenir; en ucuz G hediye slotu EKLENMEZ. Hediyeyi backend close calcCartCombos.giftLines ile
+    // uretir (₺0 __combo_gift satir). Aksi halde backend Q=N+G gorup sets'i yanlis hesaplar (cifte-hediye).
+    // within/percent/amount: hediye slotu yok, tum secilenler odenen -> hepsi eklenir.
+    // extra modda en ucuz (giftPerSet*setCount) tane HEDIYE slotu EKLENMEZ (backend uretir).
+    // within/percent/amount'ta giftCount=0 -> hepsi eklenir. Statik+test edilebilir yardimci.
+    final giftCount = (giftMode == 'extra') ? giftPerSet * setCount : 0;
+    final paidPicks = ComboCalculator.paidPicksAfterGift(picks, giftCount);
+    for (final p in paidPicks) {
+      final note = p['note'] as String?;
+      final display = note != null ? '$productName ($note)' : productName;
+      _addProductWithPrice(product, display, p['price'] as double, variantNote: note);
+    }
   }
 
   /// Secili sepet item'inin urunu icin varyant kayitlari var mi?

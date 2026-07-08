@@ -81,6 +81,25 @@ class ComboCartResult {
 }
 
 class ComboCalculator {
+  /// COMBO SECIM EKRANI yardimcisi (POS extra modu): kullanici N+G varyant secer; sepete SADECE N
+  /// odenen kalem eklenir, en ucuz G HEDIYE slotu EKLENMEZ (backend close giftLines ile uretir —
+  /// panel/web birebir, cifte-hediye onler). Girdi: her pick {..., 'price': double}. Doner: odenen
+  /// pick listesi (en ucuz giftCount cikarilmis). within/percent/amount'ta giftCount=0 -> hepsi doner.
+  static List<Map<String, dynamic>> paidPicksAfterGift(
+      List<Map<String, dynamic>> picks, int giftCount) {
+    if (giftCount <= 0 || picks.isEmpty) return List<Map<String, dynamic>>.from(picks);
+    // Index'leri fiyata gore artan sirala; en ucuz giftCount index'i "hediye" isaretle.
+    final idx = List<int>.generate(picks.length, (i) => i);
+    idx.sort((a, b) => _num(picks[a]['price']).compareTo(_num(picks[b]['price'])));
+    final giftIdx = idx.take(giftCount < picks.length ? giftCount : picks.length).toSet();
+    final paid = <Map<String, dynamic>>[];
+    for (int i = 0; i < picks.length; i++) {
+      if (giftIdx.contains(i)) continue; // hediye slotu -> ekleme
+      paid.add(picks[i]);
+    }
+    return paid;
+  }
+
   // --- JS num()/toInt() eşleri (parseFloat/parseInt semantiği) ---
   static double _num(dynamic v, [double d = 0]) {
     if (v == null) return d;

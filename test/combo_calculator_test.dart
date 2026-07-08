@@ -117,4 +117,39 @@ void main() {
       expect(cc.comboProductIds, [50]);
     });
   });
+
+  group('paidPicksAfterGift — combo secim ekrani extra hediye cikarma', () {
+    test('giftCount=0 (within/percent/amount) -> hepsi odenen', () {
+      final picks = [{'name': 'Buyuk', 'price': 200.0}, {'name': 'Orta', 'price': 150.0}];
+      final paid = ComboCalculator.paidPicksAfterGift(picks, 0);
+      expect(paid.length, 2);
+    });
+    test('extra N=2 G=1: 3 secim -> en ucuz 1 hediye cikar, 2 odenen', () {
+      final picks = [{'name': 'B', 'price': 200.0}, {'name': 'O', 'price': 150.0}, {'name': 'K', 'price': 100.0}];
+      final paid = ComboCalculator.paidPicksAfterGift(picks, 1);
+      expect(paid.length, 2, reason: '3 sec - 1 hediye = 2 odenen');
+      expect(paid.any((p) => p['price'] == 100.0), false, reason: 'en ucuz (100) hediye slotu, odenene girmez');
+      expect(paid.map((p) => p['price']).toSet(), {200.0, 150.0});
+    });
+    test('extra 2 set (2 hediye): 6 secim -> en ucuz 2 hediye cikar, 4 odenen', () {
+      final picks = [
+        {'name': 'a', 'price': 300.0}, {'name': 'b', 'price': 250.0}, {'name': 'c', 'price': 200.0},
+        {'name': 'd', 'price': 150.0}, {'name': 'e', 'price': 100.0}, {'name': 'f', 'price': 50.0},
+      ];
+      final paid = ComboCalculator.paidPicksAfterGift(picks, 2);
+      expect(paid.length, 4);
+      expect(paid.any((p) => p['price'] == 50.0), false);
+      expect(paid.any((p) => p['price'] == 100.0), false);
+    });
+    test('giftCount picks sayisini asarsa -> hepsi hediye, odenen bos (guard)', () {
+      final picks = [{'name': 'x', 'price': 100.0}];
+      final paid = ComboCalculator.paidPicksAfterGift(picks, 5);
+      expect(paid.isEmpty, true);
+    });
+    test('ayni fiyatli iki pick -> sadece giftCount kadar cikar (cift cikarma yok)', () {
+      final picks = [{'name': 'A', 'price': 100.0}, {'name': 'B', 'price': 100.0}, {'name': 'C', 'price': 200.0}];
+      final paid = ComboCalculator.paidPicksAfterGift(picks, 1);
+      expect(paid.length, 2, reason: 'sadece 1 hediye cikar');
+    });
+  });
 }

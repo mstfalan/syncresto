@@ -86,6 +86,24 @@ class _AddItemModalState extends State<AddItemModal> {
     return double.tryParse(value.toString()) ?? defaultValue;
   }
 
+  /// Bir urunun POS (RESTORAN kanali) baz fiyati: restaurant_price (varsa/≠0) yoksa price.
+  /// Varyantin kendi kanal fiyati yoksa bu baz kullanilir (Mustafa: "varyant fiyati yoksa ana
+  /// karttaki restoran fiyatini al").
+  double _restaurantBasePrice(Map<String, dynamic> product) {
+    final rp = product['restaurant_price'];
+    if (rp != null && _safeDouble(rp) != 0) return _safeDouble(rp);
+    return _safeDouble(product['price']);
+  }
+
+  /// Bir varyantin POS (RESTORAN kanali) modifier'i: restaurant_modifier (varsa) ?? genel price_modifier.
+  /// POS restoran kanali oldugundan once restaurant_modifier'a bakar; o kanalda ozel deger yoksa (null)
+  /// genel price_modifier'a duser. Boylece panelde "Res -940" girilince POS varyant fiyati = baz-940.
+  double _variantModifier(Map<String, dynamic> variant) {
+    final rm = variant['restaurant_modifier'];
+    if (rm != null) return _safeDouble(rm);
+    return _safeDouble(variant['price_modifier']);
+  }
+
   /// 12 Haz 2026 — MUTLAK FIYAT modeli: notes icindeki '(+N TL)' / '(+NTL)'
   /// fiyat token'larini toplar (ondalik virgul/nokta destekli).
   /// Tek kullanim yeri: varyant uygulamasinda mevcut ucretli ekstra toplamini
@@ -273,7 +291,7 @@ class _AddItemModalState extends State<AddItemModal> {
       }
     }
     _addProductWithPrice(product, product['name']?.toString() ?? '',
-      _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']));
+      _restaurantBasePrice(product));
   }
 
   /// Combo kurali AKTIF mi: combo_enabled + gecerli indirim (hediye VEYA yuzde VEYA sabit).
@@ -315,10 +333,7 @@ class _AddItemModalState extends State<AddItemModal> {
   /// guncellemez — yeni kalem ekler). Ekleme sonrasi mevcut _addProductWithPrice yolunu kullanir
   /// (fiyat = baz + varyant modifier), varyant adi note olarak yazilir.
   Future<void> _openVariantDialogForProduct(Map<String, dynamic> product, List variants) async {
-    final basePrice = _safeDouble(
-      (product['restaurant_price'] != null && product['restaurant_price'] != 0)
-          ? product['restaurant_price']
-          : product['price']);
+    final basePrice = _restaurantBasePrice(product);
     final productName = product['name']?.toString() ?? '';
     final result = await showDialog<Map<String, dynamic>?>(
       context: context,
@@ -332,7 +347,7 @@ class _AddItemModalState extends State<AddItemModal> {
             color: Colors.blue[600]!,
           ),
           ...variants.map((v) {
-            final modifier = _safeDouble(v['price_modifier']);
+            final modifier = _variantModifier(Map<String, dynamic>.from(v as Map));
             final vname = v['name']?.toString() ?? '';
             return _variantOptionTile(
               label: vname,
@@ -354,7 +369,7 @@ class _AddItemModalState extends State<AddItemModal> {
       _addProductWithPrice(product, productName, basePrice);
       return;
     }
-    final mod = _safeDouble(selectedVariant['price_modifier']);
+    final mod = _variantModifier(Map<String, dynamic>.from(selectedVariant as Map));
     final vname = selectedVariant['name']?.toString() ?? '';
     final label = mod != 0
         ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)'
@@ -374,16 +389,14 @@ class _AddItemModalState extends State<AddItemModal> {
     final String giftMode = t['giftMode'] as String;
     final int giftPerSet = t['G'] as int;
     final productName = product['name']?.toString() ?? '';
-    final basePrice = _safeDouble(
-      (product['restaurant_price'] != null && product['restaurant_price'] != 0)
-          ? product['restaurant_price'] : product['price']);
+    final basePrice = _restaurantBasePrice(product);
     final variants = (product['variants'] is List) ? product['variants'] as List : const [];
 
     // Secim opsiyonlari: "1 Porsiyon" (baz) + her varyant (baz+modifier).
     final options = <Map<String, dynamic>>[
       {'name': '1 Porsiyon', 'price': basePrice, 'note': null},
       ...variants.map((v) {
-        final mod = _safeDouble(v['price_modifier']);
+        final mod = _variantModifier(Map<String, dynamic>.from(v as Map));
         final vname = v['name']?.toString() ?? '';
         final lbl = mod != 0 ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)' : vname;
         return {'name': vname, 'price': basePrice + mod, 'note': lbl};
@@ -561,11 +574,7 @@ class _AddItemModalState extends State<AddItemModal> {
     final variants = (prod['variants'] is List) ? prod['variants'] as List : const [];
     if (variants.isEmpty) return;
 
-    final basePrice = _safeDouble(
-      (prod['restaurant_price'] != null && prod['restaurant_price'] != 0)
-          ? prod['restaurant_price']
-          : prod['price'],
-    );
+    final basePrice = _restaurantBasePrice(Map<String, dynamic>.from(prod));
     final productName = prod['name']?.toString() ?? '';
     final currentNotes = item['notes']?.toString() ?? '';
 
@@ -592,7 +601,7 @@ class _AddItemModalState extends State<AddItemModal> {
           ),
           ...variants.map((v) {
             final id = _safeInt(v['id']);
-            final modifier = _safeDouble(v['price_modifier']);
+            final modifier = _variantModifier(Map<String, dynamic>.from(v as Map));
             final variantPrice = basePrice + modifier;
             final vname = v['name']?.toString() ?? '';
             return _variantOptionTile(
@@ -633,14 +642,14 @@ class _AddItemModalState extends State<AddItemModal> {
 
     if (selectedVariant != null) {
       final vname = selectedVariant['name']?.toString() ?? '';
-      final mod = _safeDouble(selectedVariant['price_modifier']);
+      final mod = _variantModifier(Map<String, dynamic>.from(selectedVariant as Map));
       final label = mod != 0
           ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)'
           : vname;
       newNotes = newNotes.isEmpty ? label : '$newNotes, $label';
     }
 
-    final variantModifier = selectedVariant != null ? _safeDouble(selectedVariant['price_modifier']) : 0.0;
+    final variantModifier = selectedVariant != null ? _variantModifier(Map<String, dynamic>.from(selectedVariant as Map)) : 0.0;
 
     final itemId = _safeInt(item['id']);
     if (itemId == null) return;

@@ -46,7 +46,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 11, // v11 (7 Tem 2026): offline-parity — waiter_name/section_name + item added_by/delivered/portion/payment
+      version: 12, // v12 (8 Tem 2026): COMBO FAZ4 — cached_products combo_* kolonlari (offline combo hesabi)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -154,6 +154,13 @@ class LocalDbService {
         show_variants_pos INTEGER DEFAULT 0,
         variants TEXT,
         printer_id INTEGER,
+        combo_enabled INTEGER DEFAULT 0,
+        combo_required_qty INTEGER,
+        combo_gift_qty INTEGER,
+        combo_gift_mode TEXT,
+        combo_discount_percent REAL,
+        combo_discount_amount REAL,
+        combo_repeat INTEGER DEFAULT 1,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -555,6 +562,28 @@ class LocalDbService {
       }
       print('[LocalDb] v11 offline-parity kolonlari eklendi');
     }
+
+    // v12 (8 Tem 2026): COMBO FAZ4 — cached_products combo_* kolonlari. Backend /api/pos/products
+    // combo alanlarini dondurunce POS offline combo hesabi (comboCalculator.dart) calisir. Backend
+    // dondurmese kolonlar NULL/0 -> combo_enabled=0 -> combo KAPALI (mevcut davranis, guvenli).
+    if (oldVersion < 12) {
+      for (final col in [
+        'ALTER TABLE cached_products ADD COLUMN combo_enabled INTEGER DEFAULT 0',
+        'ALTER TABLE cached_products ADD COLUMN combo_required_qty INTEGER',
+        'ALTER TABLE cached_products ADD COLUMN combo_gift_qty INTEGER',
+        'ALTER TABLE cached_products ADD COLUMN combo_gift_mode TEXT',
+        'ALTER TABLE cached_products ADD COLUMN combo_discount_percent REAL',
+        'ALTER TABLE cached_products ADD COLUMN combo_discount_amount REAL',
+        'ALTER TABLE cached_products ADD COLUMN combo_repeat INTEGER DEFAULT 1',
+      ]) {
+        try {
+          await db.execute(col);
+        } catch (e) {
+          print('[LocalDb] v12 kolon zaten var: $e');
+        }
+      }
+      print('[LocalDb] v12 COMBO kolonlari eklendi (cached_products combo_*)');
+    }
   }
 
   // ==================== TRANSACTION RETRY HELPER (19 May 2026) ====================
@@ -653,6 +682,15 @@ class LocalDbService {
           'show_variants_pos': prod['show_variants_pos'] ?? 0,
           'variants': prod['variants'] is String ? prod['variants'] : (prod['variants'] != null ? jsonEncode(prod['variants']) : null),
           'printer_id': prod['printer_id'], // v8: offline mutfak fisi icin
+          // v12 COMBO: backend combo_* dondurunce offline hesap icin sakla. Bool->0/1, sayilar oldugu gibi.
+          // Backend dondurmese hepsi NULL -> combo_enabled 0 -> combo KAPALI (guvenli).
+          'combo_enabled': (prod['combo_enabled'] == true || prod['combo_enabled'] == 1) ? 1 : 0,
+          'combo_required_qty': prod['combo_required_qty'],
+          'combo_gift_qty': prod['combo_gift_qty'],
+          'combo_gift_mode': prod['combo_gift_mode'],
+          'combo_discount_percent': prod['combo_discount_percent'],
+          'combo_discount_amount': prod['combo_discount_amount'],
+          'combo_repeat': (prod['combo_repeat'] == false || prod['combo_repeat'] == 0) ? 0 : 1,
           'cached_at': now,
         });
       }

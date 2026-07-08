@@ -7,6 +7,7 @@ import '../services/printer_service.dart';
 import '../services/log_service.dart';
 import '../services/image_cache_service.dart';
 import '../services/storage_service.dart';
+import '../services/combo_calculator.dart';
 import '../providers/theme_provider.dart';
 import 'kitchen_print_retry_modal.dart';
 
@@ -2819,8 +2820,36 @@ class _AddItemModalState extends State<AddItemModal> {
 
   String? get _ticketDiscountType => _ticketInfo?['discount_type']?.toString();
 
+  /// COMBO FAZ4: adisyondaki combo indirimini hesapla (offline dahil — comboCalculator.dart).
+  /// _products'ta combo_enabled=1 urun yoksa (backend combo dondurmuyorsa) 0 doner (guvenli).
+  /// Online'da backend kapanista kesin hesabi yapar; bu POS onizlemesi/offline uygulamasidir.
+  ComboCartResult get _comboResult {
+    // Aktif (iptal olmayan) kalemler; __combo_gift satirlari calcCartCombos zaten atlar.
+    final cart = <Map<String, dynamic>>[];
+    for (final item in _ticketItems) {
+      if (item['status'] == 'cancelled') continue;
+      cart.add(item);
+    }
+    // combo_enabled urunlerden productsById kur.
+    final byId = <String, Map<String, dynamic>>{};
+    for (final p in _products) {
+      final id = _safeInt(p['id']);
+      if (id == null) continue;
+      final enabled = p['combo_enabled'] == true || p['combo_enabled'] == 1;
+      if (enabled) byId[id.toString()] = p;
+    }
+    if (byId.isEmpty) return ComboCartResult();
+    return ComboCalculator.calcCartCombos(cart, byId);
+  }
+
+  double get _comboDiscount => _comboResult.totalDiscount;
+
   double get _ticketTotal {
-    return _ticketSubtotal - _ticketDiscount;
+    // Combo indirimi manuel indirimle CAKISMAZ: combo aktif urunlerde combo, digerlerinde manuel.
+    // Basit ve guvenli: toplam = subtotal - manuel_indirim - combo_indirim (combo zaten sadece
+    // combo urunlerin set tutarina uygulanir; backend authoritative kesin hesabi kapanista yapar).
+    final t = _ticketSubtotal - _ticketDiscount - _comboDiscount;
+    return t < 0 ? 0 : t;
   }
 
   @override
@@ -3247,6 +3276,27 @@ class _AddItemModalState extends State<AddItemModal> {
                       Text('-${_ticketDiscount.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.red[700])),
                     ],
                   ),
+                  const SizedBox(height: 4),
+                ],
+                // COMBO FAZ4: combo indirim satiri (manuel indirim yoksa ara toplam da goster)
+                if (_comboDiscount > 0) ...[
+                  if (_ticketDiscount <= 0)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Ara Toplam', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                        Text('${_ticketSubtotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                      ],
+                    ),
+                  ..._comboResult.breakdown.where((b) => b.amount > 0).map((b) => Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('Combo (${b.label})',
+                              style: TextStyle(fontSize: 11, color: Colors.orange[800])),
+                          Text('-${b.amount.toStringAsFixed(2)} TL',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.orange[800])),
+                        ],
+                      )),
                   const SizedBox(height: 4),
                 ],
                 Row(

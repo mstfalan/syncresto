@@ -1,10 +1,12 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 import '../services/printer_service.dart';
 import '../services/log_service.dart';
 import '../services/image_cache_service.dart';
+import '../services/storage_service.dart';
 import '../providers/theme_provider.dart';
 import 'kitchen_print_retry_modal.dart';
 
@@ -67,6 +69,7 @@ class _AddItemModalState extends State<AddItemModal> {
   final TextEditingController _searchController = TextEditingController();
   final ImageCacheService _imageCache = ImageCacheService();
   bool _imageCacheReady = false;
+  bool _variantOnTap = false; // ayar: urune tiklayinca varyant secimi acilsin mi
 
   int? _safeInt(dynamic value) {
     if (value == null) return null;
@@ -122,6 +125,11 @@ class _AddItemModalState extends State<AddItemModal> {
     } catch (e) {
       print('[AddItemModal] ImageCache init hatası: $e');
     }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getBool(StorageService.variantOnTapKey) ?? false;
+      if (mounted) setState(() => _variantOnTap = v);
+    } catch (_) {}
     await _loadData();
   }
 
@@ -235,10 +243,91 @@ class _AddItemModalState extends State<AddItemModal> {
     _filterProducts();
   }
 
-  /// Ürüne tıkla → direkt sepete ekle (varyant secimi sepetten "Varyant" butonu ile yapilir)
+  /// Ürüne tıkla → varsayilan: direkt sepete ekle (varyant secimi sepetten "Varyant" butonu ile).
+  /// Ayar 'variantOnTap' ACIK + urun VARYANTLI ise: once varyant dialogu ac, secilen varyantla ekle.
   Future<void> _addProductDirectly(Map<String, dynamic> product) async {
+    if (_variantOnTap) {
+      final variants = (product['variants'] is List) ? product['variants'] as List : const [];
+      if (variants.isNotEmpty) {
+        await _openVariantDialogForProduct(product, variants);
+        return;
+      }
+    }
     _addProductWithPrice(product, product['name']?.toString() ?? '',
       _safeDouble((product['restaurant_price'] != null && product['restaurant_price'] != 0) ? product['restaurant_price'] : product['price']));
+  }
+
+  /// Ayar ACIK iken: urune tiklaninca varyant sec, secilen varyantla sepete EKLE (mevcut item'i
+  /// guncellemez — yeni kalem ekler). Ekleme sonrasi mevcut _addProductWithPrice yolunu kullanir
+  /// (fiyat = baz + varyant modifier), varyant adi note olarak yazilir.
+  Future<void> _openVariantDialogForProduct(Map<String, dynamic> product, List variants) async {
+    final basePrice = _safeDouble(
+      (product['restaurant_price'] != null && product['restaurant_price'] != 0)
+          ? product['restaurant_price']
+          : product['price']);
+    final productName = product['name']?.toString() ?? '';
+    final result = await showDialog<Map<String, dynamic>?>(
+      context: context,
+      builder: (ctx) {
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Container(
+            width: 420,
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(children: [
+                  Expanded(child: Text(productName,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+                  IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx, null)),
+                ]),
+                Text('Varyant secin', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+                const SizedBox(height: 14),
+                _variantOptionTile(
+                  label: '1 Porsiyon',
+                  price: basePrice,
+                  selected: false,
+                  onTap: () => Navigator.pop(ctx, {'variant': null}),
+                  color: Colors.blue[600]!,
+                ),
+                const SizedBox(height: 8),
+                ...variants.map((v) {
+                  final modifier = _safeDouble(v['price_modifier']);
+                  final vname = v['name']?.toString() ?? '';
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _variantOptionTile(
+                      label: vname,
+                      price: basePrice + modifier,
+                      modifier: modifier,
+                      selected: false,
+                      onTap: () => Navigator.pop(ctx, {'variant': v}),
+                      color: Colors.orange[600]!,
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (result == null) return; // iptal
+    final selectedVariant = result['variant'];
+    if (selectedVariant == null) {
+      // 1 Porsiyon (varyantsiz) secildi -> normal ekle
+      _addProductWithPrice(product, productName, basePrice);
+      return;
+    }
+    final mod = _safeDouble(selectedVariant['price_modifier']);
+    final vname = selectedVariant['name']?.toString() ?? '';
+    final label = mod != 0
+        ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)'
+        : vname;
+    // Varyant adi displayName'e -> _addProductWithPrice note olarak yazar (mevcut kalip)
+    _addProductWithPrice(product, '$productName ($label)', basePrice + mod, variantNote: label);
   }
 
   /// Secili sepet item'inin urunu icin varyant kayitlari var mi?
@@ -440,7 +529,8 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
-  Future<void> _addProductWithPrice(Map<String, dynamic> product, String displayName, double price) async {
+  Future<void> _addProductWithPrice(Map<String, dynamic> product, String displayName, double price,
+      {String? variantNote}) async {
     try {
       final productId = _safeInt(product['id']);
       if (productId == null) return;
@@ -462,7 +552,7 @@ class _AddItemModalState extends State<AddItemModal> {
           'quantity': 1,
           'status': 'active',
           'printed': 0,
-          'notes': null,
+          'notes': variantNote,
           'extras': [],
           'skip_pos_print': skipPosPrint,
         });
@@ -484,6 +574,7 @@ class _AddItemModalState extends State<AddItemModal> {
         unitPrice: price,
         extrasAmount: extrasAmount,
         quantity: 1,
+        notes: variantNote,
         waiterId: widget.waiterId,
         clientTempId: tempId,
       ).then((response) {

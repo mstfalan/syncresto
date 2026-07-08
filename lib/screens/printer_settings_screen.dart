@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/printer_service.dart';
 import '../services/api_service.dart';
+import '../services/storage_service.dart';
 import '../providers/theme_provider.dart';
 
 class PrinterSettingsScreen extends StatefulWidget {
@@ -23,6 +25,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   bool _isLoadingFromServer = false;
   List<Map<String, dynamic>> _discoveredPrinters = [];
   List<Map<String, dynamic>> _serverPrinters = []; // Sunucudan gelen yazıcılar
+  bool _variantOnTap = false; // POS davranisi: urune tiklayinca varyant secimi acilsin mi
 
   // Varsayılan yazıcı türleri (ikon ve renk için)
   final Map<String, Map<String, dynamic>> _defaultTypes = {
@@ -48,6 +51,19 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   void initState() {
     super.initState();
     _loadServerPrinters();
+    _loadPosBehaviorPrefs();
+  }
+
+  Future<void> _loadPosBehaviorPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _variantOnTap = prefs.getBool(StorageService.variantOnTapKey) ?? false);
+  }
+
+  Future<void> _setVariantOnTap(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.variantOnTapKey, value);
+    if (mounted) setState(() => _variantOnTap = value);
   }
 
   /// Sunucudan yazıcıları yükle (admin panelden eklenenler)
@@ -114,6 +130,10 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // POS davranış ayarları (cihaz bazlı)
+            _buildPosBehaviorSection(),
+            const SizedBox(height: 16),
+
             // Sunucudan gelen yazıcılar (admin panelden eklenenler)
             if (_serverPrinters.isNotEmpty) ...[
               _buildServerPrintersSection(),
@@ -170,6 +190,39 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                 ),
               ),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// POS davranış ayarları — cihaz bazlı toggle'lar (varyant açılış davranışı vb).
+  Widget _buildPosBehaviorSection() {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 12, bottom: 4),
+              child: Row(children: [
+                Icon(Icons.tune, size: 18, color: Colors.grey[700]),
+                const SizedBox(width: 8),
+                Text('POS Davranışı',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey[700])),
+              ]),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Ürüne tıklayınca varyant seçimi açılsın'),
+              subtitle: const Text(
+                  'Açık: varyantlı ürüne tıklayınca varyant penceresi açılır. '
+                  'Kapalı: ürün direkt sepete eklenir, varyant sağdaki "Varyant" butonundan seçilir.'),
+              value: _variantOnTap,
+              onChanged: _setVariantOnTap,
+            ),
           ],
         ),
       ),

@@ -187,6 +187,18 @@ class StorageService {
     await _prefs.setBool(_showProductImagesKey, value);
   }
 
+  // Urune tiklayinca varyant secimi acilsin mi (default KAPALI = mevcut davranis: direkt sepete).
+  // Acikken varyantli urune tiklaninca varyant dialogu, varyantsiz urun direkt sepete.
+  // Key PUBLIC — printer_settings (yazar) + add_item_modal (okur) ayni prefs anahtarini paylasir.
+  static const String variantOnTapKey = 'variant_dialog_on_tap';
+  Future<bool> getVariantDialogOnTap() async {
+    return _prefs.getBool(variantOnTapKey) ?? false;
+  }
+
+  Future<void> setVariantDialogOnTap(bool value) async {
+    await _prefs.setBool(variantOnTapKey, value);
+  }
+
   // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
   // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
   String getOrderTrackingSort() {

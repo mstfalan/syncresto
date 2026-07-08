@@ -164,6 +164,7 @@ class LanSyncService {
       if (leader == _deviceId) {
         await _localDb.pruneLanTickets(const {});
         await _renewOwnLeases();
+        await _localDb.quarantinePrune();
         return;
       }
       final leaderPeer = _peers[leader];
@@ -193,6 +194,7 @@ class LanSyncService {
         );
       }
       await _localDb.pruneLanTickets(active); // kapanan LAN masalarini temizle
+      await _localDb.quarantinePrune();
     } catch (e) {
       print('[LanSync] Masa senkron hatasi: $e');
     } finally {
@@ -216,9 +218,8 @@ class LanSyncService {
     } catch (_) {}
   }
 
-  /// Istemci: kendi acik masalarini lidere lease_renew ile tazele.
-  /// Demote K3 (defter yayini) tamamlanana kadar MUHURLU — lease yayilmadan yabanci-lease
-  /// teyidi guvenilmez (Fable K2 denetimi). Simdilik SADECE renew, red durumunda log.
+  /// Istemci: kendi acik masalarini lidere lease_renew ile tazele. Red 'held' + yerel foreign-lease
+  /// teyidi -> korumali demote (held, geri donusumlu).
   Future<void> _renewOwnLeasesViaLeader(LanPeer leader) async {
     if (_deviceId == null) return;
     try {
@@ -229,18 +230,24 @@ class LanSyncService {
         if (tid is! int) continue;
         final res = await _sendLeaseMsg(leader, 'lease_renew', tid);
         if (res != null && res['reason'] == 'held') {
-          _demoteCandidate(tid, res['owner']?.toString());
+          await _demoteCandidate(tid, res['owner']?.toString());
         }
       }
     } catch (_) {}
   }
 
-  /// Demote K3'e kadar MUHURLU: lease yayini olmadan yabanci-lease teyidi guvenilmez;
-  /// held sync mekanizmasi da eksik (action isimleri/local_id/un-hold). Simdilik log-only.
-  void _demoteCandidate(int tableId, String? foreignOwner) {
-    _log('lease_demote_candidate',
-        msg: 'masa $tableId lider tarafindan $foreignOwner sahipli bildirildi (demote K3 bekliyor)',
-        warn: true);
+  /// Korumali demote: SADECE yerel defterde karsi-owner'in CANLI lease'i teyit edilirse dusur
+  /// (iki-sinyal: lider 'held' + yerel ledger foreign lease). Teyit yoksa DOKUNMA (gecici titreme /
+  /// lider amnezisi = yanlis-pozitif, veri kaybi yasak Fable S8). demote SILMEZ, held'e alir (un-hold geri donusumlu).
+  Future<void> _demoteCandidate(int tableId, String? foreignOwner) async {
+    if (_deviceId == null) return;
+    try {
+      final hasForeign = await _localDb.hasLiveForeignLease(tableId, _deviceId!);
+      if (hasForeign) {
+        await _localDb.demoteSelfAfterLeaseLost(tableId);
+        _log('lease_demoted', msg: 'masa $tableId $foreignOwner cihazina devredildi (held)', warn: true);
+      }
+    } catch (_) {}
   }
 
   /// Liderden acik masalari cek (state_request). Auth: peer zaten kesifte HMAC-dogrulanmis.
@@ -292,16 +299,22 @@ class LanSyncService {
   Future<bool> claimTable(int tableId, {bool isRenew = false}) async {
     if (!_enabled || _deviceId == null) return true;
     final leader = await _electLeader();
+    bool granted;
     if (leader == _deviceId) {
       final res = await _localDb.tryGrantLease(
         tableId: tableId, claimant: _deviceId!, leaseTtl: leaseTtl, isRenew: isRenew);
-      return res['granted'] == true;
+      granted = res['granted'] == true;
+    } else {
+      final leaderPeer = _peers[leader];
+      if (leaderPeer == null) return true;
+      final res = await _sendLeaseMsg(leaderPeer, isRenew ? 'lease_renew' : 'lease_claim', tableId);
+      if (res == null) return true;
+      granted = res['ok'] == true;
     }
-    final leaderPeer = _peers[leader];
-    if (leaderPeer == null) return true;
-    final res = await _sendLeaseMsg(leaderPeer, isRenew ? 'lease_renew' : 'lease_claim', tableId);
-    if (res == null) return true;
-    return res['ok'] == true;
+    if (granted && !isRenew) {
+      await _localDb.unholdAfterLeaseRegained(tableId);
+    }
+    return granted;
   }
 
   Future<bool> releaseTable(int tableId) async {

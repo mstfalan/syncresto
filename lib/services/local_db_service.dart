@@ -2618,6 +2618,23 @@ class LocalDbService {
     }
   }
 
+  /// demoted masalari temizle: held sync KALMADI (un-hold oldu veya backend'e gitti). Item de silinir
+  /// (yetim birakma — Fable M4). Held varken SILMEZ (veri korunur). prune'dan AYRI (demoted != lan).
+  Future<void> quarantinePrune() async {
+    final db = await database;
+    final demoted = await db.query('local_tickets',
+        columns: ['local_id'], where: "lan_origin = 'demoted'");
+    for (final t in demoted) {
+      final localId = t['local_id'] as int;
+      final held = await db.query('sync_queue',
+          where: "status = 'held' AND (local_id = ? OR CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) = ?)",
+          whereArgs: [localId, localId], limit: 1);
+      if (held.isNotEmpty) continue;
+      await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
+      await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
+    }
+  }
+
   /// Bu cihazin ACIK offline masalarinin ozeti (LAN yayini icin — lider yollar). Sadece lan_origin='self'.
   /// Faz 3 (8 Tem, Fable ORTA-5 fix): owner_device_id/lan_lease_until SELECT'te (Adim 2 yayin icin) ama
   /// filtre 'self'te KALDI — 'lease' placeholder status='lease_hold' oldugundan zaten yakalanmazdi (olu kod).
@@ -2683,7 +2700,7 @@ class LocalDbService {
       final owner = r['owner_device_id']?.toString();
       final leaseStr = r['lan_lease_until']?.toString();
       final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
-      if (origin == 'lan') continue;
+      if (origin == 'lan' || origin == 'demoted') continue;
       if (origin == 'self' && owner == null) return true;
       if (owner == deviceId && leaseUntil != null && leaseUntil.isAfter(now)) return true;
       if (owner == deviceId && leaseUntil == null) return true;
@@ -2769,12 +2786,88 @@ class LocalDbService {
   }
 
   /// Lease kaybedilince tum self masalari 'lan'a dusur + pending sync iptal + damga temizle.
-  /// TAKEOVER DEMOTE — K3'e kadar MUHURLU (Fable K2 denetimi): 'held' mekanizmasi eksik
-  /// (action isimleri gercek kuyrukla uyusmuyor: create/add_item/cancel_item/close/void/mark_*;
-  /// local_id items-tablo cakismasi; un-hold yolu YOK; prune ayni tick'te siler). K3 defter yayini +
-  /// dogru payload-eslemeli held + un-hold ile birlikte yeniden yazilacak. Cagrilirsa sert patlar.
+  /// Bu masanin acik self ticket'larini 'demoted'a dusur + pending sync'lerini 'held'e al
+  /// (SILME YOK -> un-hold ile geri donusumlu, veri kaybi yasak). Ticket-scope held: masa'nin
+  /// tum ticket local_id'leri bulunur; her action turu dogru anahtar ile eslenir (ticket action
+  /// localId IN; add_item payload local_ticket_id; cancel_item items JOIN). lan_origin='demoted'
+  /// prune'dan ayirir (quarantinePrune held cozulunce siler).
   Future<void> demoteSelfAfterLeaseLost(int tableId) async {
-    throw UnsupportedError('demoteSelfAfterLeaseLost K3 tasarimina kadar muhurlu.');
+    final db = await database;
+    await db.transaction((txn) async {
+      final tickets = await txn.query('local_tickets',
+          columns: ['local_id'],
+          where: "table_id = ? AND COALESCE(lan_origin,'self')='self' AND status='open'",
+          whereArgs: [tableId]);
+      if (tickets.isEmpty) return;
+      final ticketIds = tickets.map((t) => t['local_id'] as int).toList();
+      final inClause = ticketIds.join(',');
+
+      await txn.rawUpdate('''
+        UPDATE sync_queue SET status = 'held'
+         WHERE status = 'pending'
+           AND (
+             (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
+             OR (action = 'add_item' AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+             OR (action = 'cancel_item' AND local_id IN (
+                   SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
+           )
+      ''');
+
+      for (final tid in ticketIds) {
+        await txn.update('local_tickets',
+            {'lan_origin': 'demoted', 'owner_device_id': null, 'lan_lease_until': null},
+            where: 'local_id = ?', whereArgs: [tid]);
+      }
+    });
+  }
+
+  /// Masa tekrar bize gecince (un-hold): 'demoted' ticket'i 'self'e geri al + held sync'leri
+  /// 'pending'e dondur (backend'e gider). Veri kaybi yasak -> geri donus yolu.
+  Future<void> unholdAfterLeaseRegained(int tableId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final tickets = await txn.query('local_tickets',
+          columns: ['local_id'],
+          where: "table_id = ? AND lan_origin = 'demoted' AND status='open'",
+          whereArgs: [tableId]);
+      if (tickets.isEmpty) return;
+      final ticketIds = tickets.map((t) => t['local_id'] as int).toList();
+      final inClause = ticketIds.join(',');
+      await txn.rawUpdate('''
+        UPDATE sync_queue SET status = 'pending'
+         WHERE status = 'held'
+           AND (
+             (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
+             OR (action = 'add_item' AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+             OR (action = 'cancel_item' AND local_id IN (
+                   SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
+           )
+      ''');
+      for (final tid in ticketIds) {
+        await txn.update('local_tickets', {'lan_origin': 'self'},
+            where: 'local_id = ?', whereArgs: [tid]);
+      }
+    });
+  }
+
+  /// Bu masada BASKA cihazin CANLI lease'i (lan yansimasi, lease_until>now) var mi.
+  /// Korumali demote karari icin (Fable S8 veri kaybi yasak — teyit yoksa demote edilmez).
+  /// K3 ile calisir: ledger yayini lan satirlarina gercek owner+lease tasir.
+  Future<bool> hasLiveForeignLease(int tableId, String myDeviceId) async {
+    final db = await database;
+    final rows = await db.query('local_tickets',
+        columns: ['owner_device_id', 'lan_lease_until'],
+        where: "table_id = ? AND lan_origin IN ('lan','lease')", whereArgs: [tableId]);
+    final now = DateTime.now();
+    for (final r in rows) {
+      final owner = r['owner_device_id']?.toString();
+      final leaseStr = r['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      if (owner != null && owner != myDeviceId && leaseUntil != null && leaseUntil.isAfter(now)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// v11 (7 Tem 2026): Masa takip ekrani offline kaynagi. Acik masalarin (mirror + offline-acilan)

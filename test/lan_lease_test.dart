@@ -26,6 +26,12 @@ Future<Database> _openTestDb() async {
     )
   ''');
   await db.execute('''
+    CREATE TABLE local_ticket_items (
+      local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      local_ticket_id INTEGER
+    )
+  ''');
+  await db.execute('''
     CREATE TABLE sync_queue (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
@@ -59,7 +65,7 @@ Future<bool> canWriteTable(Database db, int tableId, String deviceId, {required 
     final owner = r['owner_device_id']?.toString();
     final leaseStr = r['lan_lease_until']?.toString();
     final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
-    if (origin == 'lan') continue;
+    if (origin == 'lan' || origin == 'demoted') continue;
     if (origin == 'self' && owner == null) return true;
     if (owner == deviceId && leaseUntil != null && leaseUntil.isAfter(now)) return true;
     if (owner == deviceId && leaseUntil == null) return true;
@@ -117,19 +123,65 @@ Future<Map<String, dynamic>> tryGrantLease(Database db,
 
 Future<void> demoteSelfAfterLeaseLost(Database db, int tableId) async {
   await db.transaction((txn) async {
-    final rows = await txn.query('local_tickets',
+    final tickets = await txn.query('local_tickets',
         columns: ['local_id'], where: "table_id = ? AND COALESCE(lan_origin,'self')='self' AND status='open'",
         whereArgs: [tableId]);
-    for (final row in rows) {
-      final localId = row['local_id'];
-      await txn.update('sync_queue', {'status': 'held'},
-          where: "local_id = ? AND status = 'pending' AND action IN ('create_ticket','add_item','update_item','delete_item','close_ticket','void_ticket')",
-          whereArgs: [localId]);
+    if (tickets.isEmpty) return;
+    final ticketIds = tickets.map((t) => t['local_id'] as int).toList();
+    final inClause = ticketIds.join(',');
+    await txn.rawUpdate("""
+      UPDATE sync_queue SET status = 'held'
+       WHERE status = 'pending'
+         AND (
+           (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
+           OR (action = 'add_item' AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+           OR (action = 'cancel_item' AND local_id IN (
+                 SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
+         )
+    """);
+    for (final tid in ticketIds) {
       await txn.update('local_tickets',
-          {'lan_origin': 'lan', 'owner_device_id': null, 'lan_lease_until': null},
-          where: 'local_id = ?', whereArgs: [localId]);
+          {'lan_origin': 'demoted', 'owner_device_id': null, 'lan_lease_until': null},
+          where: 'local_id = ?', whereArgs: [tid]);
     }
   });
+}
+
+Future<void> unholdAfterLeaseRegained(Database db, int tableId) async {
+  await db.transaction((txn) async {
+    final tickets = await txn.query('local_tickets',
+        columns: ['local_id'], where: "table_id = ? AND lan_origin = 'demoted' AND status='open'",
+        whereArgs: [tableId]);
+    if (tickets.isEmpty) return;
+    final ticketIds = tickets.map((t) => t['local_id'] as int).toList();
+    final inClause = ticketIds.join(',');
+    await txn.rawUpdate("""
+      UPDATE sync_queue SET status = 'pending'
+       WHERE status = 'held'
+         AND (
+           (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
+           OR (action = 'add_item' AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+           OR (action = 'cancel_item' AND local_id IN (
+                 SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
+         )
+    """);
+    for (final tid in ticketIds) {
+      await txn.update('local_tickets', {'lan_origin': 'self'}, where: 'local_id = ?', whereArgs: [tid]);
+    }
+  });
+}
+
+Future<void> quarantinePrune(Database db) async {
+  final demoted = await db.query('local_tickets', columns: ['local_id'], where: "lan_origin = 'demoted'");
+  for (final t in demoted) {
+    final localId = t['local_id'] as int;
+    final held = await db.query('sync_queue',
+        where: "status = 'held' AND (local_id = ? OR CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) = ?)",
+        whereArgs: [localId, localId], limit: 1);
+    if (held.isNotEmpty) continue;
+    await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
+    await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
+  }
 }
 
 Future<List<Map<String, dynamic>>> getLanLedgerForBroadcast(Database db) async {
@@ -229,23 +281,41 @@ void main() {
     });
   });
 
-  group('G4 demote (K3 tasarimina ertelendi — demote MUHURLU)', () {
-    // demote gövdesi K3'te dogru action-isimleri/payload-esleme/un-hold ile yeniden yazilacak
-    test('self->lan + pending sync IPTAL (in_progress korunur) + damga temizlenir', () async {
+  group('demote + held (K3, dogru action-esleme)', () {
+    test('create/add_item/cancel_item held\'e alinir (SILINMEZ), ticket demoted', () async {
       await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
       final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
-      await db.insert('sync_queue', {'action': 'create_ticket', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
-      await db.insert('sync_queue', {'action': 'add_item', 'entity_type': 'item', 'local_id': tid, 'payload': '{}', 'status': 'in_progress', 'created_at': DateTime.now().toIso8601String()});
+      await db.insert('local_ticket_items', {'local_ticket_id': tid});
+      final itemId = (await db.query('local_ticket_items')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
+      await db.insert('sync_queue', {'action': 'add_item', 'entity_type': 'ticket_item', 'local_id': itemId, 'payload': '{"local_ticket_id":$tid}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
+      await db.insert('sync_queue', {'action': 'cancel_item', 'entity_type': 'ticket_item', 'local_id': itemId, 'payload': '{"local_item_id":$itemId}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
       await demoteSelfAfterLeaseLost(db, 7);
-      expect((await db.query('sync_queue', where: "local_id=$tid AND status='pending'")).isEmpty, true);
-      expect((await db.query('sync_queue', where: "local_id=$tid AND status='held'")).length, 1);
-      expect((await db.query('sync_queue', where: "local_id=$tid AND status='in_progress'")).length, 1);
+      expect((await db.query('sync_queue', where: "status='pending'")).isEmpty, true, reason: 'hepsi held olmali (cancel_item kacagi yok)');
+      expect((await db.query('sync_queue', where: "status='held'")).length, 3);
       final t = (await db.query('local_tickets', where: 'table_id=7')).first;
-      expect(t['lan_origin'], 'lan');
+      expect(t['lan_origin'], 'demoted');
       expect(t['owner_device_id'], null);
-      expect(t['lan_lease_until'], null);
     });
-    test('K4b: ayni masada 2 self ticket -> IKISI de demote', () async {
+    test('in_progress KORUNUR (yarida kesilmez)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A'});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'close', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'in_progress', 'created_at': DateTime.now().toIso8601String()});
+      await demoteSelfAfterLeaseLost(db, 7);
+      expect((await db.query('sync_queue', where: "status='in_progress'")).length, 1);
+    });
+    test('un-hold: demoted->self + held->pending (veri kaybi YOK)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
+      await demoteSelfAfterLeaseLost(db, 7);
+      expect((await db.query('local_tickets', where: 'table_id=7')).first['lan_origin'], 'demoted');
+      await unholdAfterLeaseRegained(db, 7);
+      expect((await db.query('local_tickets', where: 'table_id=7')).first['lan_origin'], 'self');
+      expect((await db.query('sync_queue', where: "status='pending'")).length, 1, reason: 'held->pending geri dondu');
+      expect((await db.query('sync_queue', where: "status='held'")).isEmpty, true);
+    });
+    test('K4b: ayni masada 2 self ticket -> IKISI de demoted', () async {
       await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-A', 'table_id': 7, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A'});
       await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-B', 'table_id': 7, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A'});
       await demoteSelfAfterLeaseLost(db, 7);
@@ -268,6 +338,24 @@ void main() {
       await db.insert('local_tickets', {'ticket_number': 'OFFLINE-5-A', 'table_id': 5, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': past(10)});
       final led = await getLanLedgerForBroadcast(db);
       expect(led.first['lease_ms'], 0);
+    });
+  });
+
+  group('quarantinePrune (failover temizlik)', () {
+    test('held VARKEN demoted masa SILINMEZ (veri korunur)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'held', 'created_at': DateTime.now().toIso8601String()});
+      await quarantinePrune(db);
+      expect((await db.query('local_tickets', where: 'table_id=7')).isNotEmpty, true);
+    });
+    test('held YOKSA demoted masa + item silinir (yetim yok)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('local_ticket_items', {'local_ticket_id': tid});
+      await quarantinePrune(db);
+      expect((await db.query('local_tickets', where: 'table_id=7')).isEmpty, true);
+      expect((await db.query('local_ticket_items', where: 'local_ticket_id=$tid')).isEmpty, true);
     });
   });
 }

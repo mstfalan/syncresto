@@ -534,10 +534,15 @@ class _AddItemModalState extends State<AddItemModal> {
     // within/percent/amount'ta giftCount=0 -> hepsi eklenir. Statik+test edilebilir yardimci.
     final giftCount = (giftMode == 'extra') ? giftPerSet * setCount : 0;
     final paidPicks = ComboCalculator.paidPicksAfterGift(picks, giftCount);
-    for (final p in paidPicks) {
+    // FIYAT BOLME (Mustafa): odenen kalemler ₺0 ise (varyant kanal-modifier -> 0) ana kart fiyatini
+    // odenen kalemlere ESIT bol -> ₺0 kalem/ciro kaybi olmaz. Gercek fiyatli varyant varsa dokunmaz.
+    final paidPrices = paidPicks.map((p) => p['price'] as double).toList();
+    final splitPrices = ComboCalculator.splitBasePriceIfZero(paidPrices, basePrice);
+    for (int i = 0; i < paidPicks.length; i++) {
+      final p = paidPicks[i];
       final note = p['note'] as String?;
       final display = note != null ? '$productName ($note)' : productName;
-      _addProductWithPrice(product, display, p['price'] as double, variantNote: note);
+      _addProductWithPrice(product, display, splitPrices[i], variantNote: note);
     }
   }
 

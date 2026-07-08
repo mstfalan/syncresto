@@ -81,6 +81,24 @@ class ComboCartResult {
 }
 
 class ComboCalculator {
+  /// COMBO FIYAT BOLME (POS): secilen odenen kalemlerin fiyati 0 ise (varyantlar kanal-modifier ile
+  /// ₺0 olmus, combo paketi ana kartta fiyatli) ana kart fiyatini kalemlere ESIT bol (Mustafa: "fiyat 0
+  /// ise ana kartin fiyatini yaz ve eklenen urunlere bol ki hata olmasin"). Kurus kalani SON kaleme
+  /// eklenir (toplam = ana fiyat, ₺0 kalem/ciro kaybi YOK). Kalemlerden en az biri 0-DISI ise (gercek
+  /// fiyatli) DOKUNMA (kendi fiyatlariyla kalir). Girdi: kalem fiyatlari + ana fiyat. Doner: yeni fiyatlar.
+  static List<double> splitBasePriceIfZero(List<double> prices, double basePrice) {
+    if (prices.isEmpty) return prices;
+    final anyNonZero = prices.any((p) => p != 0);
+    if (anyNonZero || basePrice <= 0) return List<double>.from(prices); // gercek fiyat var -> dokunma
+    final n = prices.length;
+    final each = _round2(basePrice / n);
+    final out = List<double>.filled(n, each);
+    // Kurus kalani son kaleme (toplam tam = basePrice).
+    final diff = _round2(basePrice - each * n);
+    out[n - 1] = _round2(out[n - 1] + diff);
+    return out;
+  }
+
   /// COMBO SECIM EKRANI yardimcisi (POS extra modu): kullanici N+G varyant secer; sepete SADECE N
   /// odenen kalem eklenir, en ucuz G HEDIYE slotu EKLENMEZ (backend close giftLines ile uretir —
   /// panel/web birebir, cifte-hediye onler). Girdi: her pick {..., 'price': double}. Doner: odenen

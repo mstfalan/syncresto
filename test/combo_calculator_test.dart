@@ -152,4 +152,30 @@ void main() {
       expect(paid.length, 2, reason: 'sadece 1 hediye cikar');
     });
   });
+
+  group('splitBasePriceIfZero — combo ₺0 varyant ana fiyati bol', () {
+    test('hepsi 0, N=2, ana 940 -> her kalem 470', () {
+      final r = ComboCalculator.splitBasePriceIfZero([0.0, 0.0], 940);
+      expect(r, [470.0, 470.0]);
+      expect(r.reduce((a, b) => a + b), 940.0);
+    });
+    test('kurus kalani son kaleme (940/3)', () {
+      final r = ComboCalculator.splitBasePriceIfZero([0.0, 0.0, 0.0], 940);
+      expect(r.reduce((a, b) => a + b), 940.0, reason: 'toplam tam = ana fiyat');
+      expect(r[0], 313.33);
+      expect(r[2], closeTo(313.34, 0.001), reason: 'kalan son kaleme');
+    });
+    test('gercek fiyatli varyant VARSA dokunma', () {
+      final r = ComboCalculator.splitBasePriceIfZero([200.0, 0.0], 940);
+      expect(r, [200.0, 0.0], reason: '0-disi fiyat var -> bolme yok, kendi fiyatlariyla');
+    });
+    test('ana fiyat 0/negatif -> dokunma (guard)', () {
+      final r = ComboCalculator.splitBasePriceIfZero([0.0, 0.0], 0);
+      expect(r, [0.0, 0.0]);
+    });
+    test('tek kalem 0, ana 940 -> 940', () {
+      final r = ComboCalculator.splitBasePriceIfZero([0.0], 940);
+      expect(r, [940.0]);
+    });
+  });
 }

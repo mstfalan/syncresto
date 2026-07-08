@@ -1,30 +1,52 @@
-// This is a basic Flutter widget test.
+// SyncResto POS smoke test.
 //
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// Eski Flutter boilerplate (MyApp counter) bu projeye ait degildi ve paket adi
+// greenchef_pos -> syncresto_pos degistiginden derlenmiyordu. Yerine tema sistemi
+// (ThemeProvider saf/static yardimcilari) icin bagimliliksiz gercek testler.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:greenchef_pos/main.dart';
+import 'package:syncresto_pos/providers/theme_provider.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  group('ThemeProvider.parseColor', () {
+    test('6-hane hex (# ile) -> dogru Color', () {
+      expect(ThemeProvider.parseColor('#dc2626', Colors.black), const Color(0xFFDC2626));
+    });
+    test('6-hane hex (# olmadan) -> dogru Color', () {
+      expect(ThemeProvider.parseColor('2563eb', Colors.black), const Color(0xFF2563EB));
+    });
+    test('3-hane hex genisletilir', () {
+      expect(ThemeProvider.parseColor('#f00', Colors.black), const Color(0xFFFF0000));
+    });
+    test('null/bos/gecersiz -> default doner', () {
+      const def = Color(0xFF123456);
+      expect(ThemeProvider.parseColor(null, def), def);
+      expect(ThemeProvider.parseColor('', def), def);
+      expect(ThemeProvider.parseColor('zzz-not-hex', def), def);
+    });
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  group('ThemeProvider.generateSecondary', () {
+    test('primary den daha koyu ton uretir', () {
+      final primary = HSLColor.fromColor(const Color(0xFF2563EB));
+      final secondary = HSLColor.fromColor(ThemeProvider.generateSecondary(const Color(0xFF2563EB)));
+      expect(secondary.lightness, lessThan(primary.lightness));
+    });
+  });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  group('ThemeProvider varsayilanlar', () {
+    test('yeni provider SyncResto mavisi + marka ile baslar', () {
+      final tp = ThemeProvider();
+      expect(tp.primaryColor, const Color(0xFF2563EB));
+      expect(tp.brandName, 'SyncResto POS');
+      expect(tp.brandLogoUrl, isNull);
+    });
+    test('backgroundGradient primary + daha koyu tonu icerir', () {
+      final tp = ThemeProvider();
+      final g = tp.backgroundGradient;
+      expect(g.colors.length, 2);
+      expect(g.colors.first, tp.primaryColor);
+    });
   });
 }

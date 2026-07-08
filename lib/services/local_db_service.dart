@@ -2618,18 +2618,53 @@ class LocalDbService {
     }
   }
 
-  /// demoted masalari temizle: held sync KALMADI (un-hold oldu veya backend'e gitti). Item de silinir
-  /// (yetim birakma — Fable M4). Held varken SILMEZ (veri korunur). prune'dan AYRI (demoted != lan).
+  /// K-1 FAILOVER: lider dalinda pruneLanTickets(const{}) yerine cagirilir. lan yansimalarindan
+  /// CANLI foreign lease tasiyanlari (owner + lease_until>now) 'lease' placeholder'a DONUSTURUR —
+  /// bunlar devralinan lease defteri kopyasi; yeni lider oldu(k)gumuzda bu masalarin korumasini
+  /// surdurmeliyiz (yoksa cift adisyon: eski lider oldu, biz defteri sildik, cihaz C bos gorup ikinci
+  /// adisyon acar). 'lease'e cevirmek: (1) getLanLedgerForBroadcast bunu yayar -> diger istemciler de
+  /// gorur; (2) tryGrantLease/canWriteTable/hasLiveForeignLease 'lease'i canli lease sayar. Gercek
+  /// sahibi renew gonderince lider myRow bulup yeniler. SADECE lease'siz yansimalar (kapanmis/damgasiz
+  /// mirror) SILINIR.
+  Future<void> pruneLanReflectionsKeepLeases() async {
+    final db = await database;
+    final now = DateTime.now();
+    final all = await db.query('local_tickets',
+        columns: ['local_id', 'owner_device_id', 'lan_lease_until', 'status'],
+        where: "lan_origin = 'lan'");
+    for (final t in all) {
+      final owner = t['owner_device_id']?.toString();
+      final leaseStr = t['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      final liveLease = owner != null && owner.isNotEmpty && leaseUntil != null && leaseUntil.isAfter(now);
+      if (liveLease) {
+        // Devralinan defter kopyasi — 'lease' placeholder'a cevir (yayilir + lease sayilir).
+        // status='open' kalir (gercek dolu masa); ledger 'open'+'lease_hold' ikisini de yayar.
+        await db.update('local_tickets', {'lan_origin': 'lease'},
+            where: 'local_id = ?', whereArgs: [t['local_id']]);
+        continue;
+      }
+      await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [t['local_id']]);
+    }
+  }
+
+  /// demoted masalari temizle: teslim edilecek sync KALMADI (reconcile pending'e aldi + backend'e gitti,
+  /// veya un-hold oldu). Item de silinir (yetim birakma — Fable M4). Engel: held VEYA pending VEYA
+  /// in_progress sync (O-2: pending delete_item/update_item de teslim bekliyor, silinirse dead_letter =
+  /// iptal/ekleme backend'e hic gitmez). Ticket-scope: local_id=ticket VEYA payload local_ticket_id.
+  /// prune'dan AYRI (demoted != lan).
   Future<void> quarantinePrune() async {
     final db = await database;
     final demoted = await db.query('local_tickets',
         columns: ['local_id'], where: "lan_origin = 'demoted'");
     for (final t in demoted) {
       final localId = t['local_id'] as int;
-      final held = await db.query('sync_queue',
-          where: "status = 'held' AND (local_id = ? OR CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) = ?)",
-          whereArgs: [localId, localId], limit: 1);
-      if (held.isNotEmpty) continue;
+      final pending = await db.query('sync_queue',
+          where: "status IN ('held','pending','in_progress') "
+              "AND (local_id = ? OR CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) = ? "
+              "OR local_id IN (SELECT local_id FROM local_ticket_items WHERE local_ticket_id = ?))",
+          whereArgs: [localId, localId, localId], limit: 1);
+      if (pending.isNotEmpty) continue;
       await db.delete('local_ticket_items', where: 'local_ticket_id = ?', whereArgs: [localId]);
       await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [localId]);
     }
@@ -2802,16 +2837,8 @@ class LocalDbService {
       final ticketIds = tickets.map((t) => t['local_id'] as int).toList();
       final inClause = ticketIds.join(',');
 
-      await txn.rawUpdate('''
-        UPDATE sync_queue SET status = 'held'
-         WHERE status = 'pending'
-           AND (
-             (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
-             OR (action = 'add_item' AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
-             OR (action = 'cancel_item' AND local_id IN (
-                   SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
-           )
-      ''');
+      await txn.rawUpdate(
+          "UPDATE sync_queue SET status = 'held' WHERE status = 'pending' AND ${_ticketScopeSyncClause(inClause)}");
 
       for (final tid in ticketIds) {
         await txn.update('local_tickets',
@@ -2821,33 +2848,48 @@ class LocalDbService {
     });
   }
 
-  /// Masa tekrar bize gecince (un-hold): 'demoted' ticket'i 'self'e geri al + held sync'leri
-  /// 'pending'e dondur (backend'e gider). Veri kaybi yasak -> geri donus yolu.
-  Future<void> unholdAfterLeaseRegained(int tableId) async {
+  /// Ticket-scope sync eslesmesi (demote/un-hold ortak). Ticket action'lari local_id=ticket;
+  /// item action'lari (add/update/delete_item) payload'da local_ticket_id tasir (Fable O-1);
+  /// cancel_item olu ama JOIN ile kapali. $inClause = virgullu ticket local_id listesi.
+  String _ticketScopeSyncClause(String inClause) => """
+    (
+      (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
+      OR (action IN ('add_item','update_item','delete_item')
+            AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+      OR (action = 'cancel_item' AND local_id IN (
+            SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
+    )
+  """;
+
+  /// K-3 RECONCILIATION: teslim edilmemis held sync'leri backend'e KURTAR. openTicket un-hold
+  /// yapmadigindan (K-2), demote edilmis masalar bu supurucu ile teslim edilir. Kosul: masada artik
+  /// BASKA cihazin CANLI foreign lease'i YOK (garson devretmedi/geri aldi) -> held->pending. Ticket
+  /// sync edilebilir kalir (lan_origin='self' damgasiz) ama masa oturumu olarak sahiplenilmez —
+  /// yeni oturum openTicket ile AYRI acilir, karismaz. Backend masa-bazli merge iki kaydi ayirir.
+  /// flag-OFF'ta da cagirilabilir (foreign lease yoksa hepsini teslim eder = kill-switch guvenli).
+  /// Donen: teslime alinan (pending'e donen) sync sayisi (0 = is yok).
+  Future<int> reconcileHeldSyncs(String myDeviceId) async {
     final db = await database;
-    await db.transaction((txn) async {
-      final tickets = await txn.query('local_tickets',
-          columns: ['local_id'],
-          where: "table_id = ? AND lan_origin = 'demoted' AND status='open'",
-          whereArgs: [tableId]);
-      if (tickets.isEmpty) return;
-      final ticketIds = tickets.map((t) => t['local_id'] as int).toList();
-      final inClause = ticketIds.join(',');
-      await txn.rawUpdate('''
-        UPDATE sync_queue SET status = 'pending'
-         WHERE status = 'held'
-           AND (
-             (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
-             OR (action = 'add_item' AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
-             OR (action = 'cancel_item' AND local_id IN (
-                   SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
-           )
-      ''');
-      for (final tid in ticketIds) {
-        await txn.update('local_tickets', {'lan_origin': 'self'},
-            where: 'local_id = ?', whereArgs: [tid]);
-      }
-    });
+    final demoted = await db.query('local_tickets',
+        columns: ['local_id', 'table_id'], where: "lan_origin = 'demoted'");
+    int released = 0;
+    for (final t in demoted) {
+      final localId = t['local_id'] as int;
+      final tableId = t['table_id'] as int?;
+      // Masada canli foreign lease hala varsa DOKUNMA (garson karsi kasada aktif calisiyor).
+      if (tableId != null && await hasLiveForeignLease(tableId, myDeviceId)) continue;
+      final inClause = '$localId';
+      final n = await db.rawUpdate(
+          "UPDATE sync_queue SET status = 'pending' WHERE status = 'held' AND ${_ticketScopeSyncClause(inClause)}");
+      // Teslime alindi: ticket'i sync edilebilir birak (damgasiz self), oturum sahiplenme YOK.
+      await db.update('local_tickets', {'lan_origin': 'self'},
+          where: 'local_id = ?', whereArgs: [localId]);
+      released += n;
+    }
+    if (released > 0) {
+      print('[LanSync] reconcileHeldSyncs: $released held sync backend teslimine alindi');
+    }
+    return released;
   }
 
   /// Bu masada BASKA cihazin CANLI lease'i (lan yansimasi, lease_until>now) var mi.

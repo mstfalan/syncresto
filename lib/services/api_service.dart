@@ -849,6 +849,15 @@ class ApiService {
     }
   }
 
+  /// O-4: masa kapaninca LAN lease'ini serbest birak (best-effort). tableId null ise no-op.
+  /// SADECE kapatma/void BASARILI olunca cagirilmali (yoksa erken serbest = baska kasa girer).
+  Future<void> _releaseLanLease(int? tableId) async {
+    if (tableId == null) return;
+    final lan = LanSyncService();
+    if (!lan.enabled) return;
+    try { await lan.releaseTable(tableId); } catch (_) {}
+  }
+
   Future<Map<String, dynamic>> closeTicket({
     required int ticketId,
     required String paymentMethod,
@@ -894,6 +903,7 @@ class ApiService {
               waiterId: waiterId ?? 1,
             );
           }
+          await _releaseLanLease(localTicket?['table_id'] as int?); // O-4
         }
         return response.data;
       } on DioException catch (e) {
@@ -926,6 +936,7 @@ class ApiService {
       if (_connectivity.isOnline) {
         _syncService.syncPendingItems();
       }
+      await _releaseLanLease(localTicket['table_id'] as int?); // O-4
       return {'success': true, 'offline': true};
     }
 
@@ -990,6 +1001,7 @@ class ApiService {
             // Not: voidLocalTicket sync_queue'ya 'void' ekledi, ama biz online basardik. Yine kalsin
             // (sync_service zaten server_id varsa skip eder).
           }
+          await _releaseLanLease(localTicket?['table_id'] as int?); // O-4
         }
         return response.data;
       } on DioException catch (e) {
@@ -1017,6 +1029,7 @@ class ApiService {
       if (_connectivity.isOnline) {
         _syncService.syncPendingItems();
       }
+      await _releaseLanLease(localTicket['table_id'] as int?); // O-4
       return {'success': true, 'offline': true};
     }
 

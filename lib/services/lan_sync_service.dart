@@ -162,8 +162,9 @@ class LanSyncService {
     try {
       final leader = await _electLeader();
       if (leader == _deviceId) {
-        await _localDb.pruneLanTickets(const {});
+        await _localDb.pruneLanReflectionsKeepLeases(); // K-1: lease tasiyan defter kopyasi KORUNUR
         await _renewOwnLeases();
+        await _localDb.reconcileHeldSyncs(_deviceId!); // K-3: teslim edilmemis held -> backend
         await _localDb.quarantinePrune();
         return;
       }
@@ -194,6 +195,7 @@ class LanSyncService {
         );
       }
       await _localDb.pruneLanTickets(active); // kapanan LAN masalarini temizle
+      await _localDb.reconcileHeldSyncs(_deviceId!); // K-3: teslim edilmemis held -> backend
       await _localDb.quarantinePrune();
     } catch (e) {
       print('[LanSync] Masa senkron hatasi: $e');
@@ -311,9 +313,9 @@ class LanSyncService {
       if (res == null) return true;
       granted = res['ok'] == true;
     }
-    if (granted && !isRenew) {
-      await _localDb.unholdAfterLeaseRegained(tableId);
-    }
+    // NOT: un-hold ARTIK burada yapilmiyor (K-2). openTicket = HER ZAMAN temiz yeni oturum;
+    // eski demote edilmis held sync'ler _reconcileHeldSyncs (arka plan) ile teslim edilir,
+    // dirilip yeni oturuma karismaz. Backend masa-bazli merge iki kaydi dogru ayirir.
     return granted;
   }
 
@@ -778,6 +780,12 @@ class LanSyncService {
         await _reloadPrefs();
         await _start();
       } else {
+        // K-3 kill-switch: flag kapatilmadan ONCE held sync'leri backend'e KURTAR (yoksa demote
+        // edilmis satislar kalici mühürlenip sessiz ciro kaybi olur). _deviceId null ise (hic
+        // baslamamis) reconcile bos doner — guvenli. Sonra dispose LAN yansimalarini temizler.
+        if (_deviceId != null) {
+          await _localDb.reconcileHeldSyncs(_deviceId!).catchError((_) => 0);
+        }
         dispose();
       }
       print('[LanSync] setEnabled=$value');

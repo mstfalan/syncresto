@@ -194,8 +194,13 @@ class LanSyncService {
       await _renewOwnLeasesViaLeader(leaderPeer);
       final tickets = await _fetchLeaderTables(leaderPeer);
       if (tickets == null) return; // lidere ulasilamadi -> mevcut LAN masalari kalsin
+      // ORTA (Fable 4. tur bulgu-5): fetch async'i sirasinda flag kapatilmis olabilir (setEnabled(false)
+      // -> dispose -> clearAllLanReflections zaten kostu). Simdi upsert edersek kalinti 'lan' satiri
+      // restart'a kadar masayi kilitli gosterir. Flag OFF ise HIC yazma.
+      if (!_enabled) return;
       final active = <String>{};
       for (final t in tickets) {
+        if (!_enabled) return; // dispose ortada geldiyse yeni 'lan' satiri yazma (bulgu-5)
         final tn = t['ticket_number']?.toString();
         final tid = t['table_id'];
         if (tn == null || tid is! int) continue;
@@ -821,7 +826,11 @@ class LanSyncService {
         if (_deviceId != null) {
           await _localDb.reconcileHeldSyncs(_deviceId!).catchError((_) => 0);
         }
-        dispose();
+        dispose(); // timer iptal + fire-forget clearAllLanReflections
+        // Bulgu-5 kesin garanti: dispose'un fire-forget temizligi ucustaki sync ile yarisabilir.
+        // _enabled=false artik _runTableSync upsert'ini erken kestiginden, burada AWAIT'li ikinci
+        // temizlik son kalinti 'lan'/'lease' satirini deterministik siler (flag OFF hayalet masa yok).
+        await _localDb.clearAllLanReflections().catchError((_) {});
       }
       print('[LanSync] setEnabled=$value');
     } catch (e) {

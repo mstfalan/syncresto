@@ -2736,22 +2736,12 @@ class LocalDbService {
   }
 
   /// Lease kaybedilince tum self masalari 'lan'a dusur + pending sync iptal + damga temizle.
+  /// TAKEOVER DEMOTE — K3'e kadar MUHURLU (Fable K2 denetimi): 'held' mekanizmasi eksik
+  /// (action isimleri gercek kuyrukla uyusmuyor: create/add_item/cancel_item/close/void/mark_*;
+  /// local_id items-tablo cakismasi; un-hold yolu YOK; prune ayni tick'te siler). K3 defter yayini +
+  /// dogru payload-eslemeli held + un-hold ile birlikte yeniden yazilacak. Cagrilirsa sert patlar.
   Future<void> demoteSelfAfterLeaseLost(int tableId) async {
-    final db = await database;
-    await db.transaction((txn) async {
-      final rows = await txn.query('local_tickets',
-          columns: ['local_id'], where: "table_id = ? AND COALESCE(lan_origin,'self')='self' AND status='open'",
-          whereArgs: [tableId]); // K4b: TUM self satirlar (limit YOK)
-      for (final row in rows) {
-        final localId = row['local_id'];
-        await txn.delete('sync_queue',
-            where: "local_id = ? AND status = 'pending' AND action IN ('create_ticket','add_item','update_item','delete_item','close_ticket','void_ticket')",
-            whereArgs: [localId]);
-        await txn.update('local_tickets',
-            {'lan_origin': 'lan', 'owner_device_id': null, 'lan_lease_until': null},
-            where: 'local_id = ?', whereArgs: [localId]);
-      }
-    });
+    throw UnsupportedError('demoteSelfAfterLeaseLost K3 tasarimina kadar muhurlu.');
   }
 
   /// v11 (7 Tem 2026): Masa takip ekrani offline kaynagi. Acik masalarin (mirror + offline-acilan)

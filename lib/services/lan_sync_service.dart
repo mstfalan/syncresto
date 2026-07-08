@@ -166,14 +166,12 @@ class LanSyncService {
         await _renewOwnLeases();
         return;
       }
-      // ISTEMCIYIZ: liderden acik masalari CEK ve lokale yansit (lan_origin='lan').
       final leaderPeer = _peers[leader];
       if (leaderPeer == null) {
-        // 🔴 7 Tem (Fable K2): lider secilemedi ama peer var -> eski liderin LAN masalari hayalet
-        // kalmasin. Ulasilamayan lidere ait yansimalari temizle.
         await _localDb.pruneLanTickets(const {});
         return;
       }
+      await _renewOwnLeasesViaLeader(leaderPeer);
       final tickets = await _fetchLeaderTables(leaderPeer);
       if (tickets == null) return; // lidere ulasilamadi -> mevcut LAN masalari kalsin
       final active = <String>{};
@@ -213,6 +211,33 @@ class LanSyncService {
         }
       }
     } catch (_) {}
+  }
+
+  /// Istemci: kendi acik masalarini lidere lease_renew ile tazele.
+  /// Demote K3 (defter yayini) tamamlanana kadar MUHURLU — lease yayilmadan yabanci-lease
+  /// teyidi guvenilmez (Fable K2 denetimi). Simdilik SADECE renew, red durumunda log.
+  Future<void> _renewOwnLeasesViaLeader(LanPeer leader) async {
+    if (_deviceId == null) return;
+    try {
+      final mine = await _localDb.getSelfOpenTicketsForLan();
+      for (final t in mine) {
+        final tid = t['table_id'];
+        if (t['owner_device_id']?.toString() != _deviceId) continue;
+        if (tid is! int) continue;
+        final res = await _sendLeaseMsg(leader, 'lease_renew', tid);
+        if (res != null && res['reason'] == 'held') {
+          _demoteCandidate(tid, res['owner']?.toString());
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Demote K3'e kadar MUHURLU: lease yayini olmadan yabanci-lease teyidi guvenilmez;
+  /// held sync mekanizmasi da eksik (action isimleri/local_id/un-hold). Simdilik log-only.
+  void _demoteCandidate(int tableId, String? foreignOwner) {
+    _log('lease_demote_candidate',
+        msg: 'masa $tableId lider tarafindan $foreignOwner sahipli bildirildi (demote K3 bekliyor)',
+        warn: true);
   }
 
   /// Liderden acik masalari cek (state_request). Auth: peer zaten kesifte HMAC-dogrulanmis.

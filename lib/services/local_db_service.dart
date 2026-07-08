@@ -2607,13 +2607,145 @@ class LocalDbService {
   }
 
   /// Bu cihazin ACIK offline masalarinin ozeti (LAN yayini icin — lider yollar). Sadece lan_origin='self'.
+  /// Faz 3 (8 Tem, Fable ORTA-5 fix): owner_device_id/lan_lease_until SELECT'te (Adim 2 yayin icin) ama
+  /// filtre 'self'te KALDI — 'lease' placeholder status='lease_hold' oldugundan zaten yakalanmazdi (olu kod).
   Future<List<Map<String, dynamic>>> getSelfOpenTicketsForLan() async {
     final db = await database;
     return await db.rawQuery('''
-      SELECT ticket_number, table_id, table_number, status, total
+      SELECT ticket_number, table_id, table_number, status, total, owner_device_id, lan_lease_until
         FROM local_tickets
        WHERE status = 'open' AND COALESCE(lan_origin,'self') = 'self'
     ''');
+  }
+
+  // FAZ 3 (Faz 2 uzeri): masa kilidi/lease. Flag OFF -> lease NULL -> daima yazilabilir (Faz 2 aynen).
+  Future<bool> canWriteTable(int tableId, String deviceId, {required bool lanEnabled}) async {
+    if (!lanEnabled) return true; // GRAFT: flag OFF -> byte-identical Faz 2
+    final db = await database;
+    final rows = await db.query('local_tickets',
+        columns: ['owner_device_id', 'lan_lease_until', 'lan_origin', 'status'],
+        where: "table_id = ? AND status IN ('open','lease_hold')", whereArgs: [tableId]);
+    if (rows.isEmpty) return true; // gercekten bos masa — claim acilista yapilir
+    final now = DateTime.now();
+    // ONCE engelleyici kontrol: baska cihazin CANLI lease/placeholder'i varsa yazamayiz (K4a)
+    for (final r in rows) {
+      final owner = r['owner_device_id']?.toString();
+      final leaseStr = r['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      if (owner != null && owner != deviceId && leaseUntil != null && leaseUntil.isAfter(now)) {
+        return false;
+      }
+    }
+    // Izin verici kontrol: kendi yazma hakkimiz var mi
+    for (final r in rows) {
+      final origin = (r['lan_origin'] ?? 'self').toString();
+      final owner = r['owner_device_id']?.toString();
+      final leaseStr = r['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      if (origin == 'lan') continue;
+      if (origin == 'self' && owner == null) return true;
+      if (owner == deviceId && leaseUntil != null && leaseUntil.isAfter(now)) return true;
+      if (owner == deviceId && leaseUntil == null) return true;
+    }
+    return false;
+  }
+
+  /// Liderde cagirilir. Masaya lease ver/yenile/devral. Damgasiz dolu masa devredilmez.
+  Future<Map<String, dynamic>> tryGrantLease({
+    required int tableId,
+    required String claimant,
+    required Duration leaseTtl,
+    bool isRenew = false,
+  }) async {
+    final db = await database;
+    return await db.transaction((txn) async {
+      final now = DateTime.now();
+      final until = now.add(leaseTtl).toIso8601String();
+      final rows = await txn.query('local_tickets',
+          columns: ['local_id', 'owner_device_id', 'lan_lease_until', 'lan_origin', 'status', 'ticket_number'],
+          where: "table_id = ? AND status IN ('open','lease_hold')", whereArgs: [tableId]);
+      if (rows.isEmpty) {
+        if (isRenew) return {'granted': false, 'reason': 'no_ticket'};
+
+        final nowIso = now.toIso8601String();
+        await txn.insert('local_tickets', {
+          'ticket_number': 'LEASE-$tableId-$claimant',
+          'table_id': tableId, 'waiter_id': 0, 'status': 'lease_hold', 'total': 0,
+          'opened_at': nowIso, 'created_at': nowIso,
+          'owner_device_id': claimant, 'lan_lease_until': until, 'lan_origin': 'lease',
+          'synced': 1,
+        });
+        return {'granted': true, 'owner': claimant, 'until': until};
+      }
+      Map<String, dynamic>? myRow;
+      Map<String, dynamic>? staleRow;
+      for (final r in rows) {
+        final curOwner = r['owner_device_id']?.toString();
+        final leaseStr = r['lan_lease_until']?.toString();
+        final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+        if (leaseUntil == null && curOwner == null) {
+          if (curOwner == claimant) { myRow = r; }
+          else { return {'granted': false, 'reason': 'unleased_open', 'owner': curOwner}; }
+          continue;
+        }
+        if (curOwner == claimant) { myRow = r; continue; }
+        if (leaseUntil != null && leaseUntil.isAfter(now)) {
+          return {'granted': false, 'owner': curOwner, 'reason': 'held', 'until': leaseStr};
+        }
+        if (leaseUntil != null && leaseUntil.isBefore(now)) staleRow = r;
+      }
+      if (myRow != null) {
+        await txn.update('local_tickets', {'owner_device_id': claimant, 'lan_lease_until': until},
+            where: 'local_id = ?', whereArgs: [myRow['local_id']]);
+        return {'granted': true, 'owner': claimant, 'until': until, 'takeover': false};
+      }
+      if (!isRenew && staleRow != null) {
+        await txn.update('local_tickets', {'owner_device_id': claimant, 'lan_lease_until': until},
+            where: 'local_id = ?', whereArgs: [staleRow['local_id']]);
+        return {'granted': true, 'owner': claimant, 'until': until, 'takeover': true};
+      }
+      if (isRenew) return {'granted': false, 'reason': 'no_ticket'};
+      return {'granted': false, 'reason': 'unleased_open'};
+    });
+  }
+
+  /// Lease serbest birak (masa kapaninca).
+  Future<void> clearLease(int tableId, String owner) async {
+    final db = await database;
+    await db.delete('local_tickets',
+        where: "table_id = ? AND owner_device_id = ? AND lan_origin = 'lease' AND status = 'lease_hold'",
+        whereArgs: [tableId, owner]);
+    await db.update('local_tickets', {'owner_device_id': null, 'lan_lease_until': null},
+        where: "table_id = ? AND owner_device_id = ? AND status = 'open'", whereArgs: [tableId, owner]);
+  }
+
+  /// TAKEOVER — Adim 2'ye kadar MUHURLU (item transfer + sync_queue create + backend idempotency gerek).
+  Future<bool> promoteLanTicketToSelf({
+    required int tableId,
+    required String ticketNumber,
+    required String deviceId,
+    required Duration leaseTtl,
+  }) async {
+    throw UnsupportedError('promoteLanTicketToSelf Adim 2 tasarimina kadar muhurlu.');
+  }
+
+  /// Lease kaybedilince tum self masalari 'lan'a dusur + pending sync iptal + damga temizle.
+  Future<void> demoteSelfAfterLeaseLost(int tableId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      final rows = await txn.query('local_tickets',
+          columns: ['local_id'], where: "table_id = ? AND COALESCE(lan_origin,'self')='self' AND status='open'",
+          whereArgs: [tableId]); // K4b: TUM self satirlar (limit YOK)
+      for (final row in rows) {
+        final localId = row['local_id'];
+        await txn.delete('sync_queue',
+            where: "local_id = ? AND status = 'pending' AND action IN ('create_ticket','add_item','update_item','delete_item','close_ticket','void_ticket')",
+            whereArgs: [localId]);
+        await txn.update('local_tickets',
+            {'lan_origin': 'lan', 'owner_device_id': null, 'lan_lease_until': null},
+            where: 'local_id = ?', whereArgs: [localId]);
+      }
+    });
   }
 
   /// v11 (7 Tem 2026): Masa takip ekrani offline kaynagi. Acik masalarin (mirror + offline-acilan)

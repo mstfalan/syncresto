@@ -404,11 +404,10 @@ class _AddItemModalState extends State<AddItemModal> {
         final vname = v['name']?.toString() ?? '';
         // Sadece POZITIF modifier parantezde; negatif/sifir -> sadece ad (combo baz-sifirla saçma degil).
         final lbl = mod > 0 ? '$vname (+${mod.toStringAsFixed(0)}TL)' : vname;
-        // Kart ONIZLEME fiyati (Mustafa): baz+mod<=0 (varyant tek basina bedava/sifir) -> kartta ₺0 goster
-        // (garson tek-basina fiyat 0'i gorur). GERCEK fiyat eklemede paket bolmesiyle (940/N) yazilir.
-        // Pozitif modifier -> baz+mod (gercek varyant fiyati).
-        final varStandalone = basePrice + mod;
-        final previewPrice = varStandalone > 0 ? varStandalone : 0.0;
+        // Kart ONIZLEME fiyati (Mustafa): combo'da varyant SADECE FARKINI gosterir (paket fiyati ana
+        // kartta). Bedava/negatif -> ₺0; POZITIF modifier -> sadece +mod (or +100), baz+mod DEGIL.
+        // GERCEK fiyat eklemede paket bolmesiyle (baz+pozitif-mod)/N yazilir.
+        final previewPrice = mod > 0 ? mod : 0.0;
         return {'name': vname, 'price': previewPrice, 'note': lbl, 'mod': mod};
       }),
     ];
@@ -476,11 +475,16 @@ class _AddItemModalState extends State<AddItemModal> {
                         spacing: 10, runSpacing: 10,
                         children: options.map((opt) {
                           final cnt = picks.where((p) => p['name'] == opt['name'] && p['price'] == opt['price']).length;
+                          final optMod = (opt['mod'] as double?) ?? 0.0;
+                          // Combo kart fiyat metni (Mustafa): +modifier -> "+₺100" goster (baz+mod DEGIL);
+                          // bedava/0 -> "₺0". Gercek fiyat eklemede paket bolmesiyle yazilir.
+                          final priceLabel = optMod > 0 ? '+₺${optMod.toStringAsFixed(0)}' : '₺0';
                           return SizedBox(
                             width: _variantTileWidth,
                             child: _variantOptionTile(
                               label: cnt > 0 ? '${opt['name']}  ×$cnt' : opt['name'] as String,
                               price: opt['price'] as double,
+                              priceLabel: priceLabel,
                               selected: cnt > 0,
                               onTap: () {
                                 if (picks.length >= target) return; // hedefe ulasti -> ekleme yok
@@ -746,6 +750,7 @@ class _AddItemModalState extends State<AddItemModal> {
     required bool selected,
     required VoidCallback onTap,
     required Color color,
+    String? priceLabel, // combo: hazir fiyat metni (or "+₺100" veya "₺0"); verilirse price yerine gecer
   }) {
     final modText = (modifier != null && modifier != 0)
         ? ' (${modifier > 0 ? '+' : ''}${modifier.toStringAsFixed(0)} TL)'
@@ -767,7 +772,7 @@ class _AddItemModalState extends State<AddItemModal> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Expanded(child: Text('$label$modText', overflow: TextOverflow.ellipsis)),
-            Text('₺${price.toStringAsFixed(0)}',
+            Text(priceLabel ?? '₺${price.toStringAsFixed(0)}',
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           ],
         ),
@@ -3787,9 +3792,14 @@ class _AddItemModalState extends State<AddItemModal> {
                       child: Row(children: [
                         Icon(Icons.person_outline, size: 12, color: Colors.grey[500]),
                         const SizedBox(width: 3),
-                        Text(
-                          addedBy.isNotEmpty ? addedBy : 'Bilinmiyor',
-                          style: TextStyle(fontSize: 11, color: Colors.grey[700], fontWeight: FontWeight.w600),
+                        // Flexible: uzun garson adi dar sepette tasmasin (1.1px overflow fix).
+                        Flexible(
+                          child: Text(
+                            addedBy.isNotEmpty ? addedBy : 'Bilinmiyor',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11, color: Colors.grey[700], fontWeight: FontWeight.w600),
+                          ),
                         ),
                         if (addedTime.isNotEmpty) ...[
                           const SizedBox(width: 6),

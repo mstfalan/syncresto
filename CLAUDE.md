@@ -599,6 +599,32 @@ pkill -f flutter; flutter run -d macos
 
 ## 📝 Değişiklik Geçmişi
 
+### 8 Temmuz 2026 — COMBO FAZ4 + Varyant Kanal Fiyatı + LAN Faz 3 + Offline
+
+**COMBO ÜRÜN (POS entegrasyonu, uçtan uca):**
+- `lib/services/combo_calculator.dart` — panel/web `comboCalculator.js` BİREBİR Dart port (calcComboForProduct + calcCartCombos + paidPicksAfterGift + splitComboPackagePrice). 25 test (`test/combo_calculator_test.dart`), canlı JS ile doğrulandı.
+- Combo seçim ekranı (`add_item_modal.dart` `_openComboSelectionDialog`): combo ürüne tıkla → DİNAMİK N (`combo_required_qty` 1-10) kadar varyant seç. 4 mod: within (2 al 1 öde) / extra (2 al 1 hediye = N+G seç) / yüzde / sabit. İndirim tipi ZORUNLU DEĞİL (combo_enabled yeter, indirim fiyata gömülü olabilir).
+- **KARAR (ciro kritik):** extra hediyeyi BACKEND üretir (giftLines), POS sadece N ödenen kalem ekler (`paidPicksAfterGift` en-ucuz-G çıkarır) → çift-hediye YOK.
+- **PAKET FİYAT BÖLME** (`splitComboPackagePrice`): ₺0 kalem/ciro kaybı olmasın → bölünecek = ana restoran fiyatı + seçilen POZİTİF modifier toplamı, N kaleme eşit (kuruş son kaleme). Negatif modifier (baz-sıfırla niyeti) katılmaz. Or N=2 baz 940: iki normal → 470+470; bir +100 → 520+520.
+- Kart gösterim: varyant SADECE farkını gösterir (bedava "₺0", +100 "+₺100"). Negatif modifier etikette parantez GÖSTERMEZ.
+
+**VARYANT KANAL FİYATI (POS = restoran kanalı):**
+- Backend `panel-direct/products.js` varyant SELECT'e `restaurant_modifier`/`online_modifier`/`phone_modifier` eklendi (CANLI).
+- Flutter `_variantModifier` = restaurant_modifier ?? price_modifier; `_restaurantBasePrice` = restaurant_price ?? price ("varyant fiyatı yoksa ana kart restoran fiyatı"). Panelde "Res -940" → POS 940-940=0.
+
+**BACKEND CANLI (syncresto-api, İzabella panel_id=15 doğrulandı):** SQL `panel_pos_tickets` + combo_discount/discount_breakdown; `products.js` combo_*+kanal modifier; `tickets.js` close() calcCartCombos → combo_discount + final_total + hediye INSERT (discount_amount OKUMAZ = authoritative, çift YOK). comboCalculator.js kopyası. Detay: `~/COMBO_FAZ4_DEPLOY.md`.
+
+**ÇEVRİMDIŞI COMBO TAM (katı kural: her POS özelliği cache+offline):** SQLite **v12** cached_products +7 combo kolon + migration; varyant kanal modifier `variants` JSON'unda. Combo hesabı comboCalculator.dart (offline). Kapanışta offline combo indirimi (`_closeTicket`/`_printAndCloseTicket` offline dalı discountAmount=manuel+combo). Sync sonrası backend authoritative ile tutarlı.
+
+**DİĞER POS:**
+- Çevrimdışı modda mutfak/yazdır butonu PASİF fix (`_hasPermission` offline listesine 'print_receipt').
+- Varyant tıklama davranışı ayarı (Yazıcı Ayarları → POS Davranışı toggle, `StorageService.variantOnTapKey`).
+- Varyant seçim dialogu RESPONSIVE (Wrap 1-4 sütun, ekrana sığar).
+
+**LAN FAZ 3 — Masa Kilidi/Lease (LOKAL, flag KAPALI, pilot Mustafa onayıyla):**
+- `lib/services/lan_sync_service.dart` + `local_db_service.dart`: aynı ağda çok kasa aynı masaya yazmasın. PULL model + deterministik lider + HMAC tenant challenge + ports 47500-47519. Feature-flag `lan_sync_enabled` DEFAULT OFF (flag-OFF = byte-identical, davranış değişmez).
+- 4 tur Fable adversaryal denetim (11 kritik/orta bulgu kapatıldı). Detay: memory `project_lan_masa_kilidi_lease`.
+
 ### Mart 2026 - Multi-Tenant SaaS Dönüşümü
 1. **SyncResto Proxy Mimarisi**: GreenChef-specific backend → Multi-tenant proxy
 2. **API Key Sistemi**: Restaurant bazlı API key authentication

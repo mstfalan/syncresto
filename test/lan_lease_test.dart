@@ -132,6 +132,23 @@ Future<void> demoteSelfAfterLeaseLost(Database db, int tableId) async {
   });
 }
 
+Future<List<Map<String, dynamic>>> getLanLedgerForBroadcast(Database db) async {
+  final rows = await db.rawQuery("""
+    SELECT ticket_number, table_id, owner_device_id, lan_lease_until
+      FROM local_tickets
+     WHERE owner_device_id IS NOT NULL
+       AND COALESCE(lan_origin,'self') IN ('self','lease')
+       AND status IN ('open','lease_hold')
+  """);
+  final now = DateTime.now();
+  return rows.map((r) {
+    final leaseStr = r['lan_lease_until']?.toString();
+    final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+    final remainingMs = (leaseUntil != null) ? leaseUntil.difference(now).inMilliseconds : 0;
+    return {'table_id': r['table_id'], 'owner_device_id': r['owner_device_id'], 'lease_ms': remainingMs > 0 ? remainingMs : 0};
+  }).toList();
+}
+
 void main() {
   late Database db;
   setUp(() async { db = await _openTestDb(); });
@@ -234,6 +251,23 @@ void main() {
       await demoteSelfAfterLeaseLost(db, 7);
       final selfLeft = await db.query('local_tickets', where: "table_id=7 AND COALESCE(lan_origin,'self')='self'");
       expect(selfLeft.isEmpty, true);
+    });
+  });
+
+  group('getLanLedgerForBroadcast (defter yayini)', () {
+    test('owner-damgali self + lease_hold yayinlanir, damgasiz self YAYINLANMAZ', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-5-A', 'table_id': 5, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      await db.insert('local_tickets', {'ticket_number': 'LEASE-7-A', 'table_id': 7, 'status': 'lease_hold', 'lan_origin': 'lease', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      await db.insert('local_tickets', {'ticket_number': 'MIRROR-9', 'table_id': 9, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': null});
+      final led = await getLanLedgerForBroadcast(db);
+      expect(led.length, 2);
+      expect(led.any((x) => x['table_id'] == 9), false);
+      expect(led.firstWhere((x) => x['table_id'] == 5)['lease_ms'] > 0, true);
+    });
+    test('expired lease -> lease_ms 0', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFFLINE-5-A', 'table_id': 5, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': past(10)});
+      final led = await getLanLedgerForBroadcast(db);
+      expect(led.first['lease_ms'], 0);
     });
   });
 }

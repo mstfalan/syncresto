@@ -180,13 +180,16 @@ class LanSyncService {
         final tid = t['table_id'];
         if (tn == null || tid is! int) continue;
         active.add(tn);
+        final realOwner = t['owner_device_id']?.toString() ?? leader ?? '';
+        final leaseMs = (t['lease_ms'] is num) ? (t['lease_ms'] as num).toInt() : null;
         await _localDb.upsertLanTicket(
           ticketNumber: tn,
           tableId: tid,
           tableNumber: t['table_number']?.toString(),
-          ownerDeviceId: leader ?? '',
+          ownerDeviceId: realOwner,
           status: t['status']?.toString() ?? 'open',
           total: (t['total'] is num) ? (t['total'] as num).toDouble() : 0,
+          leaseMs: leaseMs,
         );
       }
       await _localDb.pruneLanTickets(active); // kapanan LAN masalarini temizle
@@ -495,8 +498,8 @@ class LanSyncService {
       if (!_constantTimeEquals(got, _hmac(nonce))) return; // yanlis bayi -> state VERME
       // 🔴 7 Tem (Fable O3): cevaba da kendi HMAC kanitimizi koy (client nonce'una) -> client
       // liderin ayni bayi oldugunu dogrular; lider IP'sini ele geciren sahte cihaz masa enjekte edemez.
-      _localDb.getSelfOpenTicketsForLan().then((tables) {
-        _send(socket, {'type': 'state', 'tables': tables, 'proof': _hmac(nonce)});
+      _localDb.getLanLedgerForBroadcast().then((ledger) {
+        _send(socket, {'type': 'state', 'tables': ledger, 'proof': _hmac(nonce)});
       }).catchError((_) {});
     } else if (type == 'lease_claim' || type == 'lease_renew' || type == 'lease_release') {
       _handleLeaseMessage(socket, type, msg);

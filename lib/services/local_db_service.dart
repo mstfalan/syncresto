@@ -2575,12 +2575,13 @@ class LocalDbService {
     required String ownerDeviceId,
     String status = 'open',
     double total = 0,
+    int? leaseMs,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
     final existing = await db.query('local_tickets',
         where: "ticket_number = ? AND lan_origin = 'lan'", whereArgs: [ticketNumber], limit: 1);
-    final row = {
+    final row = <String, dynamic>{
       'ticket_number': ticketNumber,
       'table_id': tableId,
       'table_number': tableNumber,
@@ -2592,6 +2593,9 @@ class LocalDbService {
       'lan_origin': 'lan',
       'synced': 1, // LAN masasi bu cihazin sync'ine ait DEGIL (sync_queue'ya girmez)
     };
+    if (leaseMs != null && leaseMs > 0) {
+      row['lan_lease_until'] = DateTime.now().add(Duration(milliseconds: leaseMs)).toIso8601String();
+    }
     if (existing.isNotEmpty) {
       await db.update('local_tickets', row,
           where: 'local_id = ?', whereArgs: [existing.first['local_id']]);
@@ -2624,6 +2628,35 @@ class LocalDbService {
         FROM local_tickets
        WHERE status = 'open' AND COALESCE(lan_origin,'self') = 'self'
     ''');
+  }
+
+  /// Liderin peer'lere yayinladigi lease defteri: owner-damgali acik masalar + lease_hold placeholder.
+  /// lease_ms = kalan sure (wall-clock DEGIL — alici now'una ekler, saat kaymasi bagimsiz). owner damgasiz
+  /// (Faz 2 mirror) satirlar defter DISI (lease bilgisi yok, yayilmaz).
+  Future<List<Map<String, dynamic>>> getLanLedgerForBroadcast() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT ticket_number, table_id, table_number, status, total, owner_device_id, lan_lease_until
+        FROM local_tickets
+       WHERE owner_device_id IS NOT NULL
+         AND COALESCE(lan_origin,'self') IN ('self','lease')
+         AND status IN ('open','lease_hold')
+    ''');
+    final now = DateTime.now();
+    return rows.map((r) {
+      final leaseStr = r['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      final remainingMs = (leaseUntil != null) ? leaseUntil.difference(now).inMilliseconds : 0;
+      return {
+        'ticket_number': r['ticket_number'],
+        'table_id': r['table_id'],
+        'table_number': r['table_number'],
+        'status': r['status'],
+        'total': r['total'],
+        'owner_device_id': r['owner_device_id'],
+        'lease_ms': remainingMs > 0 ? remainingMs : 0,
+      };
+    }).toList();
   }
 
   // FAZ 3 (Faz 2 uzeri): masa kilidi/lease. Flag OFF -> lease NULL -> daima yazilabilir (Faz 2 aynen).

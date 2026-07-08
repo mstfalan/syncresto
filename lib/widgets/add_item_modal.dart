@@ -270,49 +270,28 @@ class _AddItemModalState extends State<AddItemModal> {
     final result = await showDialog<Map<String, dynamic>?>(
       context: context,
       builder: (ctx) {
-        return Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          child: Container(
-            width: 420,
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(children: [
-                  Expanded(child: Text(productName,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
-                  IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx, null)),
-                ]),
-                Text('Varyant secin', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
-                const SizedBox(height: 14),
-                _variantOptionTile(
-                  label: '1 Porsiyon',
-                  price: basePrice,
-                  selected: false,
-                  onTap: () => Navigator.pop(ctx, {'variant': null}),
-                  color: Colors.blue[600]!,
-                ),
-                const SizedBox(height: 8),
-                ...variants.map((v) {
-                  final modifier = _safeDouble(v['price_modifier']);
-                  final vname = v['name']?.toString() ?? '';
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: _variantOptionTile(
-                      label: vname,
-                      price: basePrice + modifier,
-                      modifier: modifier,
-                      selected: false,
-                      onTap: () => Navigator.pop(ctx, {'variant': v}),
-                      color: Colors.orange[600]!,
-                    ),
-                  );
-                }),
-              ],
-            ),
+        final tiles = <Widget>[
+          _variantOptionTile(
+            label: '1 Porsiyon',
+            price: basePrice,
+            selected: false,
+            onTap: () => Navigator.pop(ctx, {'variant': null}),
+            color: Colors.blue[600]!,
           ),
-        );
+          ...variants.map((v) {
+            final modifier = _safeDouble(v['price_modifier']);
+            final vname = v['name']?.toString() ?? '';
+            return _variantOptionTile(
+              label: vname,
+              price: basePrice + modifier,
+              modifier: modifier,
+              selected: false,
+              onTap: () => Navigator.pop(ctx, {'variant': v}),
+              color: Colors.orange[600]!,
+            );
+          }),
+        ];
+        return _buildResponsiveVariantDialog(ctx: ctx, title: productName, tiles: tiles);
       },
     );
     if (result == null) return; // iptal
@@ -385,57 +364,30 @@ class _AddItemModalState extends State<AddItemModal> {
     final result = await showDialog<Map<String, dynamic>?>(
       context: context,
       builder: (ctx) {
-        return Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          child: Container(
-            width: 420,
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(children: [
-                  Expanded(
-                    child: Text(productName,
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close),
-                    onPressed: () => Navigator.pop(ctx, null),
-                  ),
-                ]),
-                Text('Varyant secin', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
-                const SizedBox(height: 14),
-                // 1 Porsiyon (varyantsiz) - tikla, direkt uygula
-                _variantOptionTile(
-                  label: '1 Porsiyon',
-                  price: basePrice,
-                  selected: currentSelectedId == null,
-                  onTap: () => Navigator.pop(ctx, {'variant': null}),
-                  color: Colors.blue[600]!,
-                ),
-                const SizedBox(height: 8),
-                ...variants.map((v) {
-                  final id = _safeInt(v['id']);
-                  final modifier = _safeDouble(v['price_modifier']);
-                  final variantPrice = basePrice + modifier;
-                  final vname = v['name']?.toString() ?? '';
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: _variantOptionTile(
-                      label: vname,
-                      price: variantPrice,
-                      modifier: modifier,
-                      selected: currentSelectedId == id,
-                      onTap: () => Navigator.pop(ctx, {'variant': v}),
-                      color: Colors.orange[600]!,
-                    ),
-                  );
-                }),
-              ],
-            ),
+        final tiles = <Widget>[
+          _variantOptionTile(
+            label: '1 Porsiyon',
+            price: basePrice,
+            selected: currentSelectedId == null,
+            onTap: () => Navigator.pop(ctx, {'variant': null}),
+            color: Colors.blue[600]!,
           ),
-        );
+          ...variants.map((v) {
+            final id = _safeInt(v['id']);
+            final modifier = _safeDouble(v['price_modifier']);
+            final variantPrice = basePrice + modifier;
+            final vname = v['name']?.toString() ?? '';
+            return _variantOptionTile(
+              label: vname,
+              price: variantPrice,
+              modifier: modifier,
+              selected: currentSelectedId == id,
+              onTap: () => Navigator.pop(ctx, {'variant': v}),
+              color: Colors.orange[600]!,
+            );
+          }),
+        ];
+        return _buildResponsiveVariantDialog(ctx: ctx, title: productName, tiles: tiles);
       },
     );
 
@@ -492,6 +444,55 @@ class _AddItemModalState extends State<AddItemModal> {
     } catch (e) {
       _showError('Varyant hatasi: $e');
     }
+  }
+
+  /// Responsive varyant dialog govdesi (iki varyant akisi da kullanir). Cok varyantta ekrana sigmayip
+  /// asagi tasma sorununu cozer: tile'lar Wrap ile ENLEMESINE dizilir (sigmayinca alt satir), dialog
+  /// genisligi varyant sayisina gore artar (max ekran %92), yukseklik ekran %85 + scroll.
+  /// tiles: hazir _variantOptionTile listesi. Her tile sabit genislik (_variantTileWidth) ister.
+  static const double _variantTileWidth = 300;
+  Widget _buildResponsiveVariantDialog({
+    required BuildContext ctx,
+    required String title,
+    String subtitle = 'Varyant secin',
+    required List<Widget> tiles,
+  }) {
+    final screen = MediaQuery.of(ctx).size;
+    // Kac sutun sigar (tile genisligi + 10 bosluk), 1..4 arasi; varyant sayisini gecmesin.
+    final maxCols = ((screen.width * 0.92 - 40) / (_variantTileWidth + 10)).floor().clamp(1, 4);
+    final cols = maxCols.clamp(1, tiles.isEmpty ? 1 : tiles.length);
+    final dialogWidth = (cols * (_variantTileWidth + 10) + 40).clamp(360.0, screen.width * 0.92);
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        width: dialogWidth,
+        constraints: BoxConstraints(maxHeight: screen.height * 0.85),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children: [
+              Expanded(child: Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+              IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx, null)),
+            ]),
+            Text(subtitle, style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+            const SizedBox(height: 14),
+            Flexible(
+              child: SingleChildScrollView(
+                child: Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: tiles
+                      .map((t) => SizedBox(width: _variantTileWidth, child: t))
+                      .toList(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _variantOptionTile({

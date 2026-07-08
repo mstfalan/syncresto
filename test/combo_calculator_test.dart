@@ -153,29 +153,41 @@ void main() {
     });
   });
 
-  group('splitBasePriceIfZero — combo ₺0 varyant ana fiyati bol', () {
-    test('hepsi 0, N=2, ana 940 -> her kalem 470', () {
-      final r = ComboCalculator.splitBasePriceIfZero([0.0, 0.0], 940);
+  group('splitComboPackagePrice — combo paket fiyat bolme (baz + pozitif modifier / N)', () {
+    test('N=2, ana 940, iki normal (mod 0) -> 470+470', () {
+      final r = ComboCalculator.splitComboPackagePrice([0.0, 0.0], 940);
       expect(r, [470.0, 470.0]);
       expect(r.reduce((a, b) => a + b), 940.0);
     });
+    test('N=2, ana 940, bir varyant +100 -> paket 1040 -> 520+520', () {
+      final r = ComboCalculator.splitComboPackagePrice([100.0, 0.0], 940);
+      expect(r.reduce((a, b) => a + b), 1040.0, reason: '940 + 100 pozitif modifier');
+      expect(r, [520.0, 520.0]);
+    });
+    test('NEGATIF modifier (-940 baz-sifirla) toplama KATILMAZ', () {
+      // iki varyant -940 (restoran modifier): paket = 940 + 0 (negatifler atlanir) = 940
+      final r = ComboCalculator.splitComboPackagePrice([-940.0, -940.0], 940);
+      expect(r.reduce((a, b) => a + b), 940.0, reason: 'negatif modifier sifir sayilir -> paket=ana fiyat');
+      expect(r, [470.0, 470.0]);
+    });
+    test('karisik: bir +100 bir -940 -> paket 1040 (negatif atlanir)', () {
+      final r = ComboCalculator.splitComboPackagePrice([100.0, -940.0], 940);
+      expect(r.reduce((a, b) => a + b), 1040.0);
+      expect(r, [520.0, 520.0]);
+    });
     test('kurus kalani son kaleme (940/3)', () {
-      final r = ComboCalculator.splitBasePriceIfZero([0.0, 0.0, 0.0], 940);
-      expect(r.reduce((a, b) => a + b), 940.0, reason: 'toplam tam = ana fiyat');
+      final r = ComboCalculator.splitComboPackagePrice([0.0, 0.0, 0.0], 940);
+      expect(r.reduce((a, b) => a + b), 940.0, reason: 'toplam tam');
       expect(r[0], 313.33);
-      expect(r[2], closeTo(313.34, 0.001), reason: 'kalan son kaleme');
+      expect(r[2], closeTo(313.34, 0.001));
     });
-    test('gercek fiyatli varyant VARSA dokunma', () {
-      final r = ComboCalculator.splitBasePriceIfZero([200.0, 0.0], 940);
-      expect(r, [200.0, 0.0], reason: '0-disi fiyat var -> bolme yok, kendi fiyatlariyla');
+    test('tek kalem, ana 940 +100 -> 1040', () {
+      final r = ComboCalculator.splitComboPackagePrice([100.0], 940);
+      expect(r, [1040.0]);
     });
-    test('ana fiyat 0/negatif -> dokunma (guard)', () {
-      final r = ComboCalculator.splitBasePriceIfZero([0.0, 0.0], 0);
-      expect(r, [0.0, 0.0]);
-    });
-    test('tek kalem 0, ana 940 -> 940', () {
-      final r = ComboCalculator.splitBasePriceIfZero([0.0], 940);
-      expect(r, [940.0]);
+    test('ana fiyat 0 + modifier 100 -> 100 (baz yok, modifier var)', () {
+      final r = ComboCalculator.splitComboPackagePrice([100.0], 0);
+      expect(r, [100.0]);
     });
   });
 }

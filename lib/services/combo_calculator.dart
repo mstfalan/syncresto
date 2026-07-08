@@ -81,20 +81,24 @@ class ComboCartResult {
 }
 
 class ComboCalculator {
-  /// COMBO FIYAT BOLME (POS): secilen odenen kalemlerin fiyati 0 ise (varyantlar kanal-modifier ile
-  /// ₺0 olmus, combo paketi ana kartta fiyatli) ana kart fiyatini kalemlere ESIT bol (Mustafa: "fiyat 0
-  /// ise ana kartin fiyatini yaz ve eklenen urunlere bol ki hata olmasin"). Kurus kalani SON kaleme
-  /// eklenir (toplam = ana fiyat, ₺0 kalem/ciro kaybi YOK). Kalemlerden en az biri 0-DISI ise (gercek
-  /// fiyatli) DOKUNMA (kendi fiyatlariyla kalir). Girdi: kalem fiyatlari + ana fiyat. Doner: yeni fiyatlar.
-  static List<double> splitBasePriceIfZero(List<double> prices, double basePrice) {
-    if (prices.isEmpty) return prices;
-    final anyNonZero = prices.any((p) => p != 0);
-    if (anyNonZero || basePrice <= 0) return List<double>.from(prices); // gercek fiyat var -> dokunma
-    final n = prices.length;
-    final each = _round2(basePrice / n);
+  /// COMBO FIYAT BOLME (POS, Mustafa kesin kural): combo bir PAKET. Bolunecek toplam =
+  /// ana restoran fiyati (basePrice) + secilen varyantlarin POZITIF modifier toplami. Bu toplam N odenen
+  /// kaleme ESIT bolunur (kurus kalani SON kaleme -> toplam tam). Boylece ₺0 kalem/ciro kaybi olmaz.
+  /// KURAL: negatif modifier (or restaurant_modifier -940 = "combo'da baz-fiyati sifirla" niyeti) toplama
+  /// EKLENMEZ (0 sayilir). Pozitif modifier (+100 = "pakete uste ekle") toplanir.
+  /// Girdi: modifiers = secilen odenen kalemlerin modifier'lari (varyant fiyati DEGIL, sadece modifier;
+  /// baz bir KEZ eklenir). Doner: her kaleme yazilacak fiyat listesi.
+  static List<double> splitComboPackagePrice(List<double> modifiers, double basePrice) {
+    if (modifiers.isEmpty) return modifiers;
+    final n = modifiers.length;
+    double positiveMods = 0;
+    for (final m in modifiers) {
+      if (m > 0) positiveMods += m; // negatif (sifirlama niyeti) atlanir
+    }
+    final packageTotal = _round2((basePrice > 0 ? basePrice : 0) + positiveMods);
+    final each = _round2(packageTotal / n);
     final out = List<double>.filled(n, each);
-    // Kurus kalani son kaleme (toplam tam = basePrice).
-    final diff = _round2(basePrice - each * n);
+    final diff = _round2(packageTotal - each * n);
     out[n - 1] = _round2(out[n - 1] + diff);
     return out;
   }

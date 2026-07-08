@@ -392,14 +392,15 @@ class _AddItemModalState extends State<AddItemModal> {
     final basePrice = _restaurantBasePrice(product);
     final variants = (product['variants'] is List) ? product['variants'] as List : const [];
 
-    // Secim opsiyonlari: "1 Porsiyon" (baz) + her varyant (baz+modifier).
+    // Secim opsiyonlari: "1 Porsiyon" (baz) + her varyant (baz+modifier). 'mod' = kanal modifier
+    // (combo fiyat bolmede kullanilir: paket = baz + pozitif modifier'lar / N).
     final options = <Map<String, dynamic>>[
-      {'name': '1 Porsiyon', 'price': basePrice, 'note': null},
+      {'name': '1 Porsiyon', 'price': basePrice, 'note': null, 'mod': 0.0},
       ...variants.map((v) {
         final mod = _variantModifier(Map<String, dynamic>.from(v as Map));
         final vname = v['name']?.toString() ?? '';
         final lbl = mod != 0 ? '$vname (${mod > 0 ? '+' : ''}${mod.toStringAsFixed(0)}TL)' : vname;
-        return {'name': vname, 'price': basePrice + mod, 'note': lbl};
+        return {'name': vname, 'price': basePrice + mod, 'note': lbl, 'mod': mod};
       }),
     ];
 
@@ -534,10 +535,12 @@ class _AddItemModalState extends State<AddItemModal> {
     // within/percent/amount'ta giftCount=0 -> hepsi eklenir. Statik+test edilebilir yardimci.
     final giftCount = (giftMode == 'extra') ? giftPerSet * setCount : 0;
     final paidPicks = ComboCalculator.paidPicksAfterGift(picks, giftCount);
-    // FIYAT BOLME (Mustafa): odenen kalemler ₺0 ise (varyant kanal-modifier -> 0) ana kart fiyatini
-    // odenen kalemlere ESIT bol -> ₺0 kalem/ciro kaybi olmaz. Gercek fiyatli varyant varsa dokunmaz.
-    final paidPrices = paidPicks.map((p) => p['price'] as double).toList();
-    final splitPrices = ComboCalculator.splitBasePriceIfZero(paidPrices, basePrice);
+    // FIYAT BOLME (Mustafa kesin kural): combo=PAKET. Bolunecek toplam = ana restoran fiyati +
+    // secilen odenen kalemlerin POZITIF modifier toplami. N odenen kaleme ESIT bolunur (kurus son
+    // kaleme). Negatif modifier (-940 = baz-sifirla niyeti) toplama katilmaz. Or N=2 baz 940:
+    // iki normal -> 470+470; bir +100 -> 1040/2=520+520. ₺0 kalem/ciro kaybi YOK.
+    final paidMods = paidPicks.map((p) => (p['mod'] as double?) ?? 0.0).toList();
+    final splitPrices = ComboCalculator.splitComboPackagePrice(paidMods, basePrice);
     for (int i = 0; i < paidPicks.length; i++) {
       final p = paidPicks[i];
       final note = p['note'] as String?;

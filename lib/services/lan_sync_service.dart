@@ -85,8 +85,16 @@ class LanSyncService {
     // 🔴 7 Tem (Fable K3): Flag KAPALI olsa bile bir kez LAN satirlarini temizle. LAN acikken
     // sert kapanma (dispose calismaz) sonrasi kalintili lan_origin='lan' satirlar getOfflineOpenTableIds'e
     // sizip hayalet dolu masa + cift kayit uretebilir. Flag OFF = LAN satiri SIFIR garantisi.
+    // KRITIK-3 (Fable 2. tur): flag-OFF boot'ta da reconcile+quarantine — toggle sirasinda crash veya
+    // pref okuma hatasi ile kalan held sync'ler EBEDIYEN mühürlü kalmasin (kill-switch guvencesi).
+    // deviceId varsa calisir; demoted/held yoksa no-op (bedava). Foreign lease olamaz (LAN kapali/peer yok).
     try {
       await _localDb.pruneLanTickets(const {});
+      await _localDb.pruneLeaseZombies();
+      if (_deviceId != null) {
+        await _localDb.reconcileHeldSyncs(_deviceId!);
+        await _localDb.quarantinePrune();
+      }
     } catch (_) {}
     if (!_enabled) return;
     await _start();
@@ -155,7 +163,13 @@ class LanSyncService {
     if (!_enabled || _syncing || _deviceId == null) return;
     if (_peers.isEmpty) {
       // Tek cihaz -> LAN yansimasi gereksiz; onceki LAN masalarini temizle (varsa).
+      // KRITIK-3 (Fable 2. tur): peer'siz kalinca da reconcile+quarantine CAGRILMALI — yoksa
+      // devralinmis held sync'ler (peer oldu/gitti) EBEDIYEN mühürlü kalir = sessiz ciro kaybi.
+      // Burada foreign lease zaten yok (peer yok) -> reconcile hepsini teslime alir.
       await _localDb.pruneLanTickets(const {});
+      await _localDb.pruneLeaseZombies(); // KRITIK-1: lease zombileri temizle
+      await _localDb.reconcileHeldSyncs(_deviceId!);
+      await _localDb.quarantinePrune();
       return;
     }
     _syncing = true;
@@ -163,6 +177,7 @@ class LanSyncService {
       final leader = await _electLeader();
       if (leader == _deviceId) {
         await _localDb.pruneLanReflectionsKeepLeases(); // K-1: lease tasiyan defter kopyasi KORUNUR
+        await _localDb.pruneLeaseZombies(); // KRITIK-1: owner-null/expired lease zombileri sil
         await _renewOwnLeases();
         await _localDb.reconcileHeldSyncs(_deviceId!); // K-3: teslim edilmemis held -> backend
         await _localDb.quarantinePrune();
@@ -171,6 +186,9 @@ class LanSyncService {
       final leaderPeer = _peers[leader];
       if (leaderPeer == null) {
         await _localDb.pruneLanTickets(const {});
+        await _localDb.pruneLeaseZombies();
+        await _localDb.reconcileHeldSyncs(_deviceId!);
+        await _localDb.quarantinePrune();
         return;
       }
       await _renewOwnLeasesViaLeader(leaderPeer);
@@ -195,6 +213,7 @@ class LanSyncService {
         );
       }
       await _localDb.pruneLanTickets(active); // kapanan LAN masalarini temizle
+      await _localDb.pruneLeaseZombies(); // ORTA-1: eski liderde kalan 'lease' kalintisi temizle
       await _localDb.reconcileHeldSyncs(_deviceId!); // K-3: teslim edilmemis held -> backend
       await _localDb.quarantinePrune();
     } catch (e) {

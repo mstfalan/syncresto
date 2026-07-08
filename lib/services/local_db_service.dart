@@ -2552,11 +2552,16 @@ class LocalDbService {
   Future<Set<int>> getOfflineOpenTableIds() async {
     final db = await database;
 
-    // Open olup, henüz sunucuya sync olmamış ticketlar
+    // Open olup, henüz sunucuya sync olmamış ticketlar. KRITIK-1/2 (Fable 2. tur): 'demoted'
+    // (bu cihazin kaybettigi masa — foreign 'lan' satiri zaten dolu gosterir) + owner-null zombi
+    // 'lease' satirlari hayalet DOLU gostermesin. 'lan'/canli 'lease' foreign masalar DAHIL (Faz 2:
+    // baska kasadaki masa dolu gorunur), 'self' DAHIL. Owner-null 'lease' zombi HARIC.
     final results = await db.query(
       'local_tickets',
       columns: ['table_id'],
-      where: "status = 'open' AND server_id IS NULL",
+      where: "status = 'open' AND server_id IS NULL "
+          "AND COALESCE(lan_origin,'self') != 'demoted' "
+          "AND NOT (lan_origin = 'lease' AND owner_device_id IS NULL)",
     );
 
     return results.map((r) => r['table_id'] as int).toSet();
@@ -2712,6 +2717,10 @@ class LocalDbService {
   }
 
   // FAZ 3 (Faz 2 uzeri): masa kilidi/lease. Flag OFF -> lease NULL -> daima yazilabilir (Faz 2 aynen).
+  // TASARIM NOTU (Fable NOT-2): Bu fonksiyon BILINCLI olarak lib/ akisindan cagrilmiyor. Yazma kilidi
+  // OTURUM ACILISINDA aliniyor (claimTable -> openTicket:420); ayni oturumun add_item/close/void'i
+  // acilista alinan lease'e guveniyor (lease renew ile 45sn'de bir tazelenir). canWriteTable per-yazma
+  // kapi mantigini test/dokumantasyon icin tutuyor; ileride per-islem kilit gerekirse buradan baglanir.
   Future<bool> canWriteTable(int tableId, String deviceId, {required bool lanEnabled}) async {
     if (!lanEnabled) return true; // GRAFT: flag OFF -> byte-identical Faz 2
     final db = await database;
@@ -2754,9 +2763,12 @@ class LocalDbService {
     return await db.transaction((txn) async {
       final now = DateTime.now();
       final until = now.add(leaseTtl).toIso8601String();
+      // KRITIK-2 (Fable 2. tur): 'demoted' satirlar HARIC — bunlar bu cihazin kaybettigi (devredilmis)
+      // masalar, owner-null olduklarindan 'unleased_open' deny beslerlerdi -> masa herkese kilitlenir.
       final rows = await txn.query('local_tickets',
           columns: ['local_id', 'owner_device_id', 'lan_lease_until', 'lan_origin', 'status', 'ticket_number'],
-          where: "table_id = ? AND status IN ('open','lease_hold')", whereArgs: [tableId]);
+          where: "table_id = ? AND status IN ('open','lease_hold') AND COALESCE(lan_origin,'self') != 'demoted'",
+          whereArgs: [tableId]);
       if (rows.isEmpty) {
         if (isRenew) return {'granted': false, 'reason': 'no_ticket'};
 
@@ -2800,14 +2812,40 @@ class LocalDbService {
     });
   }
 
-  /// Lease serbest birak (masa kapaninca).
+  /// Lease serbest birak (masa kapaninca). KRITIK-1 (Fable 2. tur): DELETE artik status KOSULSUZ
+  /// 'lease' origin'i siler — failover'da pruneLanReflectionsKeepLeases satiri 'lease'+status='open'e
+  /// cevirdiginden eski 'lease_hold' kosulu zombi birakiyordu (unleased_open ile masa restoran capinda
+  /// kalici kilit). 'lease' origin HER ZAMAN defter kopyasi/placeholder (gercek veri degil) -> guvenle
+  /// silinir. UPDATE owner-null'lama SADECE 'self' ticket'a (gercek adisyon) uygulanir — 'lease'/'lan'/
+  /// 'demoted' satirlar owner damgasini korur/ilgisiz.
   Future<void> clearLease(int tableId, String owner) async {
     final db = await database;
     await db.delete('local_tickets',
-        where: "table_id = ? AND owner_device_id = ? AND lan_origin = 'lease' AND status = 'lease_hold'",
+        where: "table_id = ? AND owner_device_id = ? AND lan_origin = 'lease'",
         whereArgs: [tableId, owner]);
     await db.update('local_tickets', {'owner_device_id': null, 'lan_lease_until': null},
-        where: "table_id = ? AND owner_device_id = ? AND status = 'open'", whereArgs: [tableId, owner]);
+        where: "table_id = ? AND owner_device_id = ? AND status = 'open' AND COALESCE(lan_origin,'self') = 'self'",
+        whereArgs: [tableId, owner]);
+  }
+
+  /// KRITIK-1 SUPURUCU (lider dalinda cagirilir): owner-null VEYA lease-expired 'lease' zombilerini sil.
+  /// pruneLanReflectionsKeepLeases 'lan'->'lease' cevirir; sahibi renew etmezse (oldu) veya masa kapanip
+  /// clearLease disinda bir yolla owner-null kalirsa bu satirlar unleased_open deny kaynagi olur. Temizle.
+  Future<void> pruneLeaseZombies() async {
+    final db = await database;
+    final now = DateTime.now();
+    final rows = await db.query('local_tickets',
+        columns: ['local_id', 'owner_device_id', 'lan_lease_until'],
+        where: "lan_origin = 'lease'");
+    for (final r in rows) {
+      final owner = r['owner_device_id']?.toString();
+      final leaseStr = r['lan_lease_until']?.toString();
+      final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+      final dead = owner == null || owner.isEmpty || leaseUntil == null || !leaseUntil.isAfter(now);
+      if (dead) {
+        await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [r['local_id']]);
+      }
+    }
   }
 
   /// TAKEOVER — Adim 2'ye kadar MUHURLU (item transfer + sync_queue create + backend idempotency gerek).
@@ -2849,13 +2887,18 @@ class LocalDbService {
   }
 
   /// Ticket-scope sync eslesmesi (demote/un-hold ortak). Ticket action'lari local_id=ticket;
-  /// item action'lari (add/update/delete_item) payload'da local_ticket_id tasir (Fable O-1);
-  /// cancel_item olu ama JOIN ile kapali. $inClause = virgullu ticket local_id listesi.
+  /// item action'lari (add/update/delete_item) payload'da local_ticket_id tasir (Fable O-1).
+  /// ORTA-2 (Fable 2. tur): _resolveLocalTicketAndItem basarisizsa payload'da local_ticket_id OLMAYABILIR
+  /// (kosullu yazim) -> o zaman item_local_id uzerinden local_ticket_items JOIN ile masaya baglanir
+  /// (ikinci yol). cancel_item olu ama JOIN ile kapali. $inClause = virgullu ticket local_id listesi.
   String _ticketScopeSyncClause(String inClause) => """
     (
       (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
       OR (action IN ('add_item','update_item','delete_item')
             AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+      OR (action IN ('update_item','delete_item')
+            AND CAST(json_extract(payload, '\$.item_local_id') AS INTEGER) IN (
+              SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
       OR (action = 'cancel_item' AND local_id IN (
             SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
     )
@@ -2863,10 +2906,13 @@ class LocalDbService {
 
   /// K-3 RECONCILIATION: teslim edilmemis held sync'leri backend'e KURTAR. openTicket un-hold
   /// yapmadigindan (K-2), demote edilmis masalar bu supurucu ile teslim edilir. Kosul: masada artik
-  /// BASKA cihazin CANLI foreign lease'i YOK (garson devretmedi/geri aldi) -> held->pending. Ticket
-  /// sync edilebilir kalir (lan_origin='self' damgasiz) ama masa oturumu olarak sahiplenilmez —
-  /// yeni oturum openTicket ile AYRI acilir, karismaz. Backend masa-bazli merge iki kaydi ayirir.
-  /// flag-OFF'ta da cagirilabilir (foreign lease yoksa hepsini teslim eder = kill-switch guvenli).
+  /// BASKA cihazin CANLI foreign lease'i YOK (garson devretmedi/geri aldi) -> held->pending.
+  /// KRITIK-2 (Fable 2. tur): ticket 'demoted' KALIR (self'e FLIP ETME). Flip edilseydi getTableTicket
+  /// (self+open filtresi) eski ticket'i DIRILTIR -> yeni musteriye eski kalemler karisir -> para hatasi.
+  /// 'demoted' kalinca: getTableTicket gormez (self degil), tryGrantLease/getOfflineOpenTableIds
+  /// dislar, quarantinePrune sync'ler completed olunca ticket+item'i siler (janitor bedava). Held->pending
+  /// yapilan sync'ler backend'e gider (create+add_item), backend masa-bazli merge dogru ayirir.
+  /// flag-OFF'ta da cagirilabilir (foreign lease yoksa teslim eder = kill-switch guvenli).
   /// Donen: teslime alinan (pending'e donen) sync sayisi (0 = is yok).
   Future<int> reconcileHeldSyncs(String myDeviceId) async {
     final db = await database;
@@ -2881,9 +2927,7 @@ class LocalDbService {
       final inClause = '$localId';
       final n = await db.rawUpdate(
           "UPDATE sync_queue SET status = 'pending' WHERE status = 'held' AND ${_ticketScopeSyncClause(inClause)}");
-      // Teslime alindi: ticket'i sync edilebilir birak (damgasiz self), oturum sahiplenme YOK.
-      await db.update('local_tickets', {'lan_origin': 'self'},
-          where: 'local_id = ?', whereArgs: [localId]);
+      // NOT: lan_origin='demoted' KALIR (KRITIK-2). Ticket dirilmez; quarantinePrune sync bitince siler.
       released += n;
     }
     if (released > 0) {

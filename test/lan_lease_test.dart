@@ -80,7 +80,8 @@ Future<Map<String, dynamic>> tryGrantLease(Database db,
     final until = now.add(leaseTtl).toIso8601String();
     final rows = await txn.query('local_tickets',
         columns: ['local_id', 'owner_device_id', 'lan_lease_until', 'lan_origin', 'status', 'ticket_number'],
-        where: "table_id = ? AND status IN ('open','lease_hold')", whereArgs: [tableId]);
+        where: "table_id = ? AND status IN ('open','lease_hold') AND COALESCE(lan_origin,'self') != 'demoted'",
+        whereArgs: [tableId]);
     if (rows.isEmpty) {
       if (isRenew) return {'granted': false, 'reason': 'no_ticket'};
       final nowIso = now.toIso8601String();
@@ -121,12 +122,15 @@ Future<Map<String, dynamic>> tryGrantLease(Database db,
   });
 }
 
-// Ortak ticket-scope clause (uretimdeki _ticketScopeSyncClause ile birebir — add/update/delete_item).
+// Ortak ticket-scope clause (uretimdeki _ticketScopeSyncClause ile BIREBIR).
 String ticketScopeSyncClause(String inClause) => """
   (
     (action IN ('create','close','void','mark_printed','mark_served') AND local_id IN ($inClause))
     OR (action IN ('add_item','update_item','delete_item')
           AND CAST(json_extract(payload, '\$.local_ticket_id') AS INTEGER) IN ($inClause))
+    OR (action IN ('update_item','delete_item')
+          AND CAST(json_extract(payload, '\$.item_local_id') AS INTEGER) IN (
+            SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
     OR (action = 'cancel_item' AND local_id IN (
           SELECT local_id FROM local_ticket_items WHERE local_ticket_id IN ($inClause)))
   )
@@ -151,6 +155,7 @@ Future<void> demoteSelfAfterLeaseLost(Database db, int tableId) async {
 }
 
 // K-3: teslim edilmemis held sync'leri backend'e kurtar (masada canli foreign lease YOKSA).
+// KRITIK-2 (Fable 2. tur): ticket 'demoted' KALIR (self'e FLIP ETME) — flip eski ticket'i diriltirdi.
 Future<int> reconcileHeldSyncs(Database db, String myDeviceId) async {
   final demoted = await db.query('local_tickets',
       columns: ['local_id', 'table_id'], where: "lan_origin = 'demoted'");
@@ -162,10 +167,42 @@ Future<int> reconcileHeldSyncs(Database db, String myDeviceId) async {
     final inClause = '$localId';
     final n = await db.rawUpdate(
         "UPDATE sync_queue SET status = 'pending' WHERE status = 'held' AND ${ticketScopeSyncClause(inClause)}");
-    await db.update('local_tickets', {'lan_origin': 'self'}, where: 'local_id = ?', whereArgs: [localId]);
+    // NOT: lan_origin='demoted' KALIR (dirilme yok); quarantinePrune sync bitince siler.
     released += n;
   }
   return released;
+}
+
+// KRITIK-1: lease serbest birak. DELETE status KOSULSUZ 'lease'; UPDATE sadece 'self'.
+Future<void> clearLease(Database db, int tableId, String owner) async {
+  await db.delete('local_tickets',
+      where: "table_id = ? AND owner_device_id = ? AND lan_origin = 'lease'", whereArgs: [tableId, owner]);
+  await db.update('local_tickets', {'owner_device_id': null, 'lan_lease_until': null},
+      where: "table_id = ? AND owner_device_id = ? AND status = 'open' AND COALESCE(lan_origin,'self') = 'self'",
+      whereArgs: [tableId, owner]);
+}
+
+// KRITIK-1: owner-null / expired 'lease' zombilerini sil.
+Future<void> pruneLeaseZombies(Database db) async {
+  final now = DateTime.now();
+  final rows = await db.query('local_tickets',
+      columns: ['local_id', 'owner_device_id', 'lan_lease_until'], where: "lan_origin = 'lease'");
+  for (final r in rows) {
+    final owner = r['owner_device_id']?.toString();
+    final leaseStr = r['lan_lease_until']?.toString();
+    final leaseUntil = (leaseStr != null && leaseStr.isNotEmpty) ? DateTime.tryParse(leaseStr) : null;
+    final dead = owner == null || owner.isEmpty || leaseUntil == null || !leaseUntil.isAfter(now);
+    if (dead) await db.delete('local_tickets', where: 'local_id = ?', whereArgs: [r['local_id']]);
+  }
+}
+
+// KRITIK-2: hayalet dolu masa dislama (demoted + owner-null lease zombi).
+Future<Set<int>> getOfflineOpenTableIds(Database db) async {
+  final results = await db.query('local_tickets', columns: ['table_id'],
+      where: "status = 'open' AND server_id IS NULL "
+          "AND COALESCE(lan_origin,'self') != 'demoted' "
+          "AND NOT (lan_origin = 'lease' AND owner_device_id IS NULL)");
+  return results.map((r) => r['table_id'] as int).toSet();
 }
 
 // hasLiveForeignLease (uretimle birebir).
@@ -424,14 +461,15 @@ void main() {
   });
 
   group('K-3 reconcile: held->pending teslim (ebedi held yok)', () {
-    test('foreign lease YOKSA held->pending + demoted->self (backend e gider)', () async {
+    test('foreign lease YOKSA held->pending, ticket DEMOTED KALIR (KRITIK-2: dirilme yok)', () async {
       await db.insert('local_tickets', {'ticket_number': 'OFF-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
       final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
       await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'held', 'created_at': DateTime.now().toIso8601String()});
       final n = await reconcileHeldSyncs(db, 'A');
       expect(n, 1);
       expect((await db.query('sync_queue', where: "status='pending'")).length, 1, reason: 'held->pending teslime alindi');
-      expect((await db.query('local_tickets', where: 'table_id=7')).first['lan_origin'], 'self');
+      expect((await db.query('local_tickets', where: 'table_id=7')).first['lan_origin'], 'demoted',
+          reason: 'KRITIK-2: self flip YOK -> getTableTicket eski ticket i diriltmez');
     });
     test('CANLI foreign lease VARSA DOKUNMA (garson karsi kasada aktif)', () async {
       await db.insert('local_tickets', {'ticket_number': 'OFF-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
@@ -442,14 +480,89 @@ void main() {
       expect(n, 0);
       expect((await db.query('sync_queue', where: "status='held'")).length, 1, reason: 'foreign lease canli -> held korunur');
     });
-    test('reconcile sonrasi quarantine: pending gitti -> masa temizlenir', () async {
-      // reconcile held->pending yapti; sonra sync backend e gonderdi (biz elle completed yapiyoruz)
+    test('reconcile sonrasi sync tamamlanip quarantine: demoted masa+item SILINIR', () async {
       await db.insert('local_tickets', {'ticket_number': 'OFF-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
       final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('local_ticket_items', {'local_ticket_id': tid});
       await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': tid, 'payload': '{}', 'status': 'held', 'created_at': DateTime.now().toIso8601String()});
-      await reconcileHeldSyncs(db, 'A'); // held->pending, demoted->self
-      // reconcile demoted->self yapti; artik quarantine kapsaminda degil (demoted degil)
-      expect((await db.query('local_tickets', where: 'table_id=7')).first['lan_origin'], 'self');
+      await reconcileHeldSyncs(db, 'A'); // held->pending (demoted KALIR)
+      // backend teslim etti -> sync completed
+      await db.update('sync_queue', {'status': 'completed'}, where: "action='create'");
+      await quarantinePrune(db); // artik pending yok -> demoted masa+item silinir
+      expect((await db.query('local_tickets', where: 'table_id=7')).isEmpty, true, reason: 'janitor bedava geldi');
+      expect((await db.query('local_ticket_items', where: 'local_ticket_id=$tid')).isEmpty, true);
+    });
+  });
+
+  group('KRITIK-1: clearLease + lease zombi (failover kilit)', () {
+    test('failover-cevrilen lease (status=open) clearLease ile SILINIR (zombi yok)', () async {
+      // pruneLanReflectionsKeepLeases lan->lease cevirdi, status='open' kaldi. A doner, kapatir.
+      await db.insert('local_tickets', {'ticket_number': 'LAN-5-A', 'table_id': 5, 'status': 'open', 'lan_origin': 'lease', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      await clearLease(db, 5, 'A');
+      expect((await db.query('local_tickets', where: 'table_id=5')).isEmpty, true,
+          reason: 'status kosulsuz lease DELETE -> unleased_open zombi kalmaz');
+    });
+    test('clearLease self ticket i owner-null yapar ama lease origin i BOZMAZ', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFF-5-A', 'table_id': 5, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      await clearLease(db, 5, 'A');
+      final t = (await db.query('local_tickets', where: 'table_id=5')).first;
+      expect(t['owner_device_id'], null);
+      expect(t['lan_lease_until'], null);
+      expect(t['lan_origin'], 'self');
+    });
+    test('pruneLeaseZombies: owner-null lease -> SILINIR, canli lease -> KALIR', () async {
+      await db.insert('local_tickets', {'ticket_number': 'Z1', 'table_id': 1, 'status': 'open', 'lan_origin': 'lease', 'owner_device_id': null});
+      await db.insert('local_tickets', {'ticket_number': 'Z2', 'table_id': 2, 'status': 'open', 'lan_origin': 'lease', 'owner_device_id': 'B', 'lan_lease_until': past(10)});
+      await db.insert('local_tickets', {'ticket_number': 'Z3', 'table_id': 3, 'status': 'open', 'lan_origin': 'lease', 'owner_device_id': 'B', 'lan_lease_until': future(30)});
+      await pruneLeaseZombies(db);
+      expect((await db.query('local_tickets', where: 'table_id=1')).isEmpty, true, reason: 'owner-null zombi');
+      expect((await db.query('local_tickets', where: 'table_id=2')).isEmpty, true, reason: 'expired zombi');
+      expect((await db.query('local_tickets', where: 'table_id=3')).isNotEmpty, true, reason: 'canli lease korunur');
+    });
+    test('failover-cevrilen lease zombisi tryGrantLease i KILITLEMEZ (temizlik sonrasi)', () async {
+      // zombi: lease+open+owner-null (clearLease disi bir yolla olustu)
+      await db.insert('local_tickets', {'ticket_number': 'Z', 'table_id': 5, 'status': 'open', 'lan_origin': 'lease', 'owner_device_id': null});
+      await pruneLeaseZombies(db); // temizle
+      final r = await tryGrantLease(db, tableId: 5, claimant: 'C', leaseTtl: const Duration(seconds: 45));
+      expect(r['granted'], true, reason: 'zombi temizlendi -> masa yeniden aciilabilir');
+    });
+  });
+
+  group('KRITIK-2: demoted masa hayalet/dirilme dislama', () {
+    test('getOfflineOpenTableIds: demoted masa DOLU GORUNMEZ (foreign lan satiri gosterir)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'D', 'table_id': 7, 'status': 'open', 'server_id': null, 'lan_origin': 'demoted', 'owner_device_id': null});
+      final ids = await getOfflineOpenTableIds(db);
+      expect(ids.contains(7), false, reason: 'demoted kendi basina dolu gostermez');
+    });
+    test('getOfflineOpenTableIds: owner-null lease zombi DOLU GORUNMEZ', () async {
+      await db.insert('local_tickets', {'ticket_number': 'Z', 'table_id': 8, 'status': 'open', 'server_id': null, 'lan_origin': 'lease', 'owner_device_id': null});
+      final ids = await getOfflineOpenTableIds(db);
+      expect(ids.contains(8), false);
+    });
+    test('getOfflineOpenTableIds: self + canli lan foreign masa DOLU GORUNUR', () async {
+      await db.insert('local_tickets', {'ticket_number': 'S', 'table_id': 9, 'status': 'open', 'server_id': null, 'lan_origin': 'self', 'owner_device_id': 'A'});
+      await db.insert('local_tickets', {'ticket_number': 'F', 'table_id': 10, 'status': 'open', 'server_id': null, 'lan_origin': 'lan', 'owner_device_id': 'B', 'lan_lease_until': future(30)});
+      final ids = await getOfflineOpenTableIds(db);
+      expect(ids.contains(9), true);
+      expect(ids.contains(10), true, reason: 'Faz 2: baska kasadaki masa dolu gorunur');
+    });
+    test('tryGrantLease: demoted satir unleased_open DENY BESLEMEZ (masa acilabilir)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'D', 'table_id': 7, 'status': 'open', 'lan_origin': 'demoted', 'owner_device_id': null});
+      final r = await tryGrantLease(db, tableId: 7, claimant: 'C', leaseTtl: const Duration(seconds: 45));
+      expect(r['granted'], true, reason: 'demoted dislaninca masa bos gorunur -> grant');
+    });
+  });
+
+  group('ORTA-2: item_local_id ile masaya baglanma (local_ticket_id payload da yoksa)', () {
+    test('delete_item local_ticket_id SIZ ama item_local_id ile held e alinir', () async {
+      await db.insert('local_tickets', {'ticket_number': 'OFF-7-X', 'table_id': 7, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'A', 'lan_lease_until': future(30)});
+      final tid = (await db.query('local_tickets', where: 'table_id=7')).first['local_id'] as int;
+      await db.insert('local_ticket_items', {'local_ticket_id': tid});
+      final itemId = (await db.query('local_ticket_items')).first['local_id'] as int;
+      // resolve basarisiz -> local_ticket_id YOK, sadece item_local_id var
+      await db.insert('sync_queue', {'action': 'delete_item', 'entity_type': 'ticket_item', 'local_id': 500, 'payload': '{"item_local_id":$itemId}', 'status': 'pending', 'created_at': DateTime.now().toIso8601String()});
+      await demoteSelfAfterLeaseLost(db, 7);
+      expect((await db.query('sync_queue', where: "status='held'")).length, 1, reason: 'item_local_id JOIN ile held e alindi (O-1 kacagi kapandi)');
     });
   });
 }

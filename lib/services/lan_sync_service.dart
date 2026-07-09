@@ -634,7 +634,9 @@ class LanSyncService {
         final ip = '${subnet.prefix}$i';
         if (ip != myIp) hosts.add(ip);
       }
-      const scanPool = 32; // ayni anda en fazla 32 host (fd guvenli)
+      // FIX (LAN kesif gecikmesi): _probeHost artik portlari PARALEL dener (sirali degil) -> olu host
+      // 20x500ms=10sn yerine ~300ms'de biter. 20 port x havuz fd riski -> scanPool 32->8 (8x20=160 fd < 256).
+      const scanPool = 8;
       for (int start = 0; start < hosts.length; start += scanPool) {
         final batch = hosts.sublist(start, (start + scanPool).clamp(0, hosts.length));
         await Future.wait(batch.map(_probeHost));
@@ -658,12 +660,14 @@ class LanSyncService {
     }
   }
 
-  /// Bir HOST'ta port araligini SIRAYLA dener; ilk gecerli POS peer'inda durur.
+  /// Bir HOST'ta port araligini PARALEL dener (olu host'ta sirali 20x500ms=10sn beklemesin).
+  /// connect zaten 300ms cap'li; scanPool 8 -> ayni anda en fazla 8x20=160 socket (fd guvenli).
   Future<void> _probeHost(String ip) async {
+    final futures = <Future<bool>>[];
     for (int p = _portBase; p < _portBase + _portCount; p++) {
-      final found = await _probePeer(ip, p);
-      if (found) return; // bu host'ta peer bulundu, kalan portlari deneme
+      futures.add(_probePeer(ip, p));
     }
+    await Future.wait(futures);
   }
 
   /// Bir IP:port'a baglan, karsilikli HMAC dogrula. Doner: true = bu port'ta POS peer (host taramasi dursun).
@@ -671,9 +675,13 @@ class LanSyncService {
     Socket? socket;
     StreamSubscription? sub;
     try {
-      socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 500));
-      // Tek listener (Socket single-subscription): mesajlari tek kuyruktan oku (StateError yok).
-      final inbox = StreamController<Map<String, dynamic>>();
+      socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 300));
+      // KALICI kuyruk + bekleyen completer. Eski .first/.timeout subscription'i non-broadcast
+      // StreamController'i PAUSE edip socket.listen'i backpressure'la durduruyordu -> ikinci mesaj
+      // (identity) HIC islenmiyor, r2 timeout -> peer hep eklenmez ("0 peer"). Tek kalici listener
+      // kuyruga yazar; next() kuyruktan okur ya da completer'a asilir.
+      final queue = <Map<String, dynamic>>[];
+      Completer<Map<String, dynamic>?>? waiter;
       final buf = <int>[];
       sub = socket.listen((data) {
         buf.addAll(data);
@@ -684,14 +692,23 @@ class LanSyncService {
           buf.removeRange(0, nl + 1);
           try {
             final m = jsonDecode(utf8.decode(lineBytes, allowMalformed: true));
-            if (m is Map<String, dynamic> && !inbox.isClosed) inbox.add(m);
+            if (m is! Map<String, dynamic>) continue;
+            if (waiter != null && !waiter!.isCompleted) {
+              final w = waiter!; waiter = null; w.complete(m);
+            } else {
+              queue.add(m);
+            }
           } catch (_) {}
         }
-      }, onError: (_) { if (!inbox.isClosed) inbox.close(); },
-         onDone: () { if (!inbox.isClosed) inbox.close(); }, cancelOnError: true);
+      }, onError: (_) { final w = waiter; waiter = null; w?.complete(null); },
+         onDone: () { final w = waiter; waiter = null; w?.complete(null); },
+         cancelOnError: true);
 
-      Future<Map<String, dynamic>?> next() =>
-          inbox.stream.first.timeout(const Duration(milliseconds: 800), onTimeout: () => <String, dynamic>{}).then((m) => m.isEmpty ? null : m);
+      Future<Map<String, dynamic>?> next() {
+        if (queue.isNotEmpty) return Future.value(queue.removeAt(0));
+        waiter = Completer<Map<String, dynamic>?>();
+        return waiter!.future.timeout(const Duration(milliseconds: 800), onTimeout: () { waiter = null; return null; });
+      }
 
       final nonce = _randomNonce();
       final expected = _hmac(nonce);
@@ -724,6 +741,8 @@ class LanSyncService {
       _peers[peerDeviceId] = LanPeer(deviceId: peerDeviceId, ip: ip, port: replyPort,
           deviceName: r2['device_name']?.toString(), isMain: isMain);
       if (isNew) {
+        // FIX C: peer bulununca ANINDA yayinla (tarama bitene ~80sn bekletme). UI/lider secimi hizli gorur.
+        _peersController.add(peers);
         _log('peer_found', msg: 'Peer dogrulandi (ayni bayi): $ip:$replyPort', extra: {
           'peer_ip': ip, 'peer_port': replyPort, 'peer_device_id': peerDeviceId,
         });

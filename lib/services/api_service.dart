@@ -113,6 +113,19 @@ class ApiService {
     await _connectivity.init();
     _syncService.init(_dio);
 
+    // Secret backfill: mevcut kurulu kasalar setup'i tekrar yapmaz -> LAN secret'i validate'ten hic almadi.
+    // Key var + secret yok + online ise sessizce bir kez validate-key yap (secret doldurulur, LAN baslar).
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final hasSecret = (prefs.getString('pos_lan_tenant_secret') ?? '').isNotEmpty;
+      if (_apiKey != null && !hasSecret && _connectivity.isOnline) {
+        // 5sn cap — init'in 8sn timeout'unu yeme; basarisizsa sonraki acilista tekrar denenir.
+        await validateApiKey(_apiKey!).timeout(const Duration(seconds: 5), onTimeout: () => {});
+      }
+    } catch (e) {
+      print('[API] LAN secret backfill atlandi (guvenli): $e');
+    }
+
     // 7 Tem 2026 (LAN-senkron Faz 0): flag + device_id oku. Flag KAPALI (default) ise hicbir sey
     // yapmaz — mevcut akis aynen. device_id yoksa (henuz validateApiKey olmadi) graceful.
     try {
@@ -158,6 +171,14 @@ class ApiService {
       final response = await _dio.post('/api/pos/validate-key', data: body);
 
       if (response.data['valid'] == true) {
+        // LAN tenant-secret'i HER validate'te kaydet (setup + backfill). LanSync ayni pref'ten okur.
+        final lanSecret = response.data['lan_tenant_secret'];
+        if (lanSecret is String && lanSecret.isNotEmpty) {
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('pos_lan_tenant_secret', lanSecret);
+          } catch (_) {}
+        }
         return response.data;
       }
       return {

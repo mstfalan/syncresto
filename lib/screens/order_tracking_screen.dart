@@ -45,6 +45,41 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   // Garson hizli teslime cekerken arka plan refresh UI'i bombardiman etmesin.
   DateTime? _lastUserAction;
 
+  // TESLIM OPTIMISTIC OVERLAY: garsonun teslim niyeti backend/sync ONAYLAYANA kadar polling'i ezer
+  // (yoksa teslim "geri gelir"). Anahtar = sync-degismez composite (ticket_number|product|created_at).
+  final Map<String, _PendingDelivery> _pendingDelivery = {};
+  final Set<int> _inFlightItemIds = {}; // O2/B3: tiklama kilidi item_id bazli (ayni-key kardes kart yutulmasin)
+  int _toggleSeq = 0; // her toggle'a monotonik token (fail-rollback yalniz kendi kaydini silsin — K3)
+  static const _kDeliveryTtl = Duration(seconds: 12); // online onay ust siniri
+
+  // Bir item icin sync-degismez kimlik. ticket_number OFFLINE-xxx sync'te KORUNUR; item_id degisebilir.
+  // notes+quantity de dahil: ayni urun+ayni an 2 kalem (combo hediye/toplu ekleme) key-cakismasini azaltir.
+  String _itemKey(Map item) {
+    final tn = item['ticket_number']?.toString() ?? item['ticket_id']?.toString() ?? '?';
+    final pn = item['product_name']?.toString() ?? '';
+    final ca = item['item_created_at']?.toString() ?? item['created_at']?.toString() ?? '';
+    final nt = item['notes']?.toString() ?? '';
+    final qt = item['quantity']?.toString() ?? '';
+    return '$tn|$pn|$ca|$nt|$qt';
+  }
+
+  // 1. GECIS: bir key icin overlay ARTIK gecersiz mi? (backend niyeti HERHANGI bir kardes satirda
+  // yakaladi VEYA TTL doldu). Bu key'lere 2. geciste overlay HIC uygulanmaz -> ham backend gosterilir.
+  // B4-fix: tek satiri degil TUM kardesleri tarar; masum ikize overlay yapismasin.
+  Set<String> _confirmedKeysFor(List<dynamic> rows) {
+    final confirmed = <String>{};
+    for (final r in rows) {
+      final pd = _pendingDelivery[_itemKey(r as Map)];
+      if (pd == null || pd.inFlight) continue;
+      final backendDelivered = r['delivered_at'] != null;
+      if (backendDelivered == pd.intendedDelivered ||
+          DateTime.now().difference(pd.setAt) > _kDeliveryTtl) {
+        confirmed.add(_itemKey(r));
+      }
+    }
+    return confirmed;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -79,9 +114,18 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     try {
       final rows = await widget.apiService.getPendingOrders();
       if (!mounted) return;
+      final merged = _groupMerge(rows);
       setState(() {
         _raw = rows;
-        _byTable = _group(rows);
+        _byTable = merged.byTable;
+        // O3: overlay temizle — backend niyeti yakaladi/TTL doldu VEYA kalem artik listede yok.
+        // inFlight (cevap bekleyen) ASLA silinmez.
+        _pendingDelivery.removeWhere((k, pd) {
+          if (pd.inFlight) return false;
+          if (merged.confirmed.contains(k)) return true;
+          if (!merged.seen.contains(k) && DateTime.now().difference(pd.setAt) > _kDeliveryTtl) return true;
+          return false;
+        });
         if (_selectedTableId != null && !_byTable.containsKey(_selectedTableId)) {
           _selectedTableId = _byTable.keys.isEmpty ? null : _byTable.keys.first;
         }
@@ -93,62 +137,111 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     }
   }
 
-  Map<int, TableBundle> _group(List<dynamic> rows) {
+  // Saf: satirlari overlay ile MERGE eder. Doner: (byTable, onaylanan-anahtarlar, gorulen-anahtarlar).
+  // confirmed = backend niyeti yakaladi VEYA TTL doldu -> _pendingDelivery'den dusurulecek (_load'da).
+  ({Map<int, TableBundle> byTable, Set<String> confirmed, Set<String> seen}) _groupMerge(List<dynamic> rows) {
     final m = <int, TableBundle>{};
+    final seen = <String>{};
+    final confirmed = _confirmedKeysFor(rows); // 1. GECIS: hangi key'lerde overlay artik gecersiz
+    final overlayUsed = <String>{}; // K2: confirmed-disi key'de overlay YALNIZ ilk celisen satira
     for (final r in rows) {
       final tidRaw = r['table_id'];
       final tid = tidRaw is int ? tidRaw : int.tryParse(tidRaw?.toString() ?? '');
       if (tid == null) continue;
-      m.putIfAbsent(
-        tid,
-        () => TableBundle(
-          tableId: tid,
-          tableNumber: r['table_number']?.toString() ?? '?',
-          sectionName: r['section_name']?.toString() ?? '',
-        ),
-      );
+      m.putIfAbsent(tid, () => TableBundle(
+            tableId: tid,
+            tableNumber: r['table_number']?.toString() ?? '?',
+            sectionName: r['section_name']?.toString() ?? ''));
       final item = Map<String, dynamic>.from(r as Map);
-      if (item['delivered_at'] == null) {
-        m[tid]!.pending.add(item);
-      } else {
-        m[tid]!.delivered.add(item);
-      }
+      final key = _itemKey(item);
+      seen.add(key);
+      item['delivered_at'] = _mergedDelivered(item, key, confirmed, overlayUsed)
+          ? (item['delivered_at'] ?? DateTime.now().toIso8601String())
+          : null;
+      (item['delivered_at'] != null ? m[tid]!.delivered : m[tid]!.pending).add(item);
     }
-    return m;
+    return (byTable: m, confirmed: confirmed, seen: seen);
+  }
+
+  // 2. GECIS ortak: confirmed key -> ham backend. Aksi halde overlay'i YALNIZ ilk celisen kardes satira uygula.
+  bool _mergedDelivered(Map item, String key, Set<String> confirmed, Set<String> overlayUsed) {
+    final backendDelivered = item['delivered_at'] != null;
+    final pd = _pendingDelivery[key];
+    if (pd == null || confirmed.contains(key) || overlayUsed.contains(key)) return backendDelivered;
+    if (backendDelivered != pd.intendedDelivered) overlayUsed.add(key); // celisen satirda tuket
+    return pd.intendedDelivered; // niyeti KORU
   }
 
   Future<void> _toggle(Map<String, dynamic> item) async {
+    final key = _itemKey(item);
+    final ticketId = _extractInt(item['ticket_id']);
+    final itemId = _extractInt(item['item_id']);
+    if (ticketId == null || itemId == null) return; // id yok -> istek atilamaz, dokunma
+    // B3: tiklama kilidi item_id bazli (key bazli olsaydi ayni-key kardes kart yutulurdu).
+    if (_inFlightItemIds.contains(itemId)) return;
+    _inFlightItemIds.add(itemId);
+
     final wasDelivered = item['delivered_at'] != null;
-    _lastUserAction = DateTime.now(); // polling pause penceresi
-    // Optimistic — item field set + bundle list'leri tasi (full rebuild yok)
+    final intended = !wasDelivered;
+    final seq = ++_toggleSeq;
+    _lastUserAction = DateTime.now();
     setState(() {
-      item['delivered_at'] = wasDelivered ? null : DateTime.now().toIso8601String();
+      item['delivered_at'] = intended ? DateTime.now().toIso8601String() : null;
+      _pendingDelivery[key] = _PendingDelivery(
+          intendedDelivered: intended, setAt: DateTime.now(), inFlight: true, seq: seq);
       _moveItemBetweenLists(item, wasDelivered);
     });
 
-    final ticketId = _extractInt(item['ticket_id']);
-    final itemId = _extractInt(item['item_id']);
-    if (ticketId == null || itemId == null) return;
-
-    final result = await widget.apiService.markItemAsServed(
-      ticketId: ticketId,
-      itemId: itemId,
-      waiterId: _extractInt(widget.waiter['id']),
-    );
+    // O4: offline dal try/catch DISINDA exception firlatabilir -> finally ile kilit HER durumda serbest.
+    Map<String, dynamic> result;
+    try {
+      result = await widget.apiService.markItemAsServed(
+        ticketId: ticketId,
+        itemId: itemId,
+        waiterId: _extractInt(widget.waiter['id']),
+      );
+    } catch (e) {
+      result = {'success': false, 'error': e.toString()};
+    } finally {
+      _inFlightItemIds.remove(itemId);
+    }
 
     if (!mounted) return;
-    if (result['success'] != true) {
-      // Rollback — yine sadece tasi
+    // K3: yalniz kayit HALA bu toggle'a aitse dokun (daha yeni niyet varsa karisma).
+    final cur = _pendingDelivery[key];
+    if (cur == null || cur.seq != seq) return;
+
+    if (result['success'] == true) {
+      // K2: backend KOSULSUZ toggle -> gercek yeni durumu 'action'dan al (baska kasa teslim ettiyse
+      // istegim tersine cevirmis olabilir; hayalet-teslim onle). action yoksa optimistic tahmine dus.
+      final action = result['action']?.toString();
+      final backendDelivered = action == 'delivered' ? true : (action == 'undelivered' ? false : intended);
       setState(() {
+        cur.intendedDelivered = backendDelivered;
+        cur.inFlight = false;
+        if ((item['delivered_at'] != null) != backendDelivered) {
+          item['delivered_at'] = backendDelivered ? DateTime.now().toIso8601String() : null;
+          _moveItemBetweenLists(item, !backendDelivered);
+        }
+      });
+      // ORTA 3: baska kasa niyetimin tersine cevirmis -> garsona bildir. B5: offline'da mirror bayatligindan
+      // olabilir, "baska kasa" yaniltici -> sadece ONLINE onayda goster.
+      if (backendDelivered != intended && result['offline'] != true) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(backendDelivered
+              ? 'Bu kalem baska bir kasada teslim edilmis'
+              : 'Bu kalemin teslimi baska bir kasada geri alinmis'),
+          backgroundColor: Colors.orange[800]));
+      }
+    } else {
+      setState(() {
+        _pendingDelivery.remove(key); // reddedildi -> polling gercek durumu serbestce yansitsin
         item['delivered_at'] = wasDelivered ? DateTime.now().toIso8601String() : null;
         _moveItemBetweenLists(item, !wasDelivered);
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(result['error']?.toString() ?? 'Islem basarisiz'),
-          backgroundColor: Colors.red[700],
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result['error']?.toString() ?? 'Islem basarisiz'),
+        backgroundColor: Colors.red[700]));
     }
   }
 
@@ -161,11 +254,19 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     if (tid == null) return;
     final bundle = _byTable[tid];
     if (bundle == null) return;
+    // K2: identity ile TEK satir kaldir (removeWhere ayni-key kardesleri de sokerdi -> kalem kaybolur).
+    // Once referans esitligi, tutmazsa key esligi -> ilk eslesen (yalniz 1 tanesi).
+    final key = _itemKey(item);
+    void removeOne(List<Map<String, dynamic>> list) {
+      var idx = list.indexWhere((it) => identical(it, item));
+      if (idx < 0) idx = list.indexWhere((it) => _itemKey(it) == key);
+      if (idx >= 0) list.removeAt(idx);
+    }
     if (wasDelivered) {
-      bundle.delivered.removeWhere((it) => it['item_id'] == item['item_id']);
+      removeOne(bundle.delivered);
       bundle.pending.add(item);
     } else {
-      bundle.pending.removeWhere((it) => it['item_id'] == item['item_id']);
+      removeOne(bundle.pending);
       bundle.delivered.add(item);
     }
   }
@@ -485,8 +586,18 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   }
 
   void _showAllOrdersDialog(ThemeProvider theme) {
-    // Tum item'lar (pending + delivered) raw kaynaktan
-    final all = _raw.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+    // Tum item'lar (pending + delivered) raw kaynaktan — overlay uygula (K4: modal da niyeti gostersin).
+    // B4/B6: ana ekranla AYNI iki-gecisli mantik (confirmed key ham backend, digerinde ilk celisen kardes).
+    final confirmed = _confirmedKeysFor(_raw);
+    final overlayUsed = <String>{};
+    final all = _raw.map((r) {
+      final item = Map<String, dynamic>.from(r as Map);
+      final key = _itemKey(item);
+      item['delivered_at'] = _mergedDelivered(item, key, confirmed, overlayUsed)
+          ? (item['delivered_at'] ?? DateTime.now().toIso8601String())
+          : null;
+      return item;
+    }).toList();
     // Salon listesi — bos olanlar 'Diger'
     final sectionSet = <String>{};
     for (final m in all) {
@@ -859,4 +970,13 @@ class _TableDetailView extends StatelessWidget {
       ),
     ]);
   }
+}
+
+// Teslim optimistic kaydi: garsonun son niyeti + zaman + ucus durumu + toggle token'i.
+class _PendingDelivery {
+  bool intendedDelivered; // garsonun istedigi durum (teslim=true / geri-al=false)
+  final DateTime setAt;   // TTL
+  bool inFlight;          // markItemAsServed cevabi bekleniyor
+  final int seq;          // fail-rollback yalniz kendi kaydini silsin (K3)
+  _PendingDelivery({required this.intendedDelivered, required this.setAt, required this.inFlight, required this.seq});
 }

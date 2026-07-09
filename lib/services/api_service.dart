@@ -1449,6 +1449,9 @@ class ApiService {
         data: { if (waiterId != null) 'waiter_id': waiterId },
       );
       if (response.data['success'] == true) {
+        // Fable K1: mirror'i da guncelle -> fallback poll teslimi gorsun (overlay TTL'de dusup geri gelmesin).
+        await _localDb.markItemDeliveryMirror(itemId,
+            ticketId: ticketId, delivered: response.data['action'] == 'delivered', waiterId: waiterId);
         _logService.logAction('Kalem teslim toggle', details: {
           'ticket_id': ticketId, 'item_id': itemId,
           'action': response.data['action'],

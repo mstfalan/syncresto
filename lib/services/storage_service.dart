@@ -42,6 +42,9 @@ class StorageService {
             }
             if (kDebugMode) print('[Storage] API key yedekten geri yuklendi');
           }
+          if (getLanTenantSecret() == null && backup[_lanSecretKey] != null) {
+            await _prefs.setString(_lanSecretKey, _deobfuscate(backup[_lanSecretKey]));
+          }
         }
       }
     } catch (e) {
@@ -62,12 +65,14 @@ class StorageService {
     if (_backupFile == null) return;
     try {
       final key = getApiKey();
+      final lanSecret = getLanTenantSecret();
       final data = {
         _apiUrlKey: getApiUrl(),
         _backendUrlKey: getBackendUrl(),
         // API key obfuscate (duz metin degil). Yeni key girilince _saveBackup cagrilir -> yedek guncellenir.
         if (key != null) _apiKeyKey: _obfuscate(key),
         if (getApiKeyName() != null) _apiKeyNameKey: getApiKeyName(),
+        if (lanSecret != null) _lanSecretKey: _obfuscate(lanSecret),
       };
       final jsonStr = jsonEncode(data);
       final hmac = _generateHmac(jsonStr);
@@ -143,6 +148,18 @@ class StorageService {
   String hashKey(String apiKey) => sha256.convert(utf8.encode(apiKey)).toString();
   String? getTenantHash() => _prefs.getString(_tenantHashKey);
 
+  // LAN tenant secret (restoran-basina, HMAC icin). validate-key'den gelir.
+  static const String _lanSecretKey = 'pos_lan_tenant_secret';
+  String? getLanTenantSecret() => _prefs.getString(_lanSecretKey);
+  Future<void> saveLanTenantSecret(String secret) async {
+    await _prefs.setString(_lanSecretKey, secret);
+    await _saveBackup();
+  }
+  Future<void> clearLanTenantSecret() async {
+    await _prefs.remove(_lanSecretKey);
+    await _saveBackup(); // backup'tan da dus (Fable ORTA-1: eski secret sizmasin)
+  }
+
   Future<void> saveApiUrl(String url) async {
     await _prefs.setString(_apiUrlKey, url);
     await _saveBackup();
@@ -161,6 +178,7 @@ class StorageService {
     await _prefs.remove(_apiKeyNameKey);
     await _prefs.remove(_apiUrlKey);
     await _prefs.remove(_backendUrlKey);
+    await _prefs.remove(_lanSecretKey); // LAN secret de dussun (eski tenant secret'i kalmasin)
     try { await _backupFile?.delete(); } catch (_) {}
   }
 

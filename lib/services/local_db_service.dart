@@ -16,6 +16,10 @@ class LocalDbService {
   static String? _lastSectionsHash;
   // 12 Haz 2026: print_queue completed temizliği throttle (getPendingPrintJobs içinde)
   static DateTime? _lastPrintCleanupAt;
+  // Fable B1: ONLINE teslim mirror'a yazilinca (sync_queue izi yok) bayat backend snapshot'i
+  // upsertServerTicket'te delivered_*'i geri EZMESIN diye kisa omurlu koruma. local_item_id -> zaman.
+  static final Map<int, DateTime> _deliveryTouchedAt = {};
+  static const Duration _kDeliveryTouchTtl = Duration(seconds: 15);
   static final LocalDbService _instance = LocalDbService._internal();
 
   factory LocalDbService() => _instance;
@@ -2008,7 +2012,10 @@ class LocalDbService {
                        " AND (payload LIKE ? OR payload LIKE ?)",
                 whereArgs: [localTicketId, '%"item_local_id":$exLocalId,%', '%"item_local_id":$exLocalId}%'],
                 limit: 1);
-            if (pendingServed.isNotEmpty) {
+            // B1: online mirror yazimi (sync_queue izi yok) son 15sn icinde ise bayat snapshot delivered_*'i ezmesin.
+            final touched = _deliveryTouchedAt[exLocalId];
+            final freshTouch = touched != null && DateTime.now().difference(touched) < _kDeliveryTouchTtl;
+            if (pendingServed.isNotEmpty || freshTouch) {
               itemRow.remove('delivered_at');
               itemRow.remove('delivered_by');
               itemRow.remove('delivered_by_name');
@@ -3164,6 +3171,47 @@ class LocalDbService {
     );
 
     return {'success': true, 'action': newDeliveredAt != null ? 'delivered' : 'undelivered', 'offline': true};
+  }
+
+  // Fable K1: ONLINE teslim basarisini mirror'a yansit (sync_queue'ya EKLEMEDEN). Mirror-fallback
+  // poll'lari da teslimi gorsun -> overlay TTL'de dusup teslim "geri gelmesin". delivered = backend action.
+  Future<void> markItemDeliveryMirror(int itemId, {required int ticketId, required bool delivered, int? waiterId}) async {
+    try {
+      final db = await database;
+      // B2: ONCELIKLI cozum (server_id ONCE) — onceliksiz OR + limit yanlis ticket/kalem esleyebilir.
+      // Online akista ticketId/itemId HER ZAMAN server id'dir; oncelik dogru olani secer.
+      int? scopeLocalTicketId;
+      var tk = await db.query('local_tickets', columns: ['local_id'],
+          where: 'server_id = ?', whereArgs: [ticketId], limit: 1);
+      if (tk.isEmpty) {
+        tk = await db.query('local_tickets', columns: ['local_id'],
+            where: 'local_id = ?', whereArgs: [ticketId], limit: 1);
+      }
+      if (tk.isEmpty) return; // masa mirror'da yok — yapacak sey yok
+      scopeLocalTicketId = tk.first['local_id'] as int?;
+      final scope = ' AND local_ticket_id = $scopeLocalTicketId';
+      var rows = await db.query('local_ticket_items', columns: ['local_id'],
+          where: 'server_id = ?$scope', whereArgs: [itemId], limit: 1);
+      if (rows.isEmpty) {
+        rows = await db.query('local_ticket_items', columns: ['local_id'],
+            where: 'local_id = ?$scope', whereArgs: [itemId], limit: 1);
+      }
+      if (rows.isEmpty) return;
+      String? deliveredByName;
+      if (delivered && waiterId != null) {
+        final w = await db.query('cached_waiters', columns: ['name'], where: 'id = ?', whereArgs: [waiterId], limit: 1);
+        if (w.isNotEmpty) deliveredByName = w.first['name'] as String?;
+      }
+      final localItemId = rows.first['local_id'] as int;
+      await db.update('local_ticket_items', {
+        'delivered_at': delivered ? DateTime.now().toIso8601String() : null,
+        'delivered_by': delivered ? waiterId : null,
+        'delivered_by_name': delivered ? deliveredByName : null,
+      }, where: 'local_id = ?', whereArgs: [localItemId]);
+      final nowTs = DateTime.now();
+      _deliveryTouchedAt[localItemId] = nowTs; // B1: bayat snapshot bunu ~15sn ezemesin
+      _deliveryTouchedAt.removeWhere((_, t) => nowTs.difference(t) > _kDeliveryTouchTtl); // sisme onle
+    } catch (_) {} // mirror best-effort — online zaten backend authoritative
   }
 
   /// 7 Tem 2026 (LAN Faz 2 — Fable K1): Bu masa SADECE LAN yansimasiyla mi dolu?

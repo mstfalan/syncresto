@@ -599,6 +599,23 @@ pkill -f flutter; flutter run -d macos
 
 ## 📝 Değişiklik Geçmişi
 
+### 9 Temmuz 2026 — Masa Takip "Teslim Geri Geliyor" Fix (3 tur Fable adversaryal)
+
+**Şikayet:** Garsonlar masa takip ekranında kalemi "teslim" işaretleyince BAZEN geri geliyordu.
+
+**Kök sebep:** 2sn polling, garsonun optimistic teslim işaretini backend yazma+okuma gecikmesinden ÖNCE `getPendingOrders`'un eski `delivered_at=null` verisiyle eziyordu.
+
+**Çözüm — optimistic overlay + iki-geçişli merge:**
+- `order_tracking_screen.dart`: `_pendingDelivery` overlay (compositeKey→intendedDelivered/inFlight/seq/setAt). Garson niyeti backend/sync ONAYLAYANA kadar polling'i ezer, TTL 12sn.
+- **Composite key** `_itemKey` = `ticket_number|product_name|item_created_at|notes|quantity`. `item_id` KULLANILMAZ (online↔offline sync'te değişir); ticket_number OFFLINE-xxx sync'te korunur.
+- **Backend action-onay:** mark-served backend'de KOŞULSUZ TOGGLE, response `action` ('delivered'/'undelivered') döner. `_toggle` bunu okur → başka kasa niyeti tersine çevirmişse hayalet-teslim önlenir + turuncu snackbar (online).
+- **İki-geçişli merge** (`_confirmedKeysFor` + `_mergedDelivered`, `_groupMerge` VE modal): 1. geçiş tüm satırları tarar (bir key HERHANGİ kardeşte yakalandıysa confirmed), 2. geçiş confirmed→ham backend, değilse ilk çelişen satırda overlay tüket. Combo hediye ikizlerinde masum kardeşe overlay yapışmasını önler.
+- **K1 mirror yazımı:** online teslim success'inde `local_db_service.markItemDeliveryMirror` mirror `delivered_at`'i sync_queue'ya EKLEMEDEN günceller (fake-online fallback poll teslimi görsün); static `_deliveryTouchedAt` (15sn) + `upsertServerTicket` guard bayat snapshot'ı ezmesin.
+- **item_id bazlı tıklama kilidi** `_inFlightItemIds` + try/finally (aynı-key kardeş kart yutulmasın, exception'da kilit serbest).
+
+**Doğrulama:** flutter analyze 0 error, 108 test geçti, 3 tur Fable (4→6→1 bulgu kapatıldı, YAKINSADI TEMİZ).
+**Deploy:** POS build, SÜRÜM ARTIRMA YOK (bildirim gitmesin), tüm bayilere değil gizli.
+
 ### 8 Temmuz 2026 — COMBO FAZ4 + Varyant Kanal Fiyatı + LAN Faz 3 + Offline
 
 **COMBO ÜRÜN (POS entegrasyonu, uçtan uca):**

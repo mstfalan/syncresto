@@ -44,7 +44,7 @@ class LanSyncService {
 
   static const String _flagKey = 'lan_sync_enabled';
   static const String _deviceIdKey = 'pos_device_id'; // api_service._getDeviceId ile AYNI (tek kaynak)
-  static const String _apiKeyPref = 'pos_api_key';    // storage_service _apiKeyKey ile AYNI
+  static const String _lanSecretPref = 'pos_lan_tenant_secret'; // storage _lanSecretKey ile AYNI
   static const String _mainDeviceKey = 'lan_main_device'; // HIBRIT: 'auto' | 'this' (ana kasa isareti)
 
   // Port araligi (Mustafa karari 7 Tem): GENIS aralik ki "hepsi dolu" IMKANSIZ olsun.
@@ -60,7 +60,7 @@ class LanSyncService {
   String? _deviceId;
   String? get deviceId => _deviceId;
 
-  String? _apiKey; // tenant kimligi kaynagi (HMAC icin; aga HAM cikmaz)
+  String? _lanSecret; // RESTORAN tenant secret (HMAC icin; aga HAM cikmaz, sadece HMAC ispati)
 
   ServerSocket? _server;
   int? _listenPort;
@@ -106,7 +106,7 @@ class LanSyncService {
       final prefs = await SharedPreferences.getInstance();
       _enabled = prefs.getBool(_flagKey) ?? false;
       _deviceId = prefs.getString(_deviceIdKey);
-      _apiKey = prefs.getString(_apiKeyPref);
+      _lanSecret = prefs.getString(_lanSecretPref);
       _cachedIsMain = (prefs.getString(_mainDeviceKey) ?? 'auto') == 'this';
     } catch (e) {
       print('[LanSync] pref okuma hatasi (guvenli: kapali): $e');
@@ -116,9 +116,9 @@ class LanSyncService {
 
   /// Servisi baslat: ServerSocket ac (ilk bos port) + periyodik kesif. SADECE _enabled ise cagrilir.
   Future<void> _start() async {
-    if (_deviceId == null || _apiKey == null) {
-      // Kimlik henuz hazir degil (kurulum tamamlanmamis) -> baslatma, bir sonraki reconnect'te tekrar denenir.
-      print('[LanSync] Kimlik hazir degil (deviceId/apiKey), LAN baslatilmadi');
+    // Bos/null secret -> LAN baslamaz (bos HMAC tum cihazlari eslestirir = tenant sizintisi).
+    if (_deviceId == null || (_lanSecret?.isEmpty ?? true)) {
+      print('[LanSync] tenant-secret yok, LAN baslatilmadi');
       return;
     }
     await _startServer();
@@ -613,7 +613,7 @@ class LanSyncService {
   final Set<String> _rejectedLogged = {}; // ayni yabanci'yi tekrar tekrar loglama
 
   Future<void> _runDiscovery() async {
-    if (!_enabled || _apiKey == null) return;
+    if (!_enabled || (_lanSecret?.isEmpty ?? true)) return; // bos/null secret -> kesif yok (tenant guvenlik)
     if (_scanning) return; // onceki tarama bitmeden yenisini baslatma
     _scanning = true;
     try {
@@ -773,9 +773,9 @@ class LanSyncService {
 
   // ---------------- YARDIMCILAR ----------------
 
-  /// HMAC-SHA256(apiKey, nonce) hex. Ayni key'i bilenin ispati; key aga CIKMAZ.
+  /// HMAC-SHA256(lanSecret, nonce) hex. Ayni restoran secret'ini bilenin ispati; secret aga CIKMAZ.
   String _hmac(String nonce) {
-    final key = utf8.encode(_apiKey ?? '');
+    final key = utf8.encode(_lanSecret ?? '');
     final bytes = utf8.encode(nonce);
     return Hmac(sha256, key).convert(bytes).toString();
   }

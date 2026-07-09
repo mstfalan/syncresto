@@ -85,6 +85,7 @@ class _SetupScreenState extends State<SetupScreen> {
           try { await LocalDbService().clearAllTenantData(); } catch (e) { print('[Setup] SQLite temizleme hatasi: $e'); }
           try { await ImageCacheService().clearCache(); } catch (e) { print('[Setup] Gorsel cache temizleme hatasi: $e'); }
           try { await widget.storageService.clearWaiterSession(); } catch (_) {}
+          try { await widget.storageService.clearLanTenantSecret(); } catch (_) {} // eski restoran secret'i sizmasin
           try {
             final tp = Provider.of<ThemeProvider>(context, listen: false);
             tp.resetToDefaults();
@@ -94,6 +95,10 @@ class _SetupScreenState extends State<SetupScreen> {
 
         await widget.storageService.saveApiUrl(apiUrl);
         await widget.storageService.saveApiKey(apiKey, result['restaurant_name'] ?? 'POS');
+        final lanSecret = result['lan_tenant_secret'];
+        if (lanSecret is String && lanSecret.isNotEmpty) {
+          await widget.storageService.saveLanTenantSecret(lanSecret);
+        }
 
         // Save backend URL for images/assets
         // image_base_url: backend_url varsa onu, yoksa panel.syncresto.com'u kullan

@@ -792,19 +792,44 @@ class LanSyncService {
     } catch (_) {}
   }
 
+  /// Gercek LAN (WiFi/Ethernet) subnet'ini bul. 9 Tem SAHA FIX: eski kod ilk non-loopback IPv4'u
+  /// aliyordu -> VPN/Tailscale (utun/tun, CGNAT 100.64-127.x) veya AWDL/bridge sanal interface WiFi'den
+  /// ONCE gelince YANLIS subnet secilir (or Mac VPN 100.127.x -> Windows 192.168.68'i HIC taramaz, 0 peer).
+  /// FIX: (1) sanal/VPN interface adlarini (utun/tun/tap/ppp/awdl/llw/bridge/gif/stf) ELE, (2) CGNAT
+  /// 100.64.0.0/10 + link-local 169.254 + APIPA ELE, (3) PRIVATE LAN IP'yi (192.168 / 10.x / 172.16-31)
+  /// tercih et. Aday yoksa eski davranisa (ilk IPv4) dus.
   Future<_Subnet?> _localSubnet() async {
     try {
       final interfaces = await NetworkInterface.list();
+      _Subnet? fallback;
       for (final interface in interfaces) {
+        final name = interface.name.toLowerCase();
+        // Sanal/VPN/tunnel interface'leri atla (WiFi=en/eth/wlan, Ethernet degil bunlar).
+        final isVirtual = name.startsWith('utun') || name.startsWith('tun') || name.startsWith('tap') ||
+            name.startsWith('ppp') || name.contains('awdl') || name.contains('llw') ||
+            name.startsWith('bridge') || name.startsWith('gif') || name.startsWith('stf') ||
+            name.contains('vmnet') || name.contains('vboxnet') || name.contains('tailscale') ||
+            name.contains('zt') || name.contains('wg');
         for (final addr in interface.addresses) {
-          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-            final parts = addr.address.split('.');
-            if (parts.length == 4) {
-              return _Subnet('${parts[0]}.${parts[1]}.${parts[2]}.', addr.address);
-            }
-          }
+          if (addr.type != InternetAddressType.IPv4 || addr.isLoopback) continue;
+          final ip = addr.address;
+          final parts = ip.split('.');
+          if (parts.length != 4) continue;
+          final o1 = int.tryParse(parts[0]) ?? 0;
+          final o2 = int.tryParse(parts[1]) ?? 0;
+          // CGNAT (100.64-127.x = VPN/Tailscale) + link-local (169.254 APIPA) ATLA.
+          final isCgnat = o1 == 100 && o2 >= 64 && o2 <= 127;
+          final isLinkLocal = o1 == 169 && o2 == 254;
+          if (isCgnat || isLinkLocal) continue;
+          final sub = _Subnet('${parts[0]}.${parts[1]}.${parts[2]}.', ip);
+          // PRIVATE LAN IP (gercek yerel ag) + sanal-olmayan interface -> HEMEN sec (en iyi aday).
+          final isPrivate = o1 == 192 && o2 == 168 || o1 == 10 || (o1 == 172 && o2 >= 16 && o2 <= 31);
+          if (isPrivate && !isVirtual) return sub;
+          // Aksi halde ilk gecerli adayi fallback tut (private ama sanal, veya public — nadir).
+          fallback ??= sub;
         }
       }
+      return fallback;
     } catch (_) {}
     return null;
   }

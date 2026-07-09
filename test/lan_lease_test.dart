@@ -122,6 +122,18 @@ Future<Map<String, dynamic>> tryGrantLease(Database db,
   });
 }
 
+// PUSH-ON-CLAIM enrichLeaseReflection (uretim local_db_service.dart ile BIREBIR).
+Future<void> enrichLeaseReflection(Database db,
+    {required int tableId, required String claimant, required String ticketNumber,
+    double? total, String? tableNumber}) async {
+  final row = <String, dynamic>{'ticket_number': ticketNumber, 'status': 'open'};
+  if (total != null) row['total'] = total;
+  if (tableNumber != null) row['table_number'] = tableNumber;
+  await db.update('local_tickets', row,
+      where: "table_id = ? AND owner_device_id = ? AND lan_origin = 'lease'",
+      whereArgs: [tableId, claimant]);
+}
+
 // Ortak ticket-scope clause (uretimdeki _ticketScopeSyncClause ile BIREBIR).
 String ticketScopeSyncClause(String inClause) => """
   (
@@ -647,6 +659,69 @@ void main() {
       expect((await db.query('local_tickets', where: 'table_id=2')).isEmpty, true, reason: 'lease silindi (failover kalintisi dahil)');
       expect((await db.query('local_tickets', where: 'table_id=3')).isNotEmpty, true, reason: 'demoted KORUNUR (held olabilir)');
       expect((await db.query('local_tickets', where: 'table_id=4')).isNotEmpty, true, reason: 'self KORUNUR (gercek adisyon)');
+    });
+  });
+
+  group('PUSH-ON-CLAIM: enrichLeaseReflection (istemci masasi ucuncu kasada gorunsun)', () {
+    test('enrich lease satirini GERCEK icerikle gunceller (LEASE-x total=0 -> gercek)', () async {
+      // Lider tryGrantLease ile placeholder yaratir (istemci B masa 5 acti)
+      await tryGrantLease(db, tableId: 5, claimant: 'B', leaseTtl: const Duration(seconds: 45));
+      final before = (await db.query('local_tickets', where: 'table_id=5')).first;
+      expect(before['ticket_number'], 'LEASE-5-B');
+      expect(before['total'], 0);
+      // Istemci B gercek masa icerigini push eder
+      await enrichLeaseReflection(db, tableId: 5, claimant: 'B',
+          ticketNumber: 'OFFLINE-5-ABCD', total: 256.0, tableNumber: 'Fıçı 2');
+      final after = (await db.query('local_tickets', where: 'table_id=5')).first;
+      expect(after['ticket_number'], 'OFFLINE-5-ABCD');
+      expect(after['total'], 256.0);
+      expect(after['table_number'], 'Fıçı 2');
+      expect(after['lan_origin'], 'lease', reason: 'KISIT-1: lease KALIR, self OLMAZ (backend sync YOK)');
+    });
+
+    test('Fable KRITIK-1: enrich status=open YAPAR (ucuncu istemci dolu-masa tespiti open sayar)', () async {
+      await tryGrantLease(db, tableId: 6, claimant: 'B', leaseTtl: const Duration(seconds: 45));
+      final before = (await db.query('local_tickets', where: 'table_id=6')).first;
+      expect(before['status'], 'lease_hold', reason: 'placeholder lease_hold ile baslar');
+      await enrichLeaseReflection(db, tableId: 6, claimant: 'B', ticketNumber: 'OFFLINE-6-X', total: 100.0);
+      final after = (await db.query('local_tickets', where: 'table_id=6')).first;
+      expect(after['status'], 'open', reason: 'enrich open yapar -> getOfflineOpenTableIds sayar (masa BOS gorunmez)');
+      expect(after['lan_origin'], 'lease', reason: 'origin lease KALIR (backend sizmaz)');
+    });
+
+    test('enrich SADECE lease satirina yazar (self/demoted/lan DOKUNULMAZ)', () async {
+      // Ayni masada hem self (bu cihazin gercek masasi) hem baska cihazin lease i olamaz normalde,
+      // ama guard testi: farkli origin ler ayni owner+table ile -> sadece lease guncellenir.
+      await db.insert('local_tickets', {'ticket_number': 'SELF-9', 'table_id': 9, 'status': 'open', 'lan_origin': 'self', 'owner_device_id': 'B', 'total': 500});
+      await db.insert('local_tickets', {'ticket_number': 'LEASE-9-B', 'table_id': 9, 'status': 'lease_hold', 'lan_origin': 'lease', 'owner_device_id': 'B', 'total': 0});
+      await enrichLeaseReflection(db, tableId: 9, claimant: 'B', ticketNumber: 'OFFLINE-9-Y', total: 300.0);
+      final self = (await db.query('local_tickets', where: "table_id=9 AND lan_origin='self'")).first;
+      final lease = (await db.query('local_tickets', where: "table_id=9 AND lan_origin='lease'")).first;
+      expect(self['ticket_number'], 'SELF-9', reason: 'self DOKUNULMADI');
+      expect(self['total'], 500, reason: 'self total korundu');
+      expect(lease['ticket_number'], 'OFFLINE-9-Y', reason: 'sadece lease guncellendi');
+      expect(lease['total'], 300.0);
+    });
+
+    test('enrich baska cihazin lease ine yazmaz (owner=claimant filtresi)', () async {
+      await db.insert('local_tickets', {'ticket_number': 'LEASE-8-C', 'table_id': 8, 'status': 'lease_hold', 'lan_origin': 'lease', 'owner_device_id': 'C', 'total': 0});
+      // B claimant ile enrich -> C nin lease ine DOKUNMAZ
+      await enrichLeaseReflection(db, tableId: 8, claimant: 'B', ticketNumber: 'OFFLINE-8-Z', total: 99.0);
+      final row = (await db.query('local_tickets', where: 'table_id=8')).first;
+      expect(row['ticket_number'], 'LEASE-8-C', reason: 'C nin lease i DOKUNULMADI (owner=B eslesmedi)');
+      expect(row['total'], 0, reason: 'total degismedi');
+    });
+
+    test('Fable KRITIK-1 REGRESYON: enrich sonrasi masa getOfflineOpenTableIds te DOLU gorunur', () async {
+      // Ucuncu istemci C nin gozunden: liderden gelen enrich li lease satirini upsertLanTicket 'lan' yazar.
+      // enrich ONCESI (lease_hold placeholder) masa BOS gorunurdu; enrich SONRASI (open) DOLU gorunmeli.
+      await db.insert('local_tickets', {'ticket_number': 'LEASE-11-B', 'table_id': 11, 'status': 'lease_hold', 'lan_origin': 'lease', 'owner_device_id': 'B', 'total': 0, 'lan_lease_until': future(30)});
+      var ids = await getOfflineOpenTableIds(db);
+      expect(ids.contains(11), false, reason: 'lease_hold placeholder DOLU GORUNMEZ (dogru — henuz icerik yok)');
+      // enrich -> status open
+      await enrichLeaseReflection(db, tableId: 11, claimant: 'B', ticketNumber: 'OFFLINE-11-Q', total: 256.0, tableNumber: 'Fıçı 3');
+      ids = await getOfflineOpenTableIds(db);
+      expect(ids.contains(11), true, reason: 'enrich sonrasi masa DOLU GORUNUR (ozellik amacina ulasti)');
     });
   });
 }

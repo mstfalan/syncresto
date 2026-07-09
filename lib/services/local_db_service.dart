@@ -2873,6 +2873,31 @@ class LocalDbService {
     });
   }
 
+  /// PUSH-ON-CLAIM: lider, istemcinin lease_claim/renew ile tasidigi GERCEK ticket icerigini
+  /// (ticket_number/total/table_number) mevcut 'lease' placeholder satirina yansitir. Boylece
+  /// getLanLedgerForBroadcast masayi total=0 + 'LEASE-x' yerine GERCEK icerikle yayar -> ucuncu
+  /// istemci gorur. WHERE lan_origin='lease' + owner=claimant: self/demoted/lan satirlarina ASLA yazmaz.
+  /// status='open' YAPAR (Fable KRITIK-1): ucuncu istemcinin dolu-masa tespiti getOfflineOpenTableIds
+  /// SADECE status='open' sayar; lease_hold biraksak masa BOS gorunurdu (ozellik no-op). 'lease' origin
+  /// backend'e SIZMAZ (getSelfOpenTicketsForLan/getUnsyncedClosedTickets 'self' filtreli) -> open guvenli.
+  /// tryGrantLease/canWriteTable/clearLease/pruneLeaseZombies status'a bagli DEGIL -> lease mantigi bozulmaz.
+  /// release'te ASLA cagrilmaz (ticketNumber null -> total=0 ile ezme yok).
+  Future<void> enrichLeaseReflection({
+    required int tableId,
+    required String claimant,
+    required String ticketNumber,
+    double? total,
+    String? tableNumber,
+  }) async {
+    final db = await database;
+    final row = <String, dynamic>{'ticket_number': ticketNumber, 'status': 'open'};
+    if (total != null) row['total'] = total;
+    if (tableNumber != null) row['table_number'] = tableNumber;
+    await db.update('local_tickets', row,
+        where: "table_id = ? AND owner_device_id = ? AND lan_origin = 'lease'",
+        whereArgs: [tableId, claimant]);
+  }
+
   /// Lease serbest birak (masa kapaninca). KRITIK-1 (Fable 2. tur): DELETE artik status KOSULSUZ
   /// 'lease' origin'i siler — failover'da pruneLanReflectionsKeepLeases satiri 'lease'+status='open'e
   /// cevirdiginden eski 'lease_hold' kosulu zombi birakiyordu (unleased_open ile masa restoran capinda

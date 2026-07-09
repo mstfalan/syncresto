@@ -258,13 +258,20 @@ class LanSyncService {
         final tid = t['table_id'];
         if (t['owner_device_id']?.toString() != _deviceId) continue;
         if (tid is! int) continue;
-        final res = await _sendLeaseMsg(leader, 'lease_renew', tid);
+        // PUSH-ON-CLAIM: kendi masamin GERCEK icerigini lidere tasi -> lider lease satirini zenginlestirir
+        // -> ucuncu istemci masayi gorur. getSelfOpenTicketsForLan bu alanlari zaten donduruyor.
+        final tn = t['ticket_number']?.toString();
+        final tot = (t['total'] is num) ? (t['total'] as num).toDouble() : 0.0;
+        final tnum = t['table_number']?.toString();
+        final res = await _sendLeaseMsg(leader, 'lease_renew', tid,
+            ticketNumber: tn, total: tot, tableNumber: tnum);
         if (res == null) continue;
         if (res['reason'] == 'held') {
           await _demoteCandidate(tid, res['owner']?.toString());
         } else if (res['reason'] == 'no_ticket') {
-          // Lider'de lease kaydi yok -> korumayi geri kur (re-claim). Grant/deny lider karari.
-          await _sendLeaseMsg(leader, 'lease_claim', tid);
+          // Lider'de lease kaydi yok -> korumayi geri kur (re-claim, icerik tasir ki lider enrich edebilsin).
+          await _sendLeaseMsg(leader, 'lease_claim', tid,
+              ticketNumber: tn, total: tot, tableNumber: tnum);
         }
       }
     } catch (_) {}
@@ -372,7 +379,8 @@ class LanSyncService {
     return true;
   }
 
-  Future<Map<String, dynamic>?> _sendLeaseMsg(LanPeer leader, String type, int tableId) async {
+  Future<Map<String, dynamic>?> _sendLeaseMsg(LanPeer leader, String type, int tableId,
+      {String? ticketNumber, double? total, String? tableNumber}) async {
     Socket? socket;
     StreamSubscription? sub;
     try {
@@ -395,7 +403,20 @@ class LanSyncService {
          onDone: () { if (!inbox.isClosed) inbox.close(); }, cancelOnError: true);
 
       final nonce = _randomNonce();
-      _send(socket, {'type': type, 'nonce': nonce, 'proof': _hmac(nonce), 'table_id': tableId, 'claimant': _deviceId});
+      // KRITIK-1: proof ticket icerigini de kapsar (manipulasyon onleme). Icerik yoksa ('LEASE-x' null)
+      // canonical bos alanlar uretir -> mevcut lease_release/basit claim ile uyumlu.
+      final proof = _leaseProof(nonce, tableId, _deviceId!,
+          ticketNumber: ticketNumber, total: total, tableNumber: tableNumber);
+      final payload = <String, dynamic>{
+        'type': type, 'nonce': nonce, 'proof': proof, 'table_id': tableId, 'claimant': _deviceId,
+      };
+      // release ticket verisi TASIMAZ (null) -> lider enrich tetiklemez (total=0 ile ezme yok).
+      if (ticketNumber != null) {
+        payload['ticket_number'] = ticketNumber;
+        payload['total'] = total;
+        payload['table_number'] = tableNumber;
+      }
+      _send(socket, payload);
       final reply = await inbox.stream.first
           .timeout(const Duration(milliseconds: 1000), onTimeout: () => <String, dynamic>{});
       if (reply['type'] != 'lease_result') return null;
@@ -567,13 +588,20 @@ class LanSyncService {
     final nonce = msg['nonce']?.toString() ?? '';
     final got = msg['proof']?.toString() ?? '';
     if (nonce.isEmpty || nonce.length > 128) return;
-    if (!_constantTimeEquals(got, _hmac(nonce))) return;
     final tableId = msg['table_id'];
     final claimant = msg['claimant']?.toString();
     if (tableId is! int || claimant == null || claimant.isEmpty) {
+      // Proof gonderenin nonce'una gore (bad_request'te icerik yok) — basit hmac yeterli.
       _send(socket, {'type': 'lease_result', 'ok': false, 'reason': 'bad_request', 'proof': _hmac(nonce)});
       return;
     }
+    // PUSH-ON-CLAIM ticket icerigi (opsiyonel). KRITIK-1: proof bu icerigi de KAPSAR — manipulasyon RED.
+    final ticketNumber = msg['ticket_number']?.toString();
+    final total = (msg['total'] is num) ? (msg['total'] as num).toDouble() : null;
+    final tableNumber = msg['table_number']?.toString();
+    final expectedProof = _leaseProof(nonce, tableId, claimant,
+        ticketNumber: ticketNumber, total: total, tableNumber: tableNumber);
+    if (!_constantTimeEquals(got, expectedProof)) return; // yanlis bayi VEYA icerik manipulasyonu -> RED
     final leader = await _electLeader();
     if (leader != _deviceId) {
       _send(socket, {'type': 'lease_result', 'ok': false, 'reason': 'not_leader', 'leader': leader, 'proof': _hmac(nonce)});
@@ -588,6 +616,13 @@ class LanSyncService {
       final res = await _localDb.tryGrantLease(
         tableId: tableId, claimant: claimant, leaseTtl: leaseTtl, isRenew: type == 'lease_renew');
       final granted = res['granted'] == true;
+      // PUSH-ON-CLAIM: grant + gercek ticket geldiyse lease satirini zenginlestir (ucuncu istemci gorsun).
+      // KRITIK-2: enrich status'a DOKUNMAZ. 'LEASE-' placeholder'in kendisiyle enrich etme (idempotent).
+      if (granted && ticketNumber != null && ticketNumber.isNotEmpty && !ticketNumber.startsWith('LEASE-')) {
+        await _localDb.enrichLeaseReflection(
+          tableId: tableId, claimant: claimant,
+          ticketNumber: ticketNumber, total: total, tableNumber: tableNumber);
+      }
       _send(socket, {
         'type': 'lease_result',
         'ok': granted,
@@ -797,6 +832,15 @@ class LanSyncService {
     final key = utf8.encode(_lanSecret ?? '');
     final bytes = utf8.encode(nonce);
     return Hmac(sha256, key).convert(bytes).toString();
+  }
+
+  /// PUSH-ON-CLAIM KRITIK-1: lease mesajina ticket icerigi binince HMAC SADECE nonce'u degil icerigi
+  /// de kapsamali — yoksa ayni bayideki baska dogrulanmis cihaz total/table_number'i MANIPULE edip
+  /// ucuncu istemcide yanlis tutar gosterebilir. Kanonik string sirasi SABIT (gonderen+alici ayni uretir).
+  String _leaseProof(String nonce, int tableId, String claimant,
+      {String? ticketNumber, double? total, String? tableNumber}) {
+    final canonical = '$nonce|$tableId|$claimant|${ticketNumber ?? ''}|${total ?? 0}|${tableNumber ?? ''}';
+    return _hmac(canonical);
   }
 
   String _randomNonce() {

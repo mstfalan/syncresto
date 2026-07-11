@@ -45,30 +45,46 @@ jobs:
           CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: flutter build windows --release
 
+      # Bu adim YEDEK (safety-net). Asil kopyalama CMake InstallRequiredSystemLibraries'te.
+      # Bu yuzden bu adim build'i ASLA dusurmemeli (continue-on-error) — gercek kontrolu
+      # asagidaki "Verify runtime DLLs" guard yapar. Hata olsa bile CMake kopyasi + guard yeter.
       - name: Bundle VC++ runtime DLLs (fallback + safety-net)
+        continue-on-error: true
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $rel = "build\windows\x64\runner\Release"
-          # CMake InstallRequiredSystemLibraries zaten kopyalamis olabilir; bu adim idempotent
-          # uzerine yazar. CMake bir surum surprizinde tutmazsa BU kurtarir. VCToolsRedistDir =
-          # derleme env'inin redist'i -> derleyen toolset ile SURUM ESLESMESI en yuksek kaynak.
-          $crtDir = $null
-          if ($env:VCToolsRedistDir) {
-            $crtDir = Get-ChildItem -Path (Join-Path $env:VCToolsRedistDir "x64") -Directory `
-              -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+          # Bir klasor listesinden EN YUKSEK gecerli surumu bul (v145 gibi gecersiz adlari ATLA).
+          function Get-HighestVersionDir($parent) {
+            if (-not (Test-Path $parent)) { return $null }
+            Get-ChildItem -Path $parent -Directory -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                $v = $null
+                if ([System.Version]::TryParse($_.Name, [ref]$v)) {
+                  [pscustomobject]@{ Ver = $v; Path = $_.FullName }
+                }
+              } |
+              Sort-Object Ver -Descending | Select-Object -First 1 -ExpandProperty Path
+          }
+          # CRT klasorunu (Microsoft.VC*.CRT) bir kok altinda bul
+          function Find-CrtDir($x64Root) {
+            if (-not (Test-Path $x64Root)) { return $null }
+            Get-ChildItem -Path $x64Root -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
               Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
           }
+          $crtDir = $null
+          # 1) VCToolsRedistDir (derleme env'i — sabit surum eslesmesi, en guvenilir)
+          if ($env:VCToolsRedistDir) {
+            $crtDir = Find-CrtDir (Join-Path $env:VCToolsRedistDir "x64")
+          }
+          # 2) vswhere ile en yuksek gecerli surumlu redist
           if (-not $crtDir) {
             $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
             if (Test-Path $vswhere) {
               $vsPath = & $vswhere -latest -products * -property installationPath
               if ($vsPath) {
-                $crtDir = Get-ChildItem -Path "$vsPath\VC\Redist\MSVC" -Directory -ErrorAction SilentlyContinue |
-                  Sort-Object { [version]$_.Name } -Descending |
-                  ForEach-Object { Get-ChildItem -Path "$($_.FullName)\x64" -Directory `
-                    -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue } |
-                  Select-Object -First 1 -ExpandProperty FullName
+                $verDir = Get-HighestVersionDir "$vsPath\VC\Redist\MSVC"
+                if ($verDir) { $crtDir = Find-CrtDir "$verDir\x64" }
               }
             }
           }
@@ -76,7 +92,7 @@ jobs:
             Write-Host "CRT redist kaynagi: $crtDir"
             Copy-Item -Path "$crtDir\*.dll" -Destination $rel -Force
             Write-Host "Kopyalanan CRT DLL'leri:"
-            Get-ChildItem "$rel\*140*.dll" | ForEach-Object { Write-Host "  $($_.Name)" }
+            Get-ChildItem "$rel\*140*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
           } else {
             Write-Host "::warning::CRT redist klasoru bulunamadi; CMake kopyasina guveniliyor. Guard dogrulayacak."
           }

@@ -599,6 +599,27 @@ pkill -f flutter; flutter run -d macos
 
 ## 📝 Değişiklik Geçmişi
 
+### 11 Temmuz 2026 — VCRUNTIME140_1.dll Eksik Fix (Windows dağıtım, ultracode 8 ajan)
+
+**Şikayet:** Saha/müşteri Windows PC'sinde kurulu "SyncResto POS.exe" açılmıyor: "Kod yürütülmesi devam edemiyor çünkü VCRUNTIME140_1.dll bulunamadı."
+
+**Kök sebep:** Flutter Windows build'i VC++ runtime DLL'lerini (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`) `build/windows/x64/runner/Release`'e KOPYALAMAZ. Workflow zip'i = Release klasörü → zip'te bu DLL'ler YOK → müşteri PC'de VC++ Redistributable kurulu değilse portable exe kendi klasöründe DLL bulamaz → patlar. (Flutter engine /MD dinamik CRT ile linkli, bu DLL'ler exe yanında ZORUNLU; statik /MT karışımı = çökme, YAPILMAZ.)
+
+**Fix (defense-in-depth, 2 katman + guard):**
+1. **`windows/CMakeLists.txt`** (INSTALL_BUNDLE_LIB_DIR satır 73 SONRASI, install(TARGETS) ÖNCESİ): `include(InstallRequiredSystemLibraries)` + `install(FILES ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" CONFIGURATIONS Profile;Release)`. Ayarlar: `CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_ARCH=amd64` (x64 garanti), `CMAKE_INSTALL_UCRT_LIBRARIES=FALSE` (UCRT = OS parçası, app-local ETME), `CMAKE_INSTALL_DEBUG_LIBRARIES=FALSE` (Release'de vcruntime140d sızmasın), `..._SKIP=TRUE` (otomatik install kapat, manuel yap). Flutter install akışını BOZMAZ.
+2. **`.github/workflows/windows-build.yml` — "Bundle VC++ runtime DLLs"** adımı (build SONRASI, sign ÖNCESİ): fallback — CMake tutmazsa `VCToolsRedistDir` (derleyen toolset = sürüm eşleşmesi) → yoksa vswhere ile Microsoft.VC*.CRT bul → `*.dll` Release'e kopyala. İdempotent.
+3. **"Verify runtime DLLs" guard** (zip SONRASI): zip'i aç, exe kökünde 3 ZORUNLU DLL var mı + PE header machine=0x8664 (x64) mı + 0-byte değil mi kontrol et → biri eksik/yanlışsa `exit 1` = build FAIL → Upload/Release ÇALIŞMAZ (sessiz bozuk dağıtım imkansız). msvcp140_1/2.dll opsiyonel (yoksa sadece ::warning).
+
+**BUNDLE EDİLEN KESİN DLL (adversaryal doğrulandı):** vcruntime140.dll + vcruntime140_1.dll + msvcp140.dll (3 ZORUNLU). UCRT (api-ms-win-*, ucrtbase.dll) app-local ETME — Win10 1607+ OS'ta var. concrt140.dll gereksiz (parallelism kullanılmıyor). msvcp140_1/2.dll opsiyonel.
+
+**⚠️ SÜRÜM POLİTİKASI (Mustafa KURAL): YENİ SÜRÜM YAYINLAMA, ZORUNLU OLMASIN.** pubspec version `1.6.4+56` DEĞİŞMEDİ (bump YOK). Workflow'a **"Check if release already exists"** adımı eklendi: pubspec version'a karşılık gelen GitHub Release/tag (v1.6.4) ZATEN VARSA "Create GitHub Release" adımı ATLANIR (`if: steps.relcheck.outputs.exists == 'false'`) → mevcut çalışan kasalara "yeni sürüm var" sinyali GİTMEZ, auto-update tetiklenmez. Artifact her build'de üretilir (elle indirilebilir). İleride bump yapılırsa yeni tag'le release otomatik olur. Mustafa bozuk müşteriyi ELLE (vc_redist / yeni zip) çözdü.
+
+**macOS'tan DOĞRULAMA (Windows'a gerek yok):** (A) Actions log "Verify runtime DLLs" adımı yeşil + 3 DLL listeler. (B) `gh run download --repo mstfalan/syncresto -n SyncResto-Windows` → unzip → `file rel/vcruntime140_1.dll` → "PE32+ ... x86-64" görünmeli.
+
+**MÜŞTERİYE ANINDA KÖPRÜ (fix dağıtılana kadar):** `https://aka.ms/vs/17/release/vc_redist.x64.exe` kur → restart. (System32'ye kurar; portable exe orada bulur.)
+
+**PROAKTİF:** Print + Caller ID app'leri de AYNI Flutter Windows template → aynı VCRUNTIME sorununa AÇIK. Aynı fix onlara da uygulanmalı (`~/projects/syncresto_print/windows/CMakeLists.txt`, `~/projects/syncresto_caller_id/windows/CMakeLists.txt`).
+
 ### 9 Temmuz 2026 — Masa Takip "Teslim Geri Geliyor" Fix (3 tur Fable adversaryal)
 
 **Şikayet:** Garsonlar masa takip ekranında kalemi "teslim" işaretleyince BAZEN geri geliyordu.

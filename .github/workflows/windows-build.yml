@@ -45,6 +45,42 @@ jobs:
           CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: flutter build windows --release
 
+      - name: Bundle VC++ runtime DLLs (fallback + safety-net)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rel = "build\windows\x64\runner\Release"
+          # CMake InstallRequiredSystemLibraries zaten kopyalamis olabilir; bu adim idempotent
+          # uzerine yazar. CMake bir surum surprizinde tutmazsa BU kurtarir. VCToolsRedistDir =
+          # derleme env'inin redist'i -> derleyen toolset ile SURUM ESLESMESI en yuksek kaynak.
+          $crtDir = $null
+          if ($env:VCToolsRedistDir) {
+            $crtDir = Get-ChildItem -Path (Join-Path $env:VCToolsRedistDir "x64") -Directory `
+              -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $crtDir) {
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            if (Test-Path $vswhere) {
+              $vsPath = & $vswhere -latest -products * -property installationPath
+              if ($vsPath) {
+                $crtDir = Get-ChildItem -Path "$vsPath\VC\Redist\MSVC" -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object { [version]$_.Name } -Descending |
+                  ForEach-Object { Get-ChildItem -Path "$($_.FullName)\x64" -Directory `
+                    -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue } |
+                  Select-Object -First 1 -ExpandProperty FullName
+              }
+            }
+          }
+          if ($crtDir -and (Test-Path $crtDir)) {
+            Write-Host "CRT redist kaynagi: $crtDir"
+            Copy-Item -Path "$crtDir\*.dll" -Destination $rel -Force
+            Write-Host "Kopyalanan CRT DLL'leri:"
+            Get-ChildItem "$rel\*140*.dll" | ForEach-Object { Write-Host "  $($_.Name)" }
+          } else {
+            Write-Host "::warning::CRT redist klasoru bulunamadi; CMake kopyasina guveniliyor. Guard dogrulayacak."
+          }
+
       - name: Create self-signed certificate and sign exe
         shell: pwsh
         run: |
@@ -106,6 +142,55 @@ jobs:
           cd build/windows/x64/runner/Release
           Compress-Archive -Path * -DestinationPath ../../../../../SyncResto-Windows.zip -Force
 
+      - name: Verify runtime DLLs are in the zip (DLL yoksa veya x64 degilse build FAIL)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $required = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+          $optional = @("msvcp140_1.dll", "msvcp140_2.dll")
+          $extract = Join-Path $env:RUNNER_TEMP "zipcheck"
+          if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+          Expand-Archive -Path "SyncResto-Windows.zip" -DestinationPath $extract -Force
+
+          # PE header'dan mimari oku: 0x8664 = x64, 0x14c = x86
+          function Get-PeMachine([string]$path) {
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            return [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          }
+
+          # DLL'ler exe KOKUNDE (data/ altinda degil) olmali -> Release kokunu bul
+          $exe = Get-ChildItem -Path $extract -Filter "SyncResto POS.exe" -Recurse | Select-Object -First 1
+          if (-not $exe) { Write-Host "::error::SyncResto POS.exe zip'te bulunamadi"; exit 1 }
+          $root = $exe.DirectoryName
+          Write-Host "Exe kok klasoru: $root"
+
+          $missing = @()
+          foreach ($dll in $required) {
+            $p = Join-Path $root $dll
+            if (-not (Test-Path $p)) { $missing += $dll; continue }
+            $m = Get-PeMachine $p
+            if ($m -ne 0x8664) {
+              Write-Host "::error::$dll x64 DEGIL (machine=0x$($m.ToString('x'))) -> exe kokunde yanlis mimari"
+              exit 1
+            }
+            if ((Get-Item $p).Length -eq 0) { Write-Host "::error::$dll bos (0 byte)"; exit 1 }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::VC++ runtime DLL(ler) exe kokunde EKSIK: $($missing -join ', ')"
+            Write-Host "Kokteki DLL'ler:"
+            Get-ChildItem -Path $root -Filter *.dll | ForEach-Object { Write-Host "  $($_.Name)" }
+            exit 1
+          }
+
+          Write-Host "OK: Tum ZORUNLU VC++ runtime DLL'leri x64 ve exe kokunde:"
+          foreach ($dll in $required) { Write-Host "  [x] $dll" }
+          foreach ($dll in $optional) {
+            $p = Join-Path $root $dll
+            if (Test-Path $p) { Write-Host "  [x] $dll (opsiyonel, mevcut)" }
+            else { Write-Host "::warning::$dll opsiyonel, gelmedi (STL guncellemesi zorunlu kilarsa izle)" }
+          }
+
       - name: Calculate SHA-256 checksum
         id: checksum
         shell: pwsh
@@ -121,7 +206,28 @@ jobs:
           path: SyncResto-Windows.zip
           retention-days: 30
 
+      # 11 Tem 2026: Sürüm YAYINLAMA politikası — pubspec version'a karşılık gelen
+      # GitHub Release/tag ZATEN VARSA yeni release OLUŞTURMA (mevcut çalışan kasalara
+      # "yeni sürüm var" sinyali gitmesin; auto-update tetiklenmesin). Sadece bump edilmiş
+      # (release'i olmayan) yeni bir sürümde release yayınlanır. Artifact her build'de üretilir
+      # (elle indirilebilir), release opsiyoneldir.
+      - name: Check if release already exists
+        id: relcheck
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Release $TAG ZATEN VAR -> yeni surum yayinlanmayacak (sadece artifact)."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Release $TAG yok -> yeni surum yayinlanacak."
+          fi
+
       - name: Create GitHub Release
+        if: steps.relcheck.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}

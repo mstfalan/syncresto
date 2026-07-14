@@ -367,61 +367,81 @@ class _PosScreenState extends State<PosScreen> {
         return null;
       }
 
-      for (final group in printerGroups) {
-        final printerIp = group['printer_ip'] as String?;
-        final printerPort = group['printer_port'] as int? ?? 9100;
+      final Map<String, List<Map<String, dynamic>>> byIpMap = {};
+      for (final g in printerGroups) {
+        final group = (g as Map).cast<String, dynamic>();
         final groupItems = group['items'] as List? ?? [];
-        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final groupType = group['type'] as String? ?? 'kitchen';
-        final jobId = _toInt(group['job_id']);
-
         if (groupItems.isEmpty) continue;
+        final ip = (group['printer_ip'] as String?)?.trim();
+        final key = (ip == null || ip.isEmpty) ? '__default__' : ip;
+        byIpMap.putIfAbsent(key, () => []).add(group);
+      }
 
-        bool success = false;
-        String? failReason;
-
-        try {
-          if (printerIp != null && printerIp.isNotEmpty) {
-            success = await widget.printerService.printKitchenReceiptToIp(
-              ticket: ticket,
-              items: groupItems,
-              ip: printerIp,
-              port: printerPort,
-            );
-            if (!success) failReason = 'TCP/print failed at $printerIp:$printerPort';
-          } else {
-            success = await widget.printerService.printKitchenReceipt(
-              ticket: ticket,
-              items: groupItems,
-            );
-            if (!success) failReason = 'Local printer failed';
-          }
-        } catch (e) {
-          success = false;
-          failReason = e.toString();
-        }
-
-        if (success) {
-          successCount += groupItems.length;
-          print('[POS] $printerName yazicisina ${groupItems.length} urun gonderildi');
-          if (groupType == 'kitchen') {
-            // Sadece mutfak grubu basarisi printed=1 ve job_id 'printed' yapma yetkisi verir
-            for (final it in groupItems) {
-              final id = _toInt((it is Map) ? it['id'] : null);
-              if (id != null) printedItemIds.add(id);
+      final perBucket = await Future.wait(byIpMap.values.map((sameIpGroups) async {
+        final out = <Map<String, dynamic>>[];
+        for (final group in sameIpGroups) {
+          final printerIp = group['printer_ip'] as String?;
+          final printerPort = group['printer_port'] as int? ?? 9100;
+          final groupItems = group['items'] as List? ?? [];
+          bool ok = false;
+          String? failReason;
+          try {
+            if (printerIp != null && printerIp.isNotEmpty) {
+              ok = await widget.printerService.printKitchenReceiptToIp(
+                ticket: ticket,
+                items: groupItems,
+                ip: printerIp,
+                port: printerPort,
+              );
+              if (!ok) failReason = 'TCP/print failed at $printerIp:$printerPort';
+            } else {
+              ok = await widget.printerService.printKitchenReceipt(
+                ticket: ticket,
+                items: groupItems,
+              );
+              if (!ok) failReason = 'Local printer failed';
             }
-            if (jobId != null) printedJobIds.add(jobId);
+          } catch (e) {
+            ok = false;
+            failReason = e.toString();
           }
-        } else {
-          failCount += groupItems.length;
-          print('[POS] $printerName yazicisina gonderilemedi: $failReason');
-          // Telemetri: fail bildir
-          if (jobId != null) {
-            widget.apiService.reportPrintFailed(
-              ticketId: _currentTicket!['id'],
-              jobId: jobId,
-              error: failReason ?? 'unknown',
-            ); // fire-and-forget; UI'yi bloklama
+          out.add({'group': group, 'ok': ok, 'failReason': failReason});
+        }
+        return out;
+      }));
+
+      for (final bucket in perBucket) {
+        for (final r in bucket) {
+          final group = r['group'] as Map<String, dynamic>;
+          final success = r['ok'] as bool;
+          final failReason = r['failReason'] as String?;
+          final groupItems = group['items'] as List? ?? [];
+          final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+          final groupType = group['type'] as String? ?? 'kitchen';
+          final jobId = _toInt(group['job_id']);
+
+          if (success) {
+            successCount += groupItems.length;
+            print('[POS] $printerName yazicisina ${groupItems.length} urun gonderildi');
+            if (groupType == 'kitchen') {
+              // Sadece mutfak grubu basarisi printed=1 ve job_id 'printed' yapma yetkisi verir
+              for (final it in groupItems) {
+                final id = _toInt((it is Map) ? it['id'] : null);
+                if (id != null) printedItemIds.add(id);
+              }
+              if (jobId != null) printedJobIds.add(jobId);
+            }
+          } else {
+            failCount += groupItems.length;
+            print('[POS] $printerName yazicisina gonderilemedi: $failReason');
+            // Telemetri: fail bildir
+            if (jobId != null) {
+              widget.apiService.reportPrintFailed(
+                ticketId: _currentTicket!['id'],
+                jobId: jobId,
+                error: failReason ?? 'unknown',
+              ); // fire-and-forget; UI'yi bloklama
+            }
           }
         }
       }

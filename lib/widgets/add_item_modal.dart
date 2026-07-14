@@ -1501,65 +1501,92 @@ class _AddItemModalState extends State<AddItemModal> {
       final List<Map<String, dynamic>> failedGroupsForRetry = [];
 
       final printerGroups = result['printerGroups'] as List? ?? [];
-      for (final group in printerGroups) {
-        final printerIp = group['printer_ip'] as String?;
-        final printerPort = group['printer_port'] as int? ?? 9100;
+      final Map<String, List<Map<String, dynamic>>> byIpMap = {};
+      for (final g in printerGroups) {
+        final group = (g as Map).cast<String, dynamic>();
         final groupItems = group['items'] as List? ?? [];
-        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final jobId = _safeInt(group['job_id']);
         if (groupItems.isEmpty) continue;
+        final ip = (group['printer_ip'] as String?)?.trim();
+        final key = (ip == null || ip.isEmpty) ? '__default__' : ip;
+        byIpMap.putIfAbsent(key, () => []).add(group);
+      }
 
-        bool ok = false;
-        if (printerIp != null && printerIp.isNotEmpty) {
-          ok = await widget.printerService!.printKitchenReceiptToIp(
-            ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
-          );
-        } else {
-          ok = await widget.printerService!.printKitchenReceipt(
-            ticket: ticketInfo, items: groupItems,
-          );
-        }
-
-        if (ok) {
-          successCount += groupItems.length;
-          if (jobId != null) successJobIds.add(jobId);
-        } else {
-          failCount += groupItems.length;
-          if (jobId != null) failJobIds.add(jobId);
-          failReasons.add(printerName);
-          // Sag ust yazici kuyruguna ekle (arka plan auto-retry baslatir)
-          int? queueJobId;
-          // Retry kuyrugu icin IP cozumle. Grup IP'si varsa onu kullan; YOKSA (urun yazicisi
-          // atanmamis -> default yaziciya basildi) default mutfak yazicisinin IP'sini kullan.
-          String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
-          int retryPort = printerPort;
-          if (retryIp == null) {
-            // 6 Tem 2026 (offline fix Adim 4): SESSIZ FIS KAYBI onleme. Eskiden printer_ip=null
-            // grubu fail olunca enqueue ATLANIYORDU -> item printed=1 kalir, hicbir kuyrukta
-            // olmaz = sessiz kayip. Simdi default mutfak yazicisinin IP'siyle kuyruga alinir.
-            final defCfg = widget.printerService!.getKitchenPrinterConfig();
-            if (defCfg != null) {
-              retryIp = defCfg['ip'] as String?;
-              retryPort = defCfg['port'] as int? ?? printerPort;
+      final perBucket = await Future.wait(byIpMap.values.map((sameIpGroups) async {
+        final out = <Map<String, dynamic>>[];
+        for (final group in sameIpGroups) {
+          final printerIp = group['printer_ip'] as String?;
+          final printerPort = group['printer_port'] as int? ?? 9100;
+          final groupItems = group['items'] as List? ?? [];
+          bool ok = false;
+          try {
+            if (printerIp != null && printerIp.isNotEmpty) {
+              ok = await widget.printerService!.printKitchenReceiptToIp(
+                ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+              );
+            } else {
+              ok = await widget.printerService!.printKitchenReceipt(
+                ticket: ticketInfo, items: groupItems,
+              );
             }
+          } catch (_) {
+            ok = false;
           }
-          if (retryIp != null && retryIp.isNotEmpty) {
-            queueJobId = await widget.printerService!.enqueueKitchenForRetry(
-              ip: retryIp,
-              port: retryPort,
-              printerName: printerName,
-              ticketInfo: ticketInfo,
-              items: groupItems,
-            );
+          out.add({'group': group, 'ok': ok});
+        }
+        return out;
+      }));
+
+      for (final bucket in perBucket) {
+        for (final r in bucket) {
+          final group = r['group'] as Map<String, dynamic>;
+          final ok = r['ok'] as bool;
+          final printerIp = group['printer_ip'] as String?;
+          final printerPort = group['printer_port'] as int? ?? 9100;
+          final groupItems = group['items'] as List? ?? [];
+          final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+          final jobId = _safeInt(group['job_id']);
+
+          if (ok) {
+            successCount += groupItems.length;
+            if (jobId != null) successJobIds.add(jobId);
+          } else {
+            failCount += groupItems.length;
+            if (jobId != null) failJobIds.add(jobId);
+            failReasons.add(printerName);
+            // Sag ust yazici kuyruguna ekle (arka plan auto-retry baslatir)
+            int? queueJobId;
+            // Retry kuyrugu icin IP cozumle. Grup IP'si varsa onu kullan; YOKSA (urun yazicisi
+            // atanmamis -> default yaziciya basildi) default mutfak yazicisinin IP'sini kullan.
+            String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
+            int retryPort = printerPort;
+            if (retryIp == null) {
+              // 6 Tem 2026 (offline fix Adim 4): SESSIZ FIS KAYBI onleme. Eskiden printer_ip=null
+              // grubu fail olunca enqueue ATLANIYORDU -> item printed=1 kalir, hicbir kuyrukta
+              // olmaz = sessiz kayip. Simdi default mutfak yazicisinin IP'siyle kuyruga alinir.
+              final defCfg = widget.printerService!.getKitchenPrinterConfig();
+              if (defCfg != null) {
+                retryIp = defCfg['ip'] as String?;
+                retryPort = defCfg['port'] as int? ?? printerPort;
+              }
+            }
+            if (retryIp != null && retryIp.isNotEmpty) {
+              queueJobId = await widget.printerService!.enqueueKitchenForRetry(
+                ip: retryIp,
+                port: retryPort,
+                printerName: printerName,
+                ticketInfo: ticketInfo,
+                items: groupItems,
+              );
+            }
+            failedGroupsForRetry.add({
+              'printer_ip': printerIp,
+              'printer_port': printerPort,
+              'printer_name': printerName,
+              'items': groupItems,
+              'job_id': jobId,
+              'queue_job_id': queueJobId,
+            });
           }
-          failedGroupsForRetry.add({
-            'printer_ip': printerIp,
-            'printer_port': printerPort,
-            'printer_name': printerName,
-            'items': groupItems,
-            'job_id': jobId,
-            'queue_job_id': queueJobId,
-          });
         }
       }
 
@@ -1866,62 +1893,89 @@ class _AddItemModalState extends State<AddItemModal> {
       // 18 May 2026: Silent path da fail varsa pop-up acar
       final List<Map<String, dynamic>> failedGroupsForRetry = [];
 
-      for (final group in printerGroups) {
-        final printerIp = group['printer_ip'] as String?;
-        final printerPort = group['printer_port'] as int? ?? 9100;
+      // 🟠 6 Tem 2026 FINAL-FIX C: null-IP grubu sessizce atlanmasin (kalici fis kaybi onleme —
+      // ticket_modal silent yolu ile ayni duzeltme).
+      final Map<String, List<Map<String, dynamic>>> byIpMap = {};
+      for (final g in printerGroups) {
+        final group = (g as Map).cast<String, dynamic>();
         final groupItems = group['items'] as List? ?? [];
-        final printerName = group['printer_name'] as String? ?? 'Varsayilan';
-        final jobId = _safeInt(group['job_id']);
         if (groupItems.isEmpty) continue;
+        final ip = (group['printer_ip'] as String?)?.trim();
+        final key = (ip == null || ip.isEmpty) ? '__default__' : ip;
+        byIpMap.putIfAbsent(key, () => []).add(group);
+      }
 
-        // 🟠 6 Tem 2026 FINAL-FIX C: null-IP grubu sessizce atlanmasin (kalici fis kaybi onleme —
-        // ticket_modal silent yolu ile ayni duzeltme).
-        bool ok = false;
-        if (printerIp != null && printerIp.isNotEmpty) {
-          ok = await widget.printerService!.printKitchenReceiptToIp(
-            ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
-          );
-        } else {
-          ok = await widget.printerService!.printKitchenReceipt(
-            ticket: ticketInfo, items: groupItems,
-          );
-        }
-
-        if (ok) {
-          successCount += groupItems.length;
-          if (jobId != null) successJobIds.add(jobId);
-        } else {
-          failCount += groupItems.length;
-          if (jobId != null) failJobIds.add(jobId);
-          failReasons.add(printerName);
-          // Sag ust yazici kuyruguna ekle (null-IP grubunda default mutfak yazici IP'si)
-          String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
-          int retryPort = printerPort;
-          if (retryIp == null) {
-            final defCfg = widget.printerService!.getKitchenPrinterConfig();
-            if (defCfg != null) {
-              retryIp = defCfg['ip'] as String?;
-              retryPort = defCfg['port'] as int? ?? printerPort;
+      final perBucket = await Future.wait(byIpMap.values.map((sameIpGroups) async {
+        final out = <Map<String, dynamic>>[];
+        for (final group in sameIpGroups) {
+          final printerIp = group['printer_ip'] as String?;
+          final printerPort = group['printer_port'] as int? ?? 9100;
+          final groupItems = group['items'] as List? ?? [];
+          bool ok = false;
+          try {
+            if (printerIp != null && printerIp.isNotEmpty) {
+              ok = await widget.printerService!.printKitchenReceiptToIp(
+                ticket: ticketInfo, items: groupItems, ip: printerIp, port: printerPort,
+              );
+            } else {
+              ok = await widget.printerService!.printKitchenReceipt(
+                ticket: ticketInfo, items: groupItems,
+              );
             }
+          } catch (_) {
+            ok = false;
           }
-          int? queueJobId;
-          if (retryIp != null && retryIp.isNotEmpty) {
-            queueJobId = await widget.printerService!.enqueueKitchenForRetry(
-              ip: retryIp,
-              port: retryPort,
-              printerName: printerName,
-              ticketInfo: ticketInfo,
-              items: groupItems,
-            );
+          out.add({'group': group, 'ok': ok});
+        }
+        return out;
+      }));
+
+      for (final bucket in perBucket) {
+        for (final r in bucket) {
+          final group = r['group'] as Map<String, dynamic>;
+          final ok = r['ok'] as bool;
+          final printerIp = group['printer_ip'] as String?;
+          final printerPort = group['printer_port'] as int? ?? 9100;
+          final groupItems = group['items'] as List? ?? [];
+          final printerName = group['printer_name'] as String? ?? 'Varsayilan';
+          final jobId = _safeInt(group['job_id']);
+
+          if (ok) {
+            successCount += groupItems.length;
+            if (jobId != null) successJobIds.add(jobId);
+          } else {
+            failCount += groupItems.length;
+            if (jobId != null) failJobIds.add(jobId);
+            failReasons.add(printerName);
+            // Sag ust yazici kuyruguna ekle (null-IP grubunda default mutfak yazici IP'si)
+            String? retryIp = (printerIp != null && printerIp.isNotEmpty) ? printerIp : null;
+            int retryPort = printerPort;
+            if (retryIp == null) {
+              final defCfg = widget.printerService!.getKitchenPrinterConfig();
+              if (defCfg != null) {
+                retryIp = defCfg['ip'] as String?;
+                retryPort = defCfg['port'] as int? ?? printerPort;
+              }
+            }
+            int? queueJobId;
+            if (retryIp != null && retryIp.isNotEmpty) {
+              queueJobId = await widget.printerService!.enqueueKitchenForRetry(
+                ip: retryIp,
+                port: retryPort,
+                printerName: printerName,
+                ticketInfo: ticketInfo,
+                items: groupItems,
+              );
+            }
+            failedGroupsForRetry.add({
+              'printer_ip': printerIp,
+              'printer_port': printerPort,
+              'printer_name': printerName,
+              'items': groupItems,
+              'job_id': jobId,
+              'queue_job_id': queueJobId,
+            });
           }
-          failedGroupsForRetry.add({
-            'printer_ip': printerIp,
-            'printer_port': printerPort,
-            'printer_name': printerName,
-            'items': groupItems,
-            'job_id': jobId,
-            'queue_job_id': queueJobId,
-          });
         }
       }
 

@@ -411,22 +411,32 @@ void main() {
         'waiter_name': payload['waiter_name'],
       };
 
+      final Map<String, List<Map<String, dynamic>>> byIp = {};
       for (final g in printerGroups) {
-        try {
-          final ip = (g['printer_ip'] ?? '') as String;
-          final port = (g['printer_port'] as num?)?.toInt() ?? 9100;
-          final items = (g['items'] as List?) ?? [];
-          if (ip.isEmpty || items.isEmpty) continue;
-          await printerService.printKitchenReceiptToIp(
-            ticket: ticket,
-            items: items,
-            ip: ip,
-            port: port,
-          );
-        } catch (e) {
-          print('[KitchenPrint] grup basilamadi: $e');
-        }
+        final group = (g as Map).cast<String, dynamic>();
+        final ip = ((group['printer_ip'] ?? '') as String).trim();
+        final items = (group['items'] as List?) ?? [];
+        if (ip.isEmpty || items.isEmpty) continue;
+        byIp.putIfAbsent(ip, () => []).add(group);
       }
+
+      await Future.wait(byIp.values.map((sameIpGroups) async {
+        for (final group in sameIpGroups) {
+          try {
+            final ip = (group['printer_ip'] ?? '') as String;
+            final port = (group['printer_port'] as num?)?.toInt() ?? 9100;
+            final items = (group['items'] as List?) ?? [];
+            await printerService.printKitchenReceiptToIp(
+              ticket: ticket,
+              items: items,
+              ip: ip,
+              port: port,
+            );
+          } catch (e) {
+            print('[KitchenPrint] grup basilamadi: $e');
+          }
+        }
+      }));
     } catch (e) {
       print('[KitchenPrint] hata: $e');
     }

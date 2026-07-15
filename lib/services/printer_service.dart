@@ -59,6 +59,7 @@ class PrinterService {
 
   Future<void> loadSettings() async {
     try {
+      await _loadBeepIps(); // beep ayarları (IP bazlı, printers_multi'den bağımsız)
       final prefs = await SharedPreferences.getInstance();
 
       // Yeni çoklu yazıcı ayarlarını yükle
@@ -113,14 +114,10 @@ class PrinterService {
           // Her yazıcı kendi ID'siyle kaydedilir: printer_1, printer_2, ...
           final key = 'printer_$printerId';
 
-          // Departman bilgisini de sakla
+          // Departman bilgisi (birincil, UI/geriye uyum için — dizideki ilk bilinen departman)
           String department = 'other';
-          if (departments.contains('kitchen')) {
-            department = 'kitchen';
-          } else if (departments.contains('bar')) {
-            department = 'bar';
-          } else if (departments.contains('cashier')) {
-            department = 'cashier';
+          for (final dep in const ['kitchen', 'bar', 'cashier']) {
+            if (departments.contains(dep)) { department = dep; break; }
           }
 
           _printers[key] = {
@@ -135,14 +132,17 @@ class PrinterService {
           };
           print('[Printer] Yazici eklendi: ${p['name']} (${p['ip_address'] ?? p['ip']}) -> $key');
 
-          // 15 Tem 2026: departman ALIAS KEY. _getPrinterConfig('cashier'/'kitchen'/'bar') KEY arar;
+          // 15 Tem 2026: departman ALIAS KEY(ler). _getPrinterConfig('cashier'/'kitchen'/'bar') KEY arar;
           // 'printer_$id' key'i onu bulamiyordu -> "Yazdir" (cashier) fallback ilk yaziciya basiyordu.
-          // Alias ile 'cashier' KEY'i olusur -> Yazdir DOGRU kasa yazicisina gider. 'printer_$id' KEY'i
-          // KORUNUR (allPrinters/UI listesi bozulmaz; alias 'isAlias':true ile o listeden filtrelenir).
-          if (department == 'kitchen' || department == 'bar' || department == 'cashier') {
-            _printers[department] = {
+          // FABLE FIX: bir yazıcı BİRDEN ÇOK departmana ait olabilir (departments dizisi) -> HER departman
+          // için alias yaz (if/else-if değil for). Aynı departmanda 2. yazıcı gelirse İLK gelen KORUNUR
+          // (ezme yok — ürün-bazlı yönlendirme zaten printer_$id ile yapılır, alias sadece fallback hedefi).
+          for (final dep in const ['kitchen', 'bar', 'cashier']) {
+            if (!departments.contains(dep)) continue;
+            if (_printers.containsKey(dep)) continue; // ilk gelen korunur, ezme yok
+            _printers[dep] = {
               ..._printers[key]!,
-              'type': department,
+              'type': dep,
               'fromServer': true,
               'isAlias': true, // allPrinters bunu gizler (cift kart olmasin)
             };
@@ -574,16 +574,59 @@ class PrinterService {
   /// 19 May 2026: TCP unreachable hatalarinda inline 1 retry ekledik.
   /// Wifi paket kaybi / ARP timeout / DHCP yenileme gibi gecici sebepler
   /// genelde 1-2sn icinde duzeliyor → kuyruga atmadan once 1 kez daha dene.
+  /// 15 Tem 2026: Beep ayarı IP bazlı AYRI saklanır (SharedPreferences 'printer_beep_ips').
+  /// printers_multi'den BAĞIMSIZDIR — çünkü loadFromServer her sunucu çekiminde printers_multi'yi
+  /// sıfırdan yazıyor ve beep bayrağını silerdi. IP bazlı ayrı map bu ezmeden etkilenmez.
+  Set<String> _beepIps = {};
+
+  Future<void> _loadBeepIps() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList('printer_beep_ips') ?? [];
+      _beepIps = raw.where((s) => s.trim().isNotEmpty).toSet();
+    } catch (_) {}
+  }
+
+  Future<void> setBeepForIp(String ip, bool enabled) async {
+    if (ip.trim().isEmpty) return;
+    if (enabled) {
+      _beepIps.add(ip);
+    } else {
+      _beepIps.remove(ip);
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('printer_beep_ips', _beepIps.toList());
+    } catch (_) {}
+  }
+
+  bool isBeepEnabledForIp(String ip) => ip.isNotEmpty && _beepIps.contains(ip);
+
+  /// ESC/POS beep komutu (yazıcının dahili buzzer'ı). SADECE ESC B n t (0x1B 0x42).
+  /// n=2 bip, t=3. esc_pos_utils Generator.beep de birebir bu komutu üretir; PalmX/Xprinter/
+  /// çoğu termal yazıcı destekler. (GS ( A KULLANILMAZ — o Epson'da buzzer değil TEST-PRINT'tir,
+  /// boş sayfa bastırır. Epson buzzer isteyen ayrı komut ister; şimdilik ESC B evrensel-güvenli.)
+  List<int> _beepBytes() {
+    return const [0x1B, 0x42, 0x02, 0x03];
+  }
+
   Future<bool> _sendToPrinter(String ip, int port, List<int> bytes) async {
+    // Beep açıksa fiş byte'larının SONUNA (cut'tan sonra) ekle — AYNI bağlantıda gider.
+    // Ayrı bağlantı KULLANILMAZ: tek-bağlantılı klon yazıcılar (PalmX/Xprinter) 2. bağlantıyı reddeder.
+    // Retry aynı toSend'i kullanır (beep dahil); flush-timeout'ta çift-fiş riski beep'ten bağımsız,
+    // zaten mevcut retry mimarisinde var, beep bu riski değiştirmez.
+    final List<int> toSend = isBeepEnabledForIp(ip)
+        ? (List<int>.from(bytes)..addAll(_beepBytes()))
+        : bytes;
     // 1. deneme — hizli timeout (4sn). TCP unreachable hızlı patlat, kullaniciyi 10sn bekletme
-    final firstTry = await _attemptSend(ip, port, bytes, timeoutSec: 4);
+    final firstTry = await _attemptSend(ip, port, toSend, timeoutSec: 4);
     if (firstTry) return true;
 
     // 2. deneme — kısa bekleme sonrası (wifi paket kaybi / ARP yenileme icin)
     print('[Printer] 1. deneme basarisiz ($ip:$port), 1.5sn sonra tekrar deniyorum...');
     await Future.delayed(const Duration(milliseconds: 1500));
 
-    final secondTry = await _attemptSend(ip, port, bytes, timeoutSec: 6);
+    final secondTry = await _attemptSend(ip, port, toSend, timeoutSec: 6);
     if (secondTry) {
       print('[Printer] 2. deneme BASARILI ($ip:$port) — inline retry kurtardi');
       return true;

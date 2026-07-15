@@ -461,12 +461,49 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
 
             const Divider(height: 24),
 
+            // 15 Tem 2026: Sesli bildirim toggle — açıkken bu yazıcıya fiş gidince ESC/POS beep
+            // komutu gönderilir (yazıcının dahili buzzer'ı öter). IP bazlı saklanır (printer_beep_ips),
+            // sunucudan yazıcı çekimi (loadFromServer) beep ayarını EZMEZ.
+            Builder(builder: (_) {
+              final pIp = (printer['ip'] ?? '').toString();
+              final beepOn = widget.printerService.isBeepEnabledForIp(pIp);
+              return SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                secondary: Icon(
+                  beepOn ? Icons.volume_up : Icons.volume_off,
+                  color: beepOn ? color : Colors.grey,
+                ),
+                title: const Text('Sesli bildirim', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: const Text('Fiş basılınca yazıcı sesli uyarı verir (buzzer)', style: TextStyle(fontSize: 12)),
+                value: beepOn,
+                onChanged: pIp.isEmpty ? null : (v) => _setPrinterBeep(pIp, v),
+              );
+            }),
+
+            const Divider(height: 24),
+
             // Düzenleme alanları
             _buildPrinterForm(type, printer, color),
           ],
         ),
       ),
     );
+  }
+
+  /// Yazıcı sesli bildirim (beep) ayarını IP bazlı kaydet (printer_beep_ips).
+  /// printers_multi'ye YAZMAZ -> loadFromServer ezmesinden bağımsız (Fable fix).
+  Future<void> _setPrinterBeep(String ip, bool value) async {
+    await widget.printerService.setBeepForIp(ip, value);
+    if (mounted) setState(() {});
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(value ? 'Sesli bildirim açıldı' : 'Sesli bildirim kapatıldı'),
+          duration: const Duration(seconds: 1),
+        ),
+      );
+    }
   }
 
   Color _getColorForType(String type) {

@@ -50,7 +50,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 12, // v12 (8 Tem 2026): COMBO FAZ4 — cached_products combo_* kolonlari (offline combo hesabi)
+      version: 13, // v13 (15 Tem 2026): cached_payment_methods — offline'da dinamik ödeme yöntemleri
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -206,6 +206,17 @@ class LocalDbService {
         port INTEGER DEFAULT 9100,
         type TEXT,
         is_active INTEGER DEFAULT 1,
+        cached_at TEXT NOT NULL
+      )
+    ''');
+
+    // Ödeme yöntemleri cache (v13) — offline'da dinamik ödeme butonları görünsün
+    await db.execute('''
+      CREATE TABLE cached_payment_methods (
+        code TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        icon TEXT,
+        is_builtin INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -588,6 +599,25 @@ class LocalDbService {
       }
       print('[LocalDb] v12 COMBO kolonlari eklendi (cached_products combo_*)');
     }
+
+    // v13: cached_payment_methods — offline'da dinamik ödeme yöntemleri.
+    // Tablo yoksa Flutter built-in nakit/kart ile çalışır (geriye uyum), sadece dinamikler offline kaybolur.
+    if (oldVersion < 13) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS cached_payment_methods (
+            code TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            icon TEXT,
+            is_builtin INTEGER DEFAULT 0,
+            cached_at TEXT NOT NULL
+          )
+        ''');
+        print('[LocalDb] v13 cached_payment_methods eklendi');
+      } catch (e) {
+        print('[LocalDb] v13 cached_payment_methods zaten var: $e');
+      }
+    }
   }
 
   // ==================== TRANSACTION RETRY HELPER (19 May 2026) ====================
@@ -852,6 +882,38 @@ class LocalDbService {
   Future<List<Map<String, dynamic>>> getCachedPrinters() async {
     final db = await database;
     return await db.query('cached_printers', where: 'is_active = 1');
+  }
+
+  /// Ödeme yöntemlerini cache'le (online sync sonrası) — offline'da dinamik butonlar görünsün
+  Future<void> cachePaymentMethods(List<Map<String, dynamic>> methods) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    await _runWithRetry(() => db.transaction((txn) async {
+      await txn.delete('cached_payment_methods');
+      for (final m in methods) {
+        final code = (m['code'] ?? '').toString();
+        if (code.isEmpty) continue;
+        await txn.insert('cached_payment_methods', {
+          'code': code,
+          'display_name': m['display_name'] ?? code,
+          'icon': m['icon'],
+          'is_builtin': m['is_builtin'] == true ? 1 : 0,
+          'cached_at': now,
+        });
+      }
+    }), opName: 'cachePaymentMethods');
+    print('[LocalDb] cached_payment_methods: ${methods.length} kayit');
+  }
+
+  Future<List<Map<String, dynamic>>> getCachedPaymentMethods() async {
+    final db = await database;
+    try {
+      return await db.query('cached_payment_methods');
+    } catch (e) {
+      // Tablo yoksa (eski DB, migration çalışmadıysa) boş dön -> built-in nakit/kart devam eder
+      print('[LocalDb] getCachedPaymentMethods: tablo yok, boş dönülüyor: $e');
+      return [];
+    }
   }
 
   Future<Map<String, dynamic>?> getCachedPrinterById(int? id) async {

@@ -49,6 +49,10 @@ class _AddItemModalState extends State<AddItemModal> {
   List<dynamic> _filteredProducts = [];
   List<dynamic> _ticketItems = [];
   Map<String, dynamic>? _ticketInfo;
+  /// 15 Tem 2026: Panelden gelen EK ödeme yöntemleri (show_pos=true, nakit/kart HARİÇ).
+  /// Nakit/Kart butonları HER ZAMAN built-in gösterilir; bu liste onlara ek dinamik butonlardır.
+  /// Boş/offline -> sadece built-in görünür (geriye tam uyum).
+  List<Map<String, dynamic>> _dynamicPaymentMethods = [];
   bool _isLoading = true;
   int? _selectedCategoryId;
   String _searchQuery = '';
@@ -149,6 +153,16 @@ class _AddItemModalState extends State<AddItemModal> {
       final v = prefs.getBool(StorageService.variantOnTapKey) ?? false;
       if (mounted) setState(() => _variantOnTap = v);
     } catch (_) {}
+    // EK ödeme yöntemleri (dinamik). Hata olursa boş kalır -> built-in nakit/kart devam eder.
+    try {
+      final pms = await widget.apiService.getPaymentMethods();
+      // Nakit/kart zaten built-in buton -> dinamik listeden çıkar (çift olmasın).
+      const builtinCodes = {'cash', 'card', 'credit_card', 'nakit', 'kart'};
+      final extras = pms.where((m) => !builtinCodes.contains((m['code'] ?? '').toString().toLowerCase())).toList();
+      if (mounted) setState(() => _dynamicPaymentMethods = extras);
+    } catch (e) {
+      print('[AddItemModal] Ödeme yöntemleri yüklenemedi: $e');
+    }
     await _loadData();
   }
 
@@ -1688,8 +1702,9 @@ class _AddItemModalState extends State<AddItemModal> {
     }
   }
 
-  /// Hesap kapat — tüm ürünleri ödeyerek kapat
-  Future<void> _closeTicket(String paymentMethod) async {
+  /// Hesap kapat — tüm ürünleri ödeyerek kapat.
+  /// methodLabel: dinamik ödeme yönteminin görünen adı (nakit/kart dışı için doğru etiket).
+  Future<void> _closeTicket(String paymentMethod, {String? methodLabel}) async {
     // Ödenmemiş ürünleri bul
     await _loadTicketItems();
     final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
@@ -1713,7 +1728,8 @@ class _AddItemModalState extends State<AddItemModal> {
       return;
     }
 
-    final label = paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı';
+    // methodLabel verilmişse onu kullan (dinamik yöntem); yoksa built-in nakit/kart etiketi.
+    final label = methodLabel ?? (paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı');
     double unpaidTotal = 0;
     for (var item in unpaidItems) {
       unpaidTotal += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
@@ -3676,6 +3692,17 @@ class _AddItemModalState extends State<AddItemModal> {
       _buildActionBtnVertical(icon: Icons.credit_card, label: 'Kart Kapat', color: const Color(0xFF3B82F6), onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null),
       _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Nakit', color: const Color(0xFF059669), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('cash') : null),
       _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Kart', color: const Color(0xFF2563EB), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('credit_card') : null),
+      // 15 Tem 2026: Panelden gelen DİNAMİK ödeme yöntemleri (nakit/kart hariç). Her biri "X Kapat".
+      // Kod (code) backend'e payment_method olarak gider; display_name fiş/dialog etiketinde kullanılır.
+      for (final pm in _dynamicPaymentMethods)
+        _buildActionBtnVertical(
+          icon: Icons.account_balance_wallet,
+          label: '${pm['display_name']} Kapat',
+          color: const Color(0xFF7C3AED),
+          onTap: hasItems && _hasPermission('close_ticket')
+              ? () => _closeTicket(pm['code'] as String, methodLabel: pm['display_name'] as String?)
+              : null,
+        ),
     ];
 
     final btnGroup4 = <Widget>[

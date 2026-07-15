@@ -1405,6 +1405,62 @@ class ApiService {
     }
   }
 
+  /// 15 Tem 2026: POS'ta gösterilecek EK ödeme yöntemleri (panelden show_pos=true).
+  /// Nakit/Kart Flutter'da HER ZAMAN built-in butondur; bu liste onlara EK dinamik yöntemlerdir
+  /// (Yemek Kartı, Sodexo vb). Offline'da veya hata durumunda BOŞ liste -> sadece built-in görünür (geriye uyum).
+  Future<List<Map<String, dynamic>>> getPaymentMethods() async {
+    if (!_connectivity.isOnline) {
+      // Offline: cached_payment_methods'tan don -> dinamik butonlar offline'da da görünür.
+      // Cache boşsa built-in nakit/kart zaten Flutter'da hep var (geriye uyum).
+      print('[API] getPaymentMethods: Çevrimdışı, cached_payment_methods dönüyor');
+      final cached = await _localDb.getCachedPaymentMethods();
+      return cached.map((m) {
+        final code = (m['code'] ?? '').toString();
+        if (code.isEmpty) return null;
+        return <String, dynamic>{
+          'code': code,
+          'display_name': m['display_name']?.toString() ?? code,
+          'icon': m['icon']?.toString(),
+          'is_builtin': m['is_builtin'] == 1,
+        };
+      }).whereType<Map<String, dynamic>>().toList();
+    }
+    try {
+      final response = await _dio.get(
+        '/api/pos/payment-methods',
+        options: Options(receiveTimeout: const Duration(seconds: 5)),
+      );
+      if (response.data is List) {
+        final list = (response.data as List).map((m) {
+          final code = m['code']?.toString() ?? '';
+          if (code.isEmpty) return null;
+          return <String, dynamic>{
+            'code': code,
+            'display_name': m['display_name']?.toString() ?? code,
+            'icon': m['icon']?.toString(),
+            'is_builtin': m['is_builtin'] == true,
+          };
+        }).whereType<Map<String, dynamic>>().toList();
+        // Online'da başarıyla çekince cache'le -> sonraki offline oturumlar için
+        try { await _localDb.cachePaymentMethods(list); } catch (_) {}
+        return list;
+      }
+      return [];
+    } on DioException catch (e) {
+      print('[API] getPaymentMethods hatası: ${e.message}');
+      // Ağ hatası -> cache'ten dene (built-in fallback zaten var)
+      return await _localDb.getCachedPaymentMethods().then((c) => c.map((m) => <String, dynamic>{
+        'code': (m['code'] ?? '').toString(),
+        'display_name': m['display_name']?.toString() ?? (m['code'] ?? '').toString(),
+        'icon': m['icon']?.toString(),
+        'is_builtin': m['is_builtin'] == 1,
+      }).where((m) => (m['code'] as String).isNotEmpty).toList()).catchError((_) => <Map<String, dynamic>>[]);
+    } catch (e) {
+      print('[API] getPaymentMethods beklenmeyen hata: $e');
+      return [];
+    }
+  }
+
   /// IP adresi formatı doğrulama (güvenlik)
   bool _isValidIpAddress(String ip) {
     if (ip.isEmpty) return false;

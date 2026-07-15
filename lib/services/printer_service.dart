@@ -134,6 +134,19 @@ class PrinterService {
             'fromServer': true,
           };
           print('[Printer] Yazici eklendi: ${p['name']} (${p['ip_address'] ?? p['ip']}) -> $key');
+
+          // 15 Tem 2026: departman ALIAS KEY. _getPrinterConfig('cashier'/'kitchen'/'bar') KEY arar;
+          // 'printer_$id' key'i onu bulamiyordu -> "Yazdir" (cashier) fallback ilk yaziciya basiyordu.
+          // Alias ile 'cashier' KEY'i olusur -> Yazdir DOGRU kasa yazicisina gider. 'printer_$id' KEY'i
+          // KORUNUR (allPrinters/UI listesi bozulmaz; alias 'isAlias':true ile o listeden filtrelenir).
+          if (department == 'kitchen' || department == 'bar' || department == 'cashier') {
+            _printers[department] = {
+              ..._printers[key]!,
+              'type': department,
+              'fromServer': true,
+              'isAlias': true, // allPrinters bunu gizler (cift kart olmasin)
+            };
+          }
         }
         await _savePrinters();
         print('[Printer] Toplam ${_printers.length} yazici kayitli');
@@ -176,12 +189,14 @@ class PrinterService {
     await _savePrinters();
   }
 
-  /// Tüm yazıcıları getir
+  /// Tüm yazıcıları getir (departman ALIAS kayıtları hariç — çift kart olmasın)
   List<Map<String, dynamic>> get allPrinters {
-    return _printers.entries.map((e) => {
-      ...e.value,
-      'type': e.key,
-    }).toList();
+    return _printers.entries
+      .where((e) => e.value['isAlias'] != true)
+      .map((e) => {
+        ...e.value,
+        'type': e.key,
+      }).toList();
   }
 
   /// Belirli türdeki yazıcıyı getir

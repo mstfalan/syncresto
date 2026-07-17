@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -41,6 +42,13 @@ class SyncService {
   // NIC hic dusmemis) durumda da toparlanma olur.
   int _syncTick = 0;
   bool _isTableReconciling = false;     // _syncTablesFromServer+cleanup re-entry guard
+  // 17 Tem 2026: tarama 30sn→5dk gevşetildi (push canlı); açık-masa aynası AYRI 90sn döngüye alındı.
+  Timer? _mirrorTimer;
+  bool _isMirroring = false;            // _runMirrorCycle re-entry guard
+  DateTime? _lastBgUpdateAt;            // sweepAfterReconnect debounce için (SADECE başarılı taramada set)
+  DateTime? _lastDisconnectAt;          // kesinti-farkındalıklı debounce (Fable filo bulgusu #11)
+  bool _pendingSweep = false;           // tarama sürerken gelen reconnect telafisi kuyruğu (#0)
+  final Random _jitterRandom = Random(); // thundering herd jitter (#12)
   bool _isInitialSyncDone = false;
   String? _backendUrl;
 
@@ -69,18 +77,22 @@ class SyncService {
     // 11 Haz 2026 LEAK FIX: init tekrar çağrılırsa (ileride) eski timer/sub birikmesin.
     _syncTimer?.cancel();
     _cacheUpdateTimer?.cancel();
+    _mirrorTimer?.cancel();
     _connectivitySub?.cancel();
 
     // İnternet durumu değişince sync başlat (sub saklanıyor → dispose'da cancel)
     _connectivitySub = _connectivity.connectionStream.listen((isOnline) async {
       if (isOnline) {
         print('[Sync] Online oldu, sync başlatılıyor...');
-        // Önce bekleyen işlemleri sync et
-        await syncPendingItems();
-        // Sonra server'dan güncel durumu al ve local'i güncelle
-        await _syncTablesFromServer();
-        // Kapatılmış ticketları temizle
-        await _localDb.cleanupSyncedTickets();
+        // 17 Tem 2026 (filo #2): her adım kendi try/catch'inde — biri patlarsa zincirin
+        // gerisi (özellikle reconnect telafisi) atlanmasın.
+        try { await syncPendingItems(); } catch (e) { print('[Sync] online sync hatası: $e'); }
+        try { await _syncTablesFromServer(); } catch (e) { print('[Sync] online tablo-sync hatası: $e'); }
+        try { await _localDb.cleanupSyncedTickets(); } catch (e) { print('[Sync] cleanup hatası: $e'); }
+        // İnternet kesikken kaçan cache:invalidate eventlerini telafi et (debounce'lu)
+        try { await sweepAfterReconnect(); } catch (e) { print('[Sync] reconnect tarama hatası: $e'); }
+      } else {
+        markDisconnected(); // filo #11: kesinti anını kaydet (debounce referansı)
       }
     });
 
@@ -106,11 +118,21 @@ class SyncService {
       }
     });
 
-    // Periyodik cache güncelleme (her 30 saniye - fiyat degisikliklerini hizli yakala)
+    // Periyodik cache güncelleme — 17 Tem 2026: 30sn → 5dk GEVŞETİLDİ. Push (cache:invalidate,
+    // 'panel-<id>' odası) artık canlı ve 11/11 tip kanıtlı; bu tarama yalnızca push'u kaçıran
+    // durumlar için EMNİYET süpürgesi (reconnect telafisi ayrıca sweepAfterReconnect'te).
     // 11 Haz 2026: değişkene atandı (eskiden anonimdi, cancel edilemiyordu).
-    _cacheUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _cacheUpdateTimer = Timer.periodic(const Duration(minutes: 5), (_) {
       if (_connectivity.isOnline) {
         backgroundCacheUpdate();
+      }
+    });
+
+    // 17 Tem 2026: Açık-masa offline AYNASI taramadan ayrıldı — tarama 5dk'ya çıkınca ayna
+    // bayatlamasın diye kendi hafif döngüsünde döner (masa listesi + açık masaların ticket'ı).
+    _mirrorTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+      if (_connectivity.isOnline) {
+        _runMirrorCycle();
       }
     });
   }
@@ -362,6 +384,8 @@ class SyncService {
       return;
     }
     _isBgUpdating = true;
+    // NOT: _lastBgUpdateAt burada DEĞİL, taramanın BAŞARILI sonunda set edilir (filo bulgusu #0/#20:
+    // başarısız tarama da 'yapıldı' sayılıp reconnect telafisini 5dk erteliyordu).
 
     print('[Sync] Arka plan güncelleme başlıyor...');
     _logService.logSync('Arka plan cache guncellemesi baslatildi', operation: 'background_update_start');
@@ -404,15 +428,18 @@ class SyncService {
           }
         }
 
+        // 17 Tem 2026 (filo KRİTİK bulgusu #4): cacheProducts KOŞULSUZ çağrılır. Diff sadece
+        // GÖRSEL indirme içindir — çünkü (a) /api/pos/products sadece aktif+stokta ürünleri döner,
+        // listeden ÇIKAN ürün (stok bitti/pasif/silindi) diff'e hiç girmez; (b) variants/extras/
+        // combo/printer_id alanları diff'te yok. Full yazım 5dk'da bir = eski 30sn davranışına göre
+        // yine 10x az yük, ama silinen/değişen her şey garantili yakalanır.
+        await _localDb.cacheProducts(products);
         if (changedProducts.isNotEmpty) {
-          print('[Sync] ${changedProducts.length} ürün güncellendi');
-          await _localDb.cacheProducts(products);
-
-          // Yeni görselleri indir
-          if (newImageUrls.isNotEmpty) {
-            print('[Sync] ${newImageUrls.length} yeni görsel indiriliyor...');
-            await _imageCache.downloadMultiple(newImageUrls);
-          }
+          print('[Sync] ${changedProducts.length} ürün değişti (görsel diff)');
+        }
+        if (newImageUrls.isNotEmpty) {
+          print('[Sync] ${newImageUrls.length} yeni görsel indiriliyor...');
+          await _imageCache.downloadMultiple(newImageUrls);
         }
       }
 
@@ -503,6 +530,7 @@ class SyncService {
         print('[Sync] Lookup cache update hatasi: $e');
       }
 
+      _lastBgUpdateAt = DateTime.now(); // BAŞARILI tamamlanma — debounce referansı (filo #0)
       print('[Sync] Arka plan güncelleme tamamlandı');
       _logService.logSync('Arka plan cache guncellemesi tamamlandi', operation: 'background_update_complete');
     } catch (e) {
@@ -511,12 +539,72 @@ class SyncService {
     } finally {
       // 11 Haz 2026: guard mutlaka serbest bırakılmalı (yoksa kalıcı kilit → bir daha hiç çalışmaz)
       _isBgUpdating = false;
+      // 17 Tem 2026 (filo #0): tarama sürerken reconnect telafisi geldiyse bir tur daha —
+      // süren tarama kesinti ÖNCESİ fetch'lenmiş bayat veriyle çalışmış olabilir.
+      if (_pendingSweep) {
+        _pendingSweep = false;
+        Timer.run(() {
+          if (_connectivity.isOnline) backgroundCacheUpdate();
+        });
+      }
+    }
+  }
+
+  /// 17 Tem 2026: Soket/internet KESİLDİĞİNDE çağrılır (main.dart onConnectionChange(false) +
+  /// connectivity offline) — kesinti-farkındalıklı debounce referansı (filo #11).
+  void markDisconnected() {
+    _lastDisconnectAt = DateTime.now();
+  }
+
+  /// 17 Tem 2026: Soket/internet geri geldiğinde kaçan cache:invalidate eventlerini telafi eden
+  /// tam tarama. Debounce kuralı (filo #0/#11): son BAŞARILI tarama, son KESİNTİDEN SONRA bittiyse
+  /// ve 60sn'den tazeyse atla; kesintiden önce bittiyse veri bayat olabilir → tara. Tarama sürüyorsa
+  /// kuyruğa yaz (finally'de bir tur daha koşar). Jitter (filo #12): panel restart'ında tüm kasalar
+  /// aynı anda bağlanır — 0.5-15sn rastgele gecikme thundering herd'ü dağıtır.
+  Future<void> sweepAfterReconnect() async {
+    final last = _lastBgUpdateAt;
+    final disc = _lastDisconnectAt;
+    if (last != null &&
+        (disc == null || last.isAfter(disc)) &&
+        DateTime.now().difference(last) < const Duration(seconds: 60)) {
+      print('[Sync] Reconnect taraması atlandı (son tarama taze ve kesinti sonrası)');
+      return;
+    }
+    if (_isBgUpdating) {
+      _pendingSweep = true;
+      print('[Sync] Reconnect taraması kuyruklandı (tarama sürüyor)');
+      return;
+    }
+    await Future.delayed(Duration(milliseconds: 500 + _jitterRandom.nextInt(14500)));
+    if (!_connectivity.isOnline) return; // jitter sırasında tekrar koptuysa boşuna deneme
+    await backgroundCacheUpdate();
+  }
+
+  /// 17 Tem 2026: Hafif ayna döngüsü (90sn) — SADECE masa listesi + açık masaların ticket mirror'ı.
+  /// Tam tarama 5dk'ya gevşetilince offline açık-masa aynasının tazeliğini bu döngü korur.
+  Future<void> _runMirrorCycle() async {
+    // filo #1/#13: bg tarama zaten mirror yapıyor — eşzamanlı çift prune/upsert yarışına girme
+    if (_isMirroring || _isBgUpdating || _dio == null) return;
+    if (!_connectivity.isOnline) return;
+    _isMirroring = true;
+    try {
+      final r = await _dio!.get('/api/pos/tables');
+      if (r.data is List) {
+        final tables = List<Map<String, dynamic>>.from(r.data);
+        await _localDb.cacheTables(tables);
+        await _mirrorOpenTables(tables);
+      }
+    } catch (e) {
+      print('[Sync] Ayna döngüsü hatası: $e');
+    } finally {
+      _isMirroring = false;
     }
   }
 
   /// 7 Tem 2026: Açık masaların tam içeriğini (ürünler+tutar) lokale mirror'la + kapananları prune et.
   /// Toplu açık-ticket endpoint YOK (504) -> her açık masa için ayrı /tickets/table/{id}, havuz-limitli
-  /// (aynı anda 4 istek) ki 2sn'lik poll yükünü artırmasın. Sadece backgroundCacheUpdate'te (30sn) çağrılır.
+  /// (aynı anda 4 istek) ki 2sn'lik poll yükünü artırmasın. Çağıranlar: backgroundCacheUpdate (5dk
+  /// tam tarama) + _runMirrorCycle (90sn hafif döngü, 17 Tem 2026).
   Future<void> _mirrorOpenTables(List<Map<String, dynamic>> tables) async {
     if (_dio == null) return;
     final openIds = <int>{};
@@ -550,13 +638,37 @@ class SyncService {
     }
   }
 
-  /// İki ürün arasında değişiklik var mı kontrol et
-  bool _isProductChanged(Map<String, dynamic> cached, Map<String, dynamic> newProduct) {
-    // Önemli alanları karşılaştır
-    final fieldsToCheck = ['name', 'price', 'restaurant_price', 'description', 'image', 'is_active', 'is_out_of_stock', 'category_id'];
+  /// İki ürün arasında değişiklik var mı kontrol et.
+  /// 17 Tem 2026 FIX: kaynaklar tip-farklı (SQLite REAL/0-1 vs JSON "430.00"/true/false) —
+  /// düz toString karşılaştırması HER ürünü her taramada "değişti" sayıyordu ("315 ürün
+  /// güncellendi" seli = gereksiz cache yazımı + görsel indirme). Sayısal alanlar double,
+  /// boolean alanlar bool, metin alanları null≡'' normalize edilerek karşılaştırılır.
+  double? _asDouble(dynamic v) =>
+      v == null ? null : (v is num ? v.toDouble() : double.tryParse(v.toString()));
 
-    for (final field in fieldsToCheck) {
-      if (cached[field]?.toString() != newProduct[field]?.toString()) {
+  bool _asBool(dynamic v) => v == true || v == 1 || v == '1' || v == 'true';
+
+  bool _isProductChanged(Map<String, dynamic> cached, Map<String, dynamic> newProduct) {
+    const numFields = ['price', 'restaurant_price'];
+    const boolFields = ['is_active', 'is_out_of_stock'];
+    const textFields = ['name', 'description', 'image', 'category_id'];
+
+    for (final field in numFields) {
+      if (_asDouble(cached[field]) != _asDouble(newProduct[field])) {
+        print('[Sync] Ürün ${newProduct['id']} değişti: $field');
+        return true;
+      }
+    }
+    for (final field in boolFields) {
+      if (_asBool(cached[field]) != _asBool(newProduct[field])) {
+        print('[Sync] Ürün ${newProduct['id']} değişti: $field');
+        return true;
+      }
+    }
+    for (final field in textFields) {
+      final a = cached[field]?.toString() ?? '';
+      final b = newProduct[field]?.toString() ?? '';
+      if (a != b) {
         print('[Sync] Ürün ${newProduct['id']} değişti: $field');
         return true;
       }
@@ -1315,13 +1427,26 @@ class SyncService {
           final r = await _dio!.get('/api/pos/products');
           if (r.data is List) {
             final products = List<Map<String, dynamic>>.from(r.data);
+            // 17 Tem 2026 FIX: (a) görsel URL'leri _getFullImageUrl ile MUTLAK yap — relatif
+            // '/uploads/..' yolları "No host specified in URI" hatası veriyordu (indirme hep
+            // başarısızdı); (b) TÜM görselleri değil sadece YENİ/DEĞİŞEN ürün görsellerini indir
+            // (sweep'teki diff deseni — push her tetiklendiğinde 300+ görsel çekiliyordu).
+            final cachedProducts = await _localDb.getCachedProducts();
+            final cachedById = {for (final c in cachedProducts) c['id']: c};
+            final newImageUrls = <String>[];
+            for (final p in products) {
+              final img = p['image']?.toString();
+              if (img == null || img.isEmpty) continue;
+              final cached = cachedById[p['id']];
+              if (cached == null || cached['image']?.toString() != img) {
+                newImageUrls.add(_getFullImageUrl(img));
+              }
+            }
             await _localDb.cacheProducts(products);
-            // Yeni gorseller indir
-            final newImageUrls = products.map((p) => p['image']?.toString()).where((u) => u != null && u.isNotEmpty).cast<String>().toList();
             if (newImageUrls.isNotEmpty) {
               await _imageCache.downloadMultiple(newImageUrls);
             }
-            print('[CacheInvalidate] products refresh: ${products.length}');
+            print('[CacheInvalidate] products refresh: ${products.length} (yeni görsel: ${newImageUrls.length})');
           }
           break;
         case 'categories':
@@ -1591,6 +1716,7 @@ class SyncService {
   void dispose() {
     _syncTimer?.cancel();
     _cacheUpdateTimer?.cancel();   // 11 Haz 2026 LEAK FIX
+    _mirrorTimer?.cancel();        // 17 Tem 2026: ayna döngüsü
     _connectivitySub?.cancel();    // 11 Haz 2026 LEAK FIX
   }
 }

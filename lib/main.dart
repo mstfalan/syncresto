@@ -312,6 +312,9 @@ void main() {
   webSocketService.onConnectionChange = (connected) {
     print('[Main] WebSocket baglantisi: ${connected ? 'Bagli' : 'Bagli degil'}');
     if (connected) {
+      // 17 Tem 2026: soket kesikken kaçan cache:invalidate eventlerini telafi et
+      // (debounce'lu tam tarama; tarama 5dk'ya gevşetildiği için reconnect telafisi ŞART).
+      SyncService().sweepAfterReconnect();
       // First check immediately, then every 60s
       runPrinterHealthCheck();
       printerHealthTimer?.cancel();

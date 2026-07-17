@@ -148,6 +148,15 @@ class StorageService {
   String hashKey(String apiKey) => sha256.convert(utf8.encode(apiKey)).toString();
   String? getTenantHash() => _prefs.getString(_tenantHashKey);
 
+  // 17 Tem 2026: Kasanın panelde görünen adı ('Kasa 1'). validate-key device_name/key_name'den gelir.
+  // Offline'da "masayı hangi kasa açtı" için gerekli — restaurant_name (getApiKeyName) DEĞİL.
+  static const String _deviceDisplayNameKey = 'pos_device_display_name';
+  String? getDeviceDisplayName() => _prefs.getString(_deviceDisplayNameKey);
+  Future<void> saveDeviceDisplayName(String name) async {
+    await _prefs.setString(_deviceDisplayNameKey, name);
+    await _saveBackup();
+  }
+
   // LAN tenant secret (restoran-basina, HMAC icin). validate-key'den gelir.
   static const String _lanSecretKey = 'pos_lan_tenant_secret';
   String? getLanTenantSecret() => _prefs.getString(_lanSecretKey);

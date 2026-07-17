@@ -50,7 +50,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 13, // v13 (15 Tem 2026): cached_payment_methods — offline'da dinamik ödeme yöntemleri
+      version: 14, // v14 (17 Tem 2026): opened_by_device — masayı hangi kasa açtı (cached_tables + local_tickets)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -181,6 +181,7 @@ class LocalDbService {
         current_ticket_id INTEGER,
         current_total REAL,
         ticket_opened_at TEXT,
+        opened_by_device TEXT,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -259,7 +260,8 @@ class LocalDbService {
         lan_lease_until TEXT,
         lan_origin TEXT DEFAULT 'self',
         waiter_name TEXT,
-        section_name TEXT
+        section_name TEXT,
+        opened_by_device TEXT
       )
     ''');
 
@@ -550,6 +552,23 @@ class LocalDbService {
         }
       }
       print('[LocalDb] v10 cached_tables tutar kolonlari eklendi (current_total/ticket_opened_at)');
+    }
+
+    // v14 (17 Tem 2026): opened_by_device — masayı hangi kasa açtı. cached_tables (online sync'ten)
+    // + local_tickets (offline açılışta kendi kasa adı). owner_device_id (LAN lease hash'i) ile
+    // KARIŞTIRMA: bu kolon kullanıcıya gösterilen okunabilir ad ('Kasa 1'), lease mantığı bozulmaz.
+    if (oldVersion < 14) {
+      for (final col in [
+        'ALTER TABLE cached_tables ADD COLUMN opened_by_device TEXT',
+        'ALTER TABLE local_tickets ADD COLUMN opened_by_device TEXT',
+      ]) {
+        try {
+          await db.execute(col);
+        } catch (e) {
+          print('[LocalDb] v14 kolon zaten var: $e');
+        }
+      }
+      print('[LocalDb] v14 opened_by_device kolonlari eklendi');
     }
 
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
@@ -843,6 +862,7 @@ class LocalDbService {
           // Backend current_total'i String ('580.00') VEYA num donebilir -> guvenli parse.
           'current_total': _parseMoney(table['current_total']),
           'ticket_opened_at': table['ticket_opened_at']?.toString(),
+          'opened_by_device': table['opened_by_device']?.toString(), // v14: masayı açan kasa
           'cached_at': now,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
@@ -1076,6 +1096,7 @@ class LocalDbService {
     int customerCount = 1,
     String? ownerDeviceId,
     int? leaseTtlMs,
+    String? openedByDevice, // 17 Tem 2026: bu kasanın görünen adı (offline "hangi kasa açtı")
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
@@ -1106,6 +1127,9 @@ class LocalDbService {
       'synced': 0,
       'offline_permissions': offlinePermissions,
     };
+    if (openedByDevice != null && openedByDevice.isNotEmpty) {
+      row['opened_by_device'] = openedByDevice;
+    }
     if (ownerDeviceId != null) {
       row['owner_device_id'] = ownerDeviceId;
       row['lan_lease_until'] =
@@ -1965,6 +1989,7 @@ class LocalDbService {
         'waiter_id': serverTicket['waiter_id'] ?? 0,
         'waiter_name': serverTicket['waiter_name']?.toString(),
         'section_name': serverTicket['section_name']?.toString(),
+        'opened_by_device': serverTicket['opened_by_device']?.toString(), // 17 Tem 2026: mirror'da da taşı
         'customer_count': gc is num ? gc.toInt() : int.tryParse('${gc ?? 1}') ?? 1,
         'status': serverTicket['status']?.toString() ?? 'open',
         // 🟡 6 Tem 2026 DÜZELTME 3 (ORTA-PRINT): backend fiyat alanini num VEYA String donebilir.
@@ -3319,6 +3344,21 @@ class LocalDbService {
     return lan.isNotEmpty;
   }
 
+  /// 17 Tem 2026 (filo #26): Başka kasada açık LAN masasının SALT-OKUMA özeti. Hiçbir yazma yok
+  /// (INSERT/UPDATE/sync_queue dokunmaz) → K1 kuralı korunur. Offline'da masaya tıklanınca uyarı
+  /// yerine bu özet gösterilir (tutar + adisyon no + hangi kasa). opened_at LAN'da yerel alım
+  /// zamanıdır (gerçek açılış değil, #28) — diyalogda süre/açılış GÖSTERİLMEZ.
+  Future<Map<String, dynamic>?> getLanTicketSummary(int tableId) async {
+    final db = await database;
+    final rows = await db.query('local_tickets',
+        columns: ['ticket_number', 'total', 'table_number', 'owner_device_id',
+          'opened_by_device', 'lan_lease_until'],
+        where: "table_id = ? AND status = 'open' AND lan_origin = 'lan'",
+        whereArgs: [tableId],
+        orderBy: 'total DESC', limit: 1);
+    return rows.isNotEmpty ? rows.first : null;
+  }
+
   // Sunucu tablosunu offline değişikliklerle birleştir
   Future<List<Map<String, dynamic>>> mergeTablesWithOfflineChanges(
     List<Map<String, dynamic>> serverTables,
@@ -3333,13 +3373,40 @@ class LocalDbService {
     // 🔴 Fable: eff_total = total>0 ise total, yoksa subtotal>0 ise subtotal, yoksa item'lardan hesapla.
     // Eski `total ?? subtotal` calismiyordu cunku SQLite DEFAULT'u 0.0 (NULL degil) -> ?? atlamiyordu.
     final openRows = await db.rawQuery('''
-      SELECT t.table_id AS table_id,
+      SELECT t.table_id AS table_id, t.opened_by_device AS opened_by_device,
              COALESCE(NULLIF(t.total,0), NULLIF(t.subtotal,0),
                (SELECT SUM(i.unit_price * i.quantity) FROM local_ticket_items i
                  WHERE i.local_ticket_id = t.local_id AND i.status != 'cancelled'), 0) AS eff_total
         FROM local_tickets t
        WHERE t.status = 'open' AND COALESCE(t.lan_origin,'self') = 'self'
     ''');
+
+    // 17 Tem 2026 (filo bulgusu #24): LAN yansıması masaları için AYRI tutar sorgusu. Şikayet:
+    // offline'da başka kasanın açtığı masa görünüyor ama tutar '0 TL'. LAN satırının total'ı
+    // lokalde MEVCUT ama üstteki self-filtreli sorgu onu dışlıyordu. Bu map'i self toplamıyla
+    // TOPLAMA — self öncelikli, yoksa lan fallback (aynı ticket iki kez sayılmasın).
+    final lanRows = await db.rawQuery('''
+      SELECT table_id, MAX(total) AS lan_total, MAX(opened_by_device) AS opened_by_device
+        FROM local_tickets
+       WHERE status = 'open' AND lan_origin = 'lan'
+       GROUP BY table_id
+    ''');
+    final lanTotalsByTable = <int, double>{};
+    final lanDeviceByTable = <int, String>{};
+    for (final r in lanRows) {
+      final tid = r['table_id'] as int?;
+      if (tid == null) continue;
+      final lt = (r['lan_total'] as num?)?.toDouble() ?? 0.0;
+      if (lt > 0) lanTotalsByTable[tid] = lt;
+      final dev = r['opened_by_device']?.toString();
+      if (dev != null && dev.isNotEmpty) lanDeviceByTable[tid] = dev;
+    }
+    final selfDeviceByTable = <int, String>{};
+    for (final r in openRows) {
+      final tid = r['table_id'] as int?;
+      final dev = r['opened_by_device']?.toString();
+      if (tid != null && dev != null && dev.isNotEmpty) selfDeviceByTable[tid] = dev;
+    }
 
     if (closedTableIds.isEmpty && openTableIds.isEmpty && openRows.isEmpty) {
       return serverTables;
@@ -3382,6 +3449,21 @@ class LocalDbService {
       if (serverTotal <= 0 && localTotal != null && localTotal > 0 &&
           newTable['status'] != 'empty') {
         newTable['current_total'] = localTotal;
+      }
+      // 17 Tem 2026 (#24): hâlâ 0 ise LAN yansıması tutarıyla doldur — "başka kasanın masası 0 TL"
+      // şikayetinin çözümü. LAN satırı occupied işaretini zaten getiriyor (getOfflineOpenTableIds).
+      final effServerTotal = _parseMoney(newTable['current_total']);
+      final lanTotal = lanTotalsByTable[tableId];
+      if (effServerTotal <= 0 && lanTotal != null && lanTotal > 0 &&
+          newTable['status'] != 'empty') {
+        newTable['current_total'] = lanTotal;
+      }
+      // opened_by_device'ı offline dalda doldur (self > lan). Online masalarda backend zaten verir.
+      final devName = selfDeviceByTable[tableId] ?? lanDeviceByTable[tableId];
+      if (devName != null &&
+          (newTable['opened_by_device'] == null ||
+              newTable['opened_by_device'].toString().isEmpty)) {
+        newTable['opened_by_device'] = devName;
       }
 
       return newTable;

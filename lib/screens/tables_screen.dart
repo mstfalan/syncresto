@@ -521,12 +521,35 @@ class _TablesScreenState extends State<TablesScreen> {
     if (ticket == null) {
       final lanOnly = await LocalDbService().hasLanOnlyOpenTicket(tableId);
       if (lanOnly) {
+        // 17 Tem 2026 (filo #26): SnackBar yerine SALT-OKUMA özet — tutar + adisyon no + hangi kasa.
+        // Hiçbir yazma yok (K1 kuralı korunur), garson masanın durumunu görebilir.
+        final summary = await LocalDbService().getLanTicketSummary(tableId);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Bu masa başka kasada açık (ağ üzerinden görüntüleniyor). İşlem o kasadan yapılmalı.'),
-              backgroundColor: Color(0xFFB45309),
-              duration: Duration(seconds: 3),
+          final total = (summary?['total'] as num?)?.toDouble() ?? 0.0;
+          final ticketNo = summary?['ticket_number']?.toString() ?? '-';
+          final dev = summary?['opened_by_device']?.toString();
+          final tableNo = summary?['table_number']?.toString() ?? tableId.toString();
+          await showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: Text('Masa $tableNo — Başka Kasada Açık'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Toplam: ${total.toStringAsFixed(2)} TL',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Text('Adisyon No: $ticketNo'),
+                  if (dev != null && dev.isNotEmpty) Text('Açan Kasa: $dev'),
+                  const SizedBox(height: 12),
+                  const Text('Bu masada işlem, masayı açan kasadan yapılmalıdır.',
+                      style: TextStyle(color: Color(0xFFB45309), fontSize: 13)),
+                ],
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Kapat')),
+              ],
             ),
           );
         }
@@ -1240,6 +1263,9 @@ class _TablesScreenState extends State<TablesScreen> {
     final total = totalRaw is num ? totalRaw.toDouble() : double.tryParse(totalRaw?.toString() ?? '') ?? 0.0;
     final openedAt = table['ticket_opened_at'];
     final lastItemAt = table['last_item_at'];
+    // 17 Tem 2026: masayı hangi kasa açtı (opened_by_device). null/boş ise satır render edilmez.
+    final openedByDeviceRaw = table['opened_by_device']?.toString();
+    final openedByDevice = (openedByDeviceRaw != null && openedByDeviceRaw.isNotEmpty) ? openedByDeviceRaw : null;
     final paidRaw = table['paid_total'];
     final paidTotal = paidRaw is num ? paidRaw.toDouble() : double.tryParse(paidRaw?.toString() ?? '') ?? 0.0;
     final unpaidRaw = table['unpaid_total'];
@@ -1421,6 +1447,22 @@ class _TablesScreenState extends State<TablesScreen> {
                 ],
 
                 // Açılış + son sipariş + süre (occupied)
+                if (isOccupied && openedByDevice != null) ...[
+                  SizedBox(height: sp(2)),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      'Kasa: $openedByDevice',
+                      maxLines: 1,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.9),
+                        fontSize: fs(9),
+                        fontWeight: FontWeight.w700,
+                        height: 1.1,
+                      ),
+                    ),
+                  ),
+                ],
                 if (isOccupied && openedAt != null) ...[
                   SizedBox(height: sp(2)),
                   FittedBox(

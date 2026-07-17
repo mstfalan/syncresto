@@ -1604,6 +1604,11 @@ class _TicketModalState extends State<TicketModal> {
           _buildInfoItem('Garson', _ticket!['waiter_name'] ?? '-'),
           const SizedBox(width: 32),
           _buildInfoItem('Sure', '${_ticket!['duration_minutes'] ?? 0} dk'),
+          // 17 Tem 2026: masayı hangi kasa açtı — değer varsa göster (eski kayıt/backend null ise gizli)
+          if ((_ticket!['opened_by_device']?.toString() ?? '').isNotEmpty) ...[
+            const SizedBox(width: 32),
+            _buildInfoItem('Kasa', _ticket!['opened_by_device'].toString()),
+          ],
         ],
       ),
     );

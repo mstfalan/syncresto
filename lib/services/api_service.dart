@@ -118,7 +118,10 @@ class ApiService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final hasSecret = (prefs.getString('pos_lan_tenant_secret') ?? '').isNotEmpty;
-      if (_apiKey != null && !hasSecret && _connectivity.isOnline) {
+      // 17 Tem 2026: cihaz adı da yoksa backfill tetikle (mevcut kurulu kasalar validate'i
+      // tekrar yapmadan 'hangi kasa açtı' adını alsın).
+      final hasDeviceName = (prefs.getString('pos_device_display_name') ?? '').isNotEmpty;
+      if (_apiKey != null && (!hasSecret || !hasDeviceName) && _connectivity.isOnline) {
         // 5sn cap — init'in 8sn timeout'unu yeme; basarisizsa sonraki acilista tekrar denenir.
         await validateApiKey(_apiKey!).timeout(const Duration(seconds: 5), onTimeout: () => {});
       }
@@ -177,6 +180,18 @@ class ApiService {
           try {
             final prefs = await SharedPreferences.getInstance();
             await prefs.setString('pos_lan_tenant_secret', lanSecret);
+          } catch (_) {}
+        }
+        // 17 Tem 2026: kasanın görünen adını kaydet. Mustafa kuralı: key OLUŞTURULURKEN verilen ad
+        // (key_name) ÖNCELİKLİ (backend device_display_name = keyName ?? deviceName önceliğiyle döner;
+        // eski backend bunu döndürmezse key_name'e düş). Offline "hangi kasa açtı" için.
+        final devName = response.data['device_display_name'] ??
+            response.data['key_name'] ??
+            response.data['device_name'];
+        if (devName is String && devName.isNotEmpty) {
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('pos_device_display_name', devName);
           } catch (_) {}
         }
         return response.data;
@@ -476,6 +491,13 @@ class ApiService {
     final tableNumber = table['table_number']?.toString() ?? tableId.toString();
 
     final lanOwner = lan.enabled ? lan.deviceId : null;
+    // 17 Tem 2026: offline açılan masa bu kasanın adıyla işaretlenir (sync sonrası backend
+    // req.tenant'tan authoritative yazar, aynı kasa olduğu için tutarlı).
+    String? openedByDevice;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      openedByDevice = prefs.getString('pos_device_display_name');
+    } catch (_) {}
     final localTicketId = await _localDb.createLocalTicket(
       tableId: tableId,
       waiterId: waiterId,
@@ -483,6 +505,7 @@ class ApiService {
       tableNumber: tableNumber,
       ownerDeviceId: lanOwner,
       leaseTtlMs: lanOwner != null ? LanSyncService.leaseTtl.inMilliseconds : null,
+      openedByDevice: openedByDevice,
     );
 
     // Oluşturulan ticket'ı getir
@@ -572,6 +595,7 @@ class ApiService {
         // v11: gerçek garson adı (getLocalTicket COALESCE JOIN'den gelir); yoksa 'Garson' fallback.
         'waiter_name': localTicket['waiter_name']?.toString() ?? 'Garson',
         'section_name': localTicket['section_name'],
+        'opened_by_device': localTicket['opened_by_device'], // 17 Tem 2026: hangi kasa açtı (offline)
         'customer_count': localTicket['customer_count'],
         'guest_count': localTicket['customer_count'],
         'ticket_number': localTicket['ticket_number'],

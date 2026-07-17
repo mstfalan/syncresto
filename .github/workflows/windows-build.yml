@@ -257,12 +257,7 @@ jobs:
             - SHA-256: `${{ steps.checksum.outputs.sha256 }}`
 
             ### Degisiklikler
-            - Windows guncelleme akisi: robocopy /MIR ile mevcut dosyalarin uzerine yazilir
-            - macOS guncelleme: PlistBuddy ile sürüm dogrulamasi + rollback
-            - Self-signed code signing (SyncResto publisher)
-            - PIN ekrani buyutuldu, dokunma sorunlari giderildi
-            - Parcali odeme dialog: kirmizi "ODENMEDI" badge, X kapatma otomatik mutfaga gonder
-            - Masalar ekraninda buyuk kilit iconu (garson degistir)
+            - SyncResto güncellemeleri sağlanmıştır.
           files: SyncResto-Windows.zip
           draft: false
           prerelease: false

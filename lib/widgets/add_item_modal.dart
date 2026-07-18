@@ -1663,12 +1663,16 @@ class _AddItemModalState extends State<AddItemModal> {
       } else {
         widget.onClose();
       }
-    } catch (e) {
+    } catch (e, st) {
       _showError('Mutfağa gönderilemedi: $e');
+      // 17 Tem 2026: stackTrace eklendi — "Null check operator used on a null value" seyrek (7g 16 kez)
+      // ama tam satırı bilinmiyor; stack trace ilk 10 satır loglanır (LogService kırpıyor) → kök neden bulunur.
       LogService().error(
         LogType.error,
         'Mutfak fisi exception (add): $e',
         details: {'ticket_id': widget.ticketId},
+        error: e,
+        stackTrace: st,
       );
     }
   }
@@ -2048,11 +2052,14 @@ class _AddItemModalState extends State<AddItemModal> {
           ),
         );
       }
-    } catch (e) {
+    } catch (e, st) {
+      // 17 Tem 2026: stackTrace eklendi — null-check kök nedeni için (add akışıyla aynı).
       LogService().error(
         LogType.error,
         'Mutfak fisi exception (add silent): $e',
         details: {'ticket_id': widget.ticketId},
+        error: e,
+        stackTrace: st,
       );
     }
   }

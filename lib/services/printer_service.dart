@@ -618,15 +618,19 @@ class PrinterService {
     final List<int> toSend = isBeepEnabledForIp(ip)
         ? (List<int>.from(bytes)..addAll(_beepBytes()))
         : bytes;
-    // 1. deneme — hizli timeout (4sn). TCP unreachable hızlı patlat, kullaniciyi 10sn bekletme
-    final firstTry = await _attemptSend(ip, port, toSend, timeoutSec: 4);
+    // 18 Tem 2026: retry merdiveni kısaltıldı (Aysel çoklu-yazıcı 10sn mutfak gecikmesi teşhisi).
+    // LAN'da termal yazıcı ya <1sn bağlanır ya reddeder; 4sn beklemek gereksiz. Eskiden 4+1.5+6=11.5sn
+    // en kötü hal → şimdi 2+0.5+3=~5.5sn. LAN için 2sn bol pay (wifi ARP/DHCP ilk-connect payı korunur,
+    // 1sn altına inilmez = çalışan ama yavaş yazıcıyı arızalı sayma riski). IP-bucketing korunur.
+    // 1. deneme — hızlı timeout (2sn). Sağlıklı yazıcı çoktan bağlanır; ulaşılamayana boşuna bekleme.
+    final firstTry = await _attemptSend(ip, port, toSend, timeoutSec: 2);
     if (firstTry) return true;
 
     // 2. deneme — kısa bekleme sonrası (wifi paket kaybi / ARP yenileme icin)
-    print('[Printer] 1. deneme basarisiz ($ip:$port), 1.5sn sonra tekrar deniyorum...');
-    await Future.delayed(const Duration(milliseconds: 1500));
+    print('[Printer] 1. deneme basarisiz ($ip:$port), 0.5sn sonra tekrar deniyorum...');
+    await Future.delayed(const Duration(milliseconds: 500));
 
-    final secondTry = await _attemptSend(ip, port, toSend, timeoutSec: 6);
+    final secondTry = await _attemptSend(ip, port, toSend, timeoutSec: 3);
     if (secondTry) {
       print('[Printer] 2. deneme BASARILI ($ip:$port) — inline retry kurtardi');
       return true;
@@ -670,18 +674,16 @@ class PrinterService {
       // Small grace period so the printer fully consumes the buffer before close()
       await Future.delayed(const Duration(milliseconds: 150));
 
-      // Close in background — don't let close errors override a successful print
+      // 18 Tem 2026 KÖK ÇÖZÜM: soketi HEMEN destroy et (arka plana atma). Eskiden close() fire-and-forget
+      // idi → aynı IP'ye ardışık fiş gönderiminde önceki soket henüz kapanmadan yeni connect gidiyordu,
+      // tek-bağlantılı klon yazıcı (PalmX/Xprinter) 2. bağlantıyı reddedip 1. denemeyi timeout'a düşürüyordu
+      // (= ~10sn mutfak gecikmesinin ana tetikleyicisi). destroy() anında TCP'yi serbest bırakır; veri
+      // zaten flush edildi (print gerçekleşti). Aynı-IP bucket içinde sıra bütünlüğü korunur.
       final socketRef = socket;
       socket = null;
-      socketRef.close()
-        .timeout(const Duration(seconds: 3))
-        .catchError((e) {
-          print('[Printer] close ignored ($ip:$port): $e');
-          try { socketRef.destroy(); } catch (_) {}
-        })
-        .whenComplete(() {
-          try { socketRef.destroy(); } catch (_) {}
-        });
+      try { socketRef.destroy(); } catch (e) {
+        print('[Printer] destroy ignored ($ip:$port): $e');
+      }
 
       return true;
     } catch (e) {

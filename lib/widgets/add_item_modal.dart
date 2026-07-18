@@ -1490,15 +1490,22 @@ class _AddItemModalState extends State<AddItemModal> {
       // Backend printKitchen artık unassigned_items: [{id, product_name}] döner —
       // yönetici ürün ayarlarından düzeltir, garson görsel uyarı alır (4 sn turuncu snackbar).
       final unassigned = result['unassigned_items'] as List? ?? [];
-      if (unassigned.isNotEmpty && mounted) {
+      if (unassigned.isNotEmpty && mounted && context.mounted) {
         final names = unassigned.map((u) => u is Map ? (u['product_name'] ?? '?') : '?').join(', ');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('⚠ ${unassigned.length} ürün yazıcısız basılmadı: $names'),
-            backgroundColor: Colors.orange.shade700,
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        // 18 Tem 2026: ScaffoldMessenger.of(context) dispose olmuş context'te Flutter içindeki '!'
+        // ile "Null check operator used on a null value" fırlatabilir → try/catch + overlay fallback
+        // (_showError/_showSuccess ile aynı desen). context.mounted guard + izolasyon.
+        try {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('⚠ ${unassigned.length} ürün yazıcısız basılmadı: $names'),
+              backgroundColor: Colors.orange.shade700,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        } catch (_) {
+          _showOverlayMessage('⚠ ${unassigned.length} ürün yazıcısız basılmadı: $names', Colors.orange.shade700);
+        }
       }
 
       if (items.isEmpty) {
@@ -1646,22 +1653,29 @@ class _AddItemModalState extends State<AddItemModal> {
 
       // 18 May 2026: Yazici fail varsa POP-UP ac (snackbar yerine). Backend printed=1
       // SET ettigi icin pop-up'taki "Tekrar Yazdir" SADECE TCP retry yapar — mukerrer fis riski yok.
+      // 18 Tem 2026: context.mounted guard — race+dispose (aksam yogun: auto-refresh/WebSocket masa
+      // guncellemesi modal'i kapatip widget'i dispose edince) showDialog/Navigator.of(context) dispose
+      // olmus context'te Flutter icindeki '!' → "Null check operator" firlatiyordu → yanlis "Mutfaga
+      // gonderilemedi" pop-up (fis aslinda basildi, printed=1). Basim karari DEGISMEZ, sadece dispose
+      // aninda context erisimi atlanir (o modal zaten gorunemezdi). onClose da mounted-guard'landi.
       if (failedGroupsForRetry.isNotEmpty && mounted) {
-        await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => KitchenPrintRetryModal(
-            printerService: widget.printerService!,
-            apiService: widget.apiService,
-            ticketId: widget.ticketId,
-            ticketInfo: ticketInfo,
-            failedGroups: failedGroupsForRetry,
-          ),
-        );
+        if (context.mounted) {
+          await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => KitchenPrintRetryModal(
+              printerService: widget.printerService!,
+              apiService: widget.apiService,
+              ticketId: widget.ticketId,
+              ticketInfo: ticketInfo,
+              failedGroups: failedGroupsForRetry,
+            ),
+          );
+        }
         // Modal kapandiktan sonra ekrani da kapat — kullanici durumu gordu
         if (mounted) widget.onClose();
       } else {
-        widget.onClose();
+        if (mounted) widget.onClose();
       }
     } catch (e, st) {
       _showError('Mutfağa gönderilemedi: $e');

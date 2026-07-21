@@ -2690,16 +2690,27 @@ class _AddItemModalState extends State<AddItemModal> {
       final headerHsl = HSLColor.fromColor(headerColor);
       final headerDarker = headerHsl.withLightness((headerHsl.lightness - 0.08).clamp(0.0, 1.0)).toColor();
 
+      // 21 Tem 2026 FIX: Taşıma dialogu VARSAYILAN adisyonun KENDİ salonu seçili açılsın (eskiden
+      // null=Tümü). Duplike masa isimli bayilerde (aynı "5" masası iki salonda) kasiyer alfabetik
+      // ilk salonun masasını yanlışlıkla seçip adisyonu yanlış masaya taşıyordu. Kendi salonu seçili
+      // gelince en olası hedef (aynı salondaki komşu masa) önde olur. GÜVENLİK: (a) section_id yok/0
+      // ise Tümü fallback; (b) kendi salonunda başka aday masa YOKSA (tek masalı salon) Tümü'ye düş
+      // (boş grid kafa karıştırmasın). _safeInt string/int normalize (legacy tenant güvenli).
+      final int? ownSectionId = _safeInt(widget.table?['section_id']);
+      final bool ownSectionHasCandidates = ownSectionId != null && ownSectionId != 0 &&
+          candidateTables.any((t) => _safeInt(t['section_id']) == ownSectionId);
+      final int? initialSectionId = ownSectionHasCandidates ? ownSectionId : null;
+
       final selectedTable = await showDialog<Map<String, dynamic>>(
         context: context,
         barrierDismissible: true,
         builder: (ctx) {
-          int? selectedSectionId; // null = TÜMÜ
+          int? selectedSectionId = initialSectionId; // varsayılan: kendi salonu (yoksa null=TÜMÜ)
           return StatefulBuilder(
             builder: (ctx, setDialogState) {
               final filtered = selectedSectionId == null
                   ? candidateTables
-                  : candidateTables.where((t) => (t['section_id'] as num?)?.toInt() == selectedSectionId).toList();
+                  : candidateTables.where((t) => _safeInt(t['section_id']) == selectedSectionId).toList();
 
               return Dialog(
                 insetPadding: const EdgeInsets.all(24),
@@ -2878,19 +2889,31 @@ class _AddItemModalState extends State<AddItemModal> {
                                               ),
                                             ),
                                             const SizedBox(height: 6),
-                                            // Salon adı
+                                            // 21 Tem 2026 FIX: Salon adı BELİRGİN (chip + koyu renk).
+                                            // Duplike masa isimli bayilerde kasiyer aynı numaralı iki
+                                            // masayı ayırt edebilsin diye salon adı soluk gri yerine
+                                            // vurgulu rozet oldu. Dolu masa arka planı red.shade50
+                                            // olduğu için chip red.shade100 (karodan ayrışsın).
                                             Padding(
-                                              padding: const EdgeInsets.symmetric(horizontal: 8),
-                                              child: Text(
-                                                table['section_name']?.toString() ?? '',
-                                                style: TextStyle(
-                                                  fontSize: 12,
-                                                  color: Colors.grey.shade600,
-                                                  fontWeight: FontWeight.w600,
+                                              padding: const EdgeInsets.symmetric(horizontal: 6),
+                                              child: Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                decoration: BoxDecoration(
+                                                  color: (isOccupied ? Colors.red.shade100 : Colors.grey.shade200),
+                                                  borderRadius: BorderRadius.circular(6),
                                                 ),
-                                                textAlign: TextAlign.center,
-                                                overflow: TextOverflow.ellipsis,
-                                                maxLines: 1,
+                                                child: Text(
+                                                  table['section_name']?.toString() ?? '',
+                                                  style: TextStyle(
+                                                    fontSize: 13,
+                                                    color: isOccupied ? Colors.red.shade800 : Colors.grey.shade800,
+                                                    fontWeight: FontWeight.w800,
+                                                    letterSpacing: 0.2,
+                                                  ),
+                                                  textAlign: TextAlign.center,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  maxLines: 1,
+                                                ),
                                               ),
                                             ),
                                           ],

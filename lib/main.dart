@@ -281,7 +281,14 @@ void main() {
   webSocketService.onCacheInvalidate = (types) async {
     print('[Main] Cache invalidate: $types');
     try {
-      await SyncService().refreshCacheTypes(types);
+      // 21 Tem 2026: 'table_status' SQLite cache tipi DEGIL, masa gridi UI push sinyalidir.
+      // TablesScreen fan-out listener'i _loadData ile yeniler (getTables zaten cacheTables
+      // yazar → SQLite de tazelenir). SyncService'e gecirirsek AYNI event icin cift
+      // /api/pos/tables fetch'i olur → filtrele.
+      final cacheTypes = types.where((t) => t != 'table_status').toList();
+      if (cacheTypes.isNotEmpty) {
+        await SyncService().refreshCacheTypes(cacheTypes);
+      }
     } catch (e) {
       print('[Main] Cache invalidate refresh hata: $e');
     }

@@ -20,6 +20,18 @@ class WebSocketService {
   // Cache invalidate — backend bir entity degisince anlik refresh tetikler
   // payload: { types: ['products', 'printers', ...] }
   Function(List<String>)? onCacheInvalidate;
+  // 21 Tem 2026 FAN-OUT: TEK-SLOT onCacheInvalidate'i EZMEDEN ek dinleyiciler.
+  // main.dart global handler (11/11 tip: products/printers/...) slotta AYNEN kalır;
+  // ekranlar (TablesScreen 'table_status' masa push) buraya kayit olur. Servis-seviyesi
+  // liste → _connect() reconnect/dispose dongusunden ETKILENMEZ (soket handler'lari
+  // yeniden kurulur ama liste yasar). Bir listener'in exception'i digerlerini/slotu OLDURMEZ.
+  final List<void Function(List<String>)> _cacheInvalidateListeners = [];
+  void addCacheInvalidateListener(void Function(List<String>) l) {
+    if (!_cacheInvalidateListeners.contains(l)) _cacheInvalidateListeners.add(l);
+  }
+  void removeCacheInvalidateListener(void Function(List<String>) l) {
+    _cacheInvalidateListeners.remove(l);
+  }
   // 16 May 2026: Aynı tenant POS'lar arası kitchen print broadcast
   // payload: { ticket_id, ticket_number, table_number, printer_groups, source_socket_id, ... }
   Function(Map<String, dynamic>)? onKitchenPrint;
@@ -235,6 +247,11 @@ class WebSocketService {
           if (types.isNotEmpty) {
             print('[WebSocket] cache:invalidate -> $types');
             onCacheInvalidate?.call(types);
+            // 21 Tem 2026 fan-out — kopya liste (iterasyon sirasinda remove guvenli);
+            // bir listener'in exception'i digerlerini ve global slotu OLDURMEZ.
+            for (final l in List<void Function(List<String>)>.from(_cacheInvalidateListeners)) {
+              try { l(types); } catch (e) { print('[WebSocket] cacheInvalidate listener hata: $e'); }
+            }
             _logService.info(LogType.sync, 'Cache invalidate alindi', details: {'types': types});
           }
         } catch (e) {

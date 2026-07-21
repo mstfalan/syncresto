@@ -102,6 +102,9 @@ class _TablesScreenState extends State<TablesScreen> {
     _setupConnectivity();
     _startLicenseCheck();
     _startVersionCheck();
+    // 21 Tem 2026: masa durumu PUSH dinleyicisi (fan-out — main.dart TEK-SLOT'unu EZMEZ).
+    // Backend adisyon aç/kapa/taşı/böl/ürün-ekle sonrası 'table_status' yollar → o an yenile.
+    widget.webSocketService.addCacheInvalidateListener(_onCachePush);
   }
 
   // ==================== UPDATE CHECK (3 saatte bir) ====================
@@ -168,28 +171,67 @@ class _TablesScreenState extends State<TablesScreen> {
     _pendingCountTimer?.cancel();
     _versionCheckTimer?.cancel();
     _connectivitySubscription?.cancel();
+    _pushDebounce?.cancel(); // 21 Tem 2026: masa push debounce
+    widget.webSocketService.removeCacheInvalidateListener(_onCachePush); // 21 Tem 2026: fan-out kaydı kaldır
     super.dispose();
   }
 
   Timer? _pendingCountTimer;
 
   void _startAutoRefresh() {
-    // Her 2 saniyede masaları güncelle (sessiz mod - loading gösterme).
+    // 21 Tem 2026: 2sn → 6sn. Masa değişiklikleri artık PUSH ile ANINDA gelir ('table_status'
+    // → _onCachePush → _loadData). Poll KALDIRILMADI: offline / reconnect'te kaçan event /
+    // emit'i olmayan uç-yol için EMNİYET AĞI (offline'da lokal cache okur, ucuz).
     // 6 Tem 2026 (offline fix Adim 4b): OFFLINE'da da calis. Online -> server; offline ->
-    // getTables lokal cache + offline merge doner (Adim 1). Eskiden offline'da _loadData
-    // cagrilmadigi icin masa gridi DONUYORDU (offline acilan masa guncellenmiyordu).
-    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+    // getTables lokal cache + offline merge doner (Adim 1).
+    _refreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
       if (mounted) {
         _loadData(silent: true);
       }
     });
 
-    // MASA TAKIP badge + masa rengi icin pending data - 5 sn (renk gec kalmasin).
-    // OFFLINE'da _refreshPendingCount lokal print_queue'dan "FIS CIKMADI" badge'ini besler.
+    // MASA TAKIP badge + masa rengi icin pending data.
+    // 21 Tem 2026: 5sn → 15sn. Badge artık PUSH ile de yenileniyor (_onCachePush → adisyon
+    // aç/kapa/ürün-ekle/taşı sonrası anlık). Poll emniyet ağı (mark-served/printed gibi push'suz
+    // yollar + reconnect). Badge eşikleri DAKİKA mertebesi (renk 10/20dk, FİŞ ÇIKMADI 2dk backend)
+    // → 15sn granülarite hiçbir göstergeyi bozmaz. OFFLINE'da lokal print_queue'dan beslenir.
     _refreshPendingCount(); // ilk cagri hemen
-    _pendingCountTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _pendingCountTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (mounted) {
         _refreshPendingCount();
+      }
+    });
+  }
+
+  // 21 Tem 2026: Backend adisyon aç/kapa/taşı/böl/ürün-ekle/indirim sonrası
+  // cache:invalidate {types:['table_status']} yollar. 400ms debounce: merge/split/ardışık
+  // emit'leri TEK fetch'e indirger. _loadData(silent) zaten _isFetchingData guard'lı → 6sn
+  // poll ile üst üste binmez. Offline'da soket kopuk → event gelmez; poll emniyet ağı devrede.
+  // 'table_status' DIŞI tipler (products/printers...) main.dart global handler'ında işlenir.
+  Timer? _pushDebounce;
+  void _onCachePush(List<String> types) {
+    if (!types.contains('table_status')) return;
+    if (!mounted) return;
+    _pushDebounce?.cancel();
+    _pushDebounce = Timer(const Duration(milliseconds: 400), () async {
+      if (!mounted) return;
+      // 21 Tem 2026 SELF-ECHO GUARD + ardışık refresh (DONMA FIX):
+      // Kullanıcının kendi aksiyonu (masa kapat/ürün ekle) zaten close/ekleme sonrası _loadData
+      // çağırıp masayı taze yükler. AMA backend o aksiyonun push'unu KENDİ kasasına da yollar
+      // (self-echo) → 400ms sonra TEKRAR _loadData = çift refresh = modal animasyonu anında takılma.
+      // Son 1sn içinde masa gridi zaten tam yüklendiyse (kendi aksiyonunun sonucu) _loadData'yı ATLA;
+      // yabancı-kasa olayını 6sn poll telafi eder. _loadData + _refreshPendingCount'u AYNI ANDA değil
+      // ARDIŞIK await ile çağır → tek setState dalgası (çift rebuild yerine).
+      // 21 Tem 2026: pencere 500ms (Fable: 1sn çok geniş, yabancı-kasa olayını kaçırma riski).
+      // Sadece kendi aksiyonunun echo'sunu ele; yabancı olay 500ms'i aşarsa _loadData çalışır.
+      final last = _lastLoadStartedAt;
+      final freshLoad = last != null && DateTime.now().difference(last).inMilliseconds < 500;
+      if (!freshLoad) {
+        await _loadData(silent: true);
+      }
+      if (mounted) {
+        // Badge push'suz yolu olmadığı için HER ZAMAN yenilenir (ürün ekle/close/FİŞ ÇIKMADI anlık).
+        await _refreshPendingCount();
       }
     });
   }
@@ -341,11 +383,19 @@ class _TablesScreenState extends State<TablesScreen> {
     return months[month - 1];
   }
 
+  bool _reloadQueued = false; // 21 Tem 2026: silent load guard'a takılınca "bir kez daha çalış" bayrağı
   Future<void> _loadData({bool silent = false}) async {
-    // 11 Haz 2026 DONMA FIX: silent (otomatik 2sn) poll yavaş ağda üst üste binmesin.
+    // 11 Haz 2026 DONMA FIX: silent (otomatik 6sn) poll yavaş ağda üst üste binmesin.
     // Manuel/ilk yükleme (silent=false) HER ZAMAN çalışır (kullanıcı aksiyonu bloklanmaz).
-    if (silent && _isFetchingData) return;
+    // 21 Tem 2026: guard'a takılan silent load'u YUTMA — kuyruğa al, mevcut bitince tekrar çalış
+    // (masa kapatınca onClose silent _loadData poll fetch'ine denk gelip yutulursa masa DOLU
+    // kalırdı = REGRESYON. Trailing reload bunu kapatır).
+    if (silent && _isFetchingData) { _reloadQueued = true; return; }
     _isFetchingData = true;
+    _reloadQueued = false;
+    // Self-echo guard için damgayı fetch BAŞLANGICINDA vur (bitişte değil — close'dan ÖNCE
+    // başlamış bayat fetch'i "taze" saymamak için).
+    final loadStartedAt = DateTime.now();
     // Sadece ilk yüklemede loading göster
     if (!silent) {
       setState(() => _isLoading = true);
@@ -370,11 +420,22 @@ class _TablesScreenState extends State<TablesScreen> {
       }
     } finally {
       _isFetchingData = false;
+      // 21 Tem 2026: damgayı fetch BAŞLANGICIYLA vur (bitiş değil) — bu load ne kadar
+      // ÖNCEKİ veriyi getirdi bilgisi self-echo guard için doğru olur.
+      _lastLoadStartedAt = loadStartedAt;
       if (!silent) {
         setState(() => _isLoading = false);
       }
+      // Guard'a takılan silent load kuyruğa alındıysa bir kez daha çalış (yutma yok).
+      if (_reloadQueued && mounted) {
+        _reloadQueued = false;
+        _loadData(silent: true);
+      }
     }
   }
+
+  // 21 Tem 2026: masa gridi son yüklemesinin BAŞLANGIÇ zamanı (self-echo guard).
+  DateTime? _lastLoadStartedAt;
 
   Future<void> _refreshPendingCount() async {
     // 11 Haz 2026 DONMA FIX: 5sn otomatik poll yavaş ağda üst üste binmesin.
@@ -578,7 +639,7 @@ class _TablesScreenState extends State<TablesScreen> {
           onItemAdded: () {},
           onClose: () {
             Navigator.of(context).pop();
-            _loadData();
+            _loadData(silent: true); // 21 Tem 2026: spinner flash kalksın (grid yerinde güncellenir, donma azalır)
           },
         ),
       );
@@ -627,7 +688,7 @@ class _TablesScreenState extends State<TablesScreen> {
                     onItemAdded: () {},
                     onClose: () {
                       Navigator.of(context).pop();
-                      _loadData();
+                      _loadData(silent: true); // 21 Tem 2026: spinner flash kalksın (donma azalır)
                     },
                   ),
                 );
@@ -653,7 +714,7 @@ class _TablesScreenState extends State<TablesScreen> {
           section: currentSection.isNotEmpty ? currentSection : null,
           onClose: () {
             Navigator.of(context).pop();
-            _loadData();
+            _loadData(silent: true); // 21 Tem 2026: spinner flash kalksın (donma azalır)
           },
         ),
       );

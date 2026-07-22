@@ -105,6 +105,9 @@ class _TablesScreenState extends State<TablesScreen> {
     // 21 Tem 2026: masa durumu PUSH dinleyicisi (fan-out — main.dart TEK-SLOT'unu EZMEZ).
     // Backend adisyon aç/kapa/taşı/böl/ürün-ekle sonrası 'table_status' yollar → o an yenile.
     widget.webSocketService.addCacheInvalidateListener(_onCachePush);
+    // 21 Tem 2026: poll süresini backend'den al (offline-safe cache) + canlı değişimi dinle.
+    _loadPollSettings();
+    _syncService.addSettingsListener(_onSettingsRefreshed);
   }
 
   // ==================== UPDATE CHECK (3 saatte bir) ====================
@@ -173,34 +176,68 @@ class _TablesScreenState extends State<TablesScreen> {
     _connectivitySubscription?.cancel();
     _pushDebounce?.cancel(); // 21 Tem 2026: masa push debounce
     widget.webSocketService.removeCacheInvalidateListener(_onCachePush); // 21 Tem 2026: fan-out kaydı kaldır
+    _syncService.removeSettingsListener(_onSettingsRefreshed); // 21 Tem 2026: poll settings listener kaldır
     super.dispose();
   }
 
   Timer? _pendingCountTimer;
 
-  void _startAutoRefresh() {
-    // 21 Tem 2026: 2sn → 6sn. Masa değişiklikleri artık PUSH ile ANINDA gelir ('table_status'
-    // → _onCachePush → _loadData). Poll KALDIRILMADI: offline / reconnect'te kaçan event /
-    // emit'i olmayan uç-yol için EMNİYET AĞI (offline'da lokal cache okur, ucuz).
-    // 6 Tem 2026 (offline fix Adim 4b): OFFLINE'da da calis. Online -> server; offline ->
-    // getTables lokal cache + offline merge doner (Adim 1).
-    _refreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
-      if (mounted) {
-        _loadData(silent: true);
-      }
-    });
+  // 21 Tem 2026: Poll süreleri BACKEND'den (panel_settings → /api/pos/settings). Push güvenli
+  // çalıştıkça panelden 6→8→10sn UZAKTAN artırılır, YENİ FLUTTER SÜRÜMÜ DAĞITMADAN. Backend değer
+  // göndermezse/bozuksa/0 ise FALLBACK (mevcut davranış). Poll ASLA kapatılamaz (clamp min).
+  static const int _kDefaultTablePollSec = 6;   // fallback = mevcut davranış
+  static const int _kDefaultBadgePollSec = 15;
+  int _tablePollSec = _kDefaultTablePollSec;
+  int _badgePollSec = _kDefaultBadgePollSec;
 
-    // MASA TAKIP badge + masa rengi icin pending data.
-    // 21 Tem 2026: 5sn → 15sn. Badge artık PUSH ile de yenileniyor (_onCachePush → adisyon
-    // aç/kapa/ürün-ekle/taşı sonrası anlık). Poll emniyet ağı (mark-served/printed gibi push'suz
-    // yollar + reconnect). Badge eşikleri DAKİKA mertebesi (renk 10/20dk, FİŞ ÇIKMADI 2dk backend)
-    // → 15sn granülarite hiçbir göstergeyi bozmaz. OFFLINE'da lokal print_queue'dan beslenir.
+  void _startAutoRefresh() {
+    // Masa gridi + badge poll. Süreler backend'den (yoksa 6/15sn fallback). Masa değişiklikleri
+    // PUSH ile ANINDA gelir ('table_status' → _onCachePush); poll = EMNİYET AĞI (offline/reconnect/
+    // push'suz uç-yollar). OFFLINE'da lokal cache okur (ucuz). Poll KALDIRILMAZ, sadece gevşetilir.
     _refreshPendingCount(); // ilk cagri hemen
-    _pendingCountTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted) {
-        _refreshPendingCount();
-      }
+    _restartPollTimers();
+  }
+
+  // Backend'den gelen (veya fallback) sürelerle timer'ları (yeniden) kur. Canlı değişimde
+  // (settings push) çağrılır → eski timer cancel + yeni Duration. mounted + _isFetching guard'lı.
+  void _restartPollTimers() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(Duration(seconds: _tablePollSec), (_) {
+      if (mounted) _loadData(silent: true);
     });
+    _pendingCountTimer?.cancel();
+    _pendingCountTimer = Timer.periodic(Duration(seconds: _badgePollSec), (_) {
+      if (mounted) _refreshPendingCount();
+    });
+  }
+
+  // 0/negatif/bozuk → fallback (poll ASLA kapanmaz, Mustafa kuralı); aralık dışı → clamp.
+  int _parsePollSec(dynamic v, int fallback, int min, int max) {
+    final n = int.tryParse(v?.toString() ?? '');
+    if (n == null || n <= 0) return fallback;
+    return n.clamp(min, max);
+  }
+
+  // Açılışta SQLite cache'ten oku (offline-safe: cache yok → hardcoded 6/15 kalır).
+  Future<void> _loadPollSettings() async {
+    try {
+      _applyPollSettings(await LocalDbService().getCachedSettings());
+    } catch (_) {}
+  }
+
+  // Settings push/sweep geldiğinde (SyncService fan-out) canlı güncelle.
+  void _onSettingsRefreshed(Map<String, dynamic> settings) {
+    if (mounted) _applyPollSettings(settings);
+  }
+
+  void _applyPollSettings(Map<String, dynamic> s) {
+    final t = _parsePollSec(s['table_poll_sec'], _kDefaultTablePollSec, 3, 60);
+    final b = _parsePollSec(s['badge_poll_sec'], _kDefaultBadgePollSec, 5, 300);
+    if (t == _tablePollSec && b == _badgePollSec) return; // değişmedi → timer'a dokunma
+    _tablePollSec = t;
+    _badgePollSec = b;
+    print('[Tables] Poll süreleri backend\'den: grid=${t}sn badge=${b}sn');
+    if (mounted) _restartPollTimers();
   }
 
   // 21 Tem 2026: Backend adisyon aç/kapa/taşı/böl/ürün-ekle/indirim sonrası

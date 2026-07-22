@@ -1597,6 +1597,8 @@ class _AddItemModalState extends State<AddItemModal> {
                 printerName: printerName,
                 ticketInfo: ticketInfo,
                 items: groupItems,
+                serverJobId: jobId,             // Faz 2: basinca sunucuya rapor
+                serverTicketId: widget.ticketId, // Faz 2
               );
             }
             failedGroupsForRetry.add({
@@ -1999,6 +2001,8 @@ class _AddItemModalState extends State<AddItemModal> {
                 printerName: printerName,
                 ticketInfo: ticketInfo,
                 items: groupItems,
+                serverJobId: jobId,             // Faz 2: basinca sunucuya rapor
+                serverTicketId: widget.ticketId, // Faz 2
               );
             }
             failedGroupsForRetry.add({

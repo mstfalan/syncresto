@@ -5,6 +5,7 @@ import 'package:esc_pos_utils/esc_pos_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'log_service.dart';
 import 'local_db_service.dart';
+import 'connectivity_service.dart'; // Faz 2 K6: offline'da rapor aninda persist
 
 /// Yazıcı türleri
 enum PrinterType {
@@ -1551,6 +1552,84 @@ class PrinterService {
 
   // ==================== YAZICI KUYRUĞU İŞLEMLERİ ====================
 
+  // ==================== FAZ 2: KUYRUK BASIM RAPORU (22 Tem 2026) ====================
+  // Lokal yazici kuyrugu (retryPrintJob) basarili basinca sunucuya 'printed' raporu.
+  // SADECE TELEMETRI: basim karari rapora BAGLI DEGIL — rapor gitmese de fis TEKRAR
+  // BASILMAZ (markPrintCompleted zaten cagrildi, kuyruktan dustu). Faz 3'te havuz bu
+  // raporu okuyup ayni fisi baska kasaya BASTIRMAYACAK (cift-fis kanali kapanir).
+
+  /// Feature flag (SharedPreferences, DEFAULT ACIK). false -> rapor tamamen kapali.
+  static const String kitchenReportPrefKey = 'kitchen_report_enabled';
+
+  /// main.dart'ta kablolanir: (serverTicketId, serverJobId) -> ApiService.markItemsPrinted.
+  /// PrinterService, ApiService'i DOGRUDAN import etmez (webpos configure deseni).
+  Future<bool> Function(int serverTicketId, int serverJobId)? onQueueKitchenPrinted;
+
+  Future<bool> _isKitchenReportEnabled() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(kitchenReportPrefKey) ?? true; // default ACIK
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// Rapor cagrilari icin hafif backoff: ILK deneme CAGIRAN tarafta yapilir; bu
+  /// fonksiyon SADECE 2sn + 5sn sonraki max 2 tekrari kosar (toplam ~7sn < 10sn).
+  /// Fire-and-forget kullanilmali — basim/poll akisini bloklamaz.
+  static Future<bool> retryReportWithBackoff(
+    Future<bool> Function() attempt, {
+    String tag = 'report',
+  }) async {
+    for (final delay in const [Duration(seconds: 2), Duration(seconds: 5)]) {
+      await Future.delayed(delay);
+      try {
+        if (await attempt()) return true;
+      } catch (_) {}
+    }
+    print('[Printer] $tag: backoff sonrasi rapor gonderilemedi');
+    return false;
+  }
+
+  /// Fire-and-forget rapor: online -> callback (markItemsPrinted) + backoff'la 2 tekrar;
+  /// hala olmadi / offline / callback yok -> sync_queue mark_job_printed (replay).
+  /// receiptData'da server_job_id/server_ticket_id yoksa (eski kayit, offline fis) NO-OP.
+  Future<void> _reportQueueJobPrinted(Map<String, dynamic> receiptData) async {
+    try {
+      final serverJobId = (receiptData['server_job_id'] as num?)?.toInt();
+      final serverTicketId = (receiptData['server_ticket_id'] as num?)?.toInt();
+      if (serverJobId == null || serverTicketId == null) return;
+      if (!await _isKitchenReportEnabled()) return; // flag kapali -> hicbir iz yok
+
+      // Fable K6 FIX: OFFLINE ise callback+backoff'la 7sn RAM'de bekletme (kasa o pencerede
+      // kapanirsa rapor kaybolur → job sonsuza 'failed' → Faz 3'te cift fis). Offline'da
+      // ANINDA sync_queue'ya persist et (online olunca replay). Online'da callback+backoff.
+      if (ConnectivityService().isOnline) {
+        final cb = onQueueKitchenPrinted;
+        if (cb != null) {
+          bool ok = false;
+          try {
+            ok = await cb(serverTicketId, serverJobId);
+          } catch (_) {}
+          if (!ok) {
+            ok = await retryReportWithBackoff(
+              () => cb(serverTicketId, serverJobId),
+              tag: 'kuyruk fisi job#$serverJobId',
+            );
+          }
+          if (ok) return; // rapor gitti
+        }
+      }
+      // Offline VEYA rapor gitmedi VEYA callback yok -> sync_queue'ya al (kalici, replay).
+      await _localDb.enqueueMarkJobPrinted(
+        serverTicketId: serverTicketId,
+        serverJobId: serverJobId,
+      );
+    } catch (e) {
+      print('[Printer] Kuyruk basim raporu hatasi (yutuldu): $e');
+    }
+  }
+
   /// 18 May 2026: Mutfak fisi TCP fail olunca arka plan kuyruguna ekle.
   /// PrintQueueService 5sn'de bir otomatik retry yapar — kullanici pop-up kapatsa
   /// bile kuyrukta calismaya devam eder. UI'daki sag ust badge bu sayilari gosterir.
@@ -1562,6 +1641,8 @@ class PrinterService {
     String? printerName,
     required Map<String, dynamic> ticketInfo,
     required List<dynamic> items,
+    int? serverJobId,     // Faz 2: panel_print_jobs id (backend printKitchen yanitindan)
+    int? serverTicketId,  // Faz 2: server ticket id (basim raporu icin)
   }) async {
     try {
       final id = await _localDb.addToPrintQueue(
@@ -1569,7 +1650,15 @@ class PrinterService {
         printerIp: ip,
         printerPort: port,
         printerName: printerName,
-        receiptData: {'ticket': ticketInfo, 'items': items},
+        receiptData: {
+          'ticket': ticketInfo,
+          'items': items,
+          // Faz 2 (22 Tem 2026): SQLite semasi DEGISMEDEN job kimligi JSON'a gomulur.
+          // retryPrintJob basarili basinca sunucuya 'printed' raporu icin okunur.
+          // Offline fiste job_id yoktur -> gomulmez -> rapor da denenmez (dogru davranis).
+          if (serverJobId != null) 'server_job_id': serverJobId,
+          if (serverTicketId != null) 'server_ticket_id': serverTicketId,
+        },
       );
       return id;
     } catch (e) {
@@ -1616,6 +1705,10 @@ class PrinterService {
       if (success) {
         await _localDb.markPrintCompleted(queueId);
         print('[Printer] Print job basarili: $queueId');
+        // Faz 2: fire-and-forget sunucu raporu — donus degerini ETKILEMEZ, basim tekrari YOK.
+        if (printType == 'kitchen') {
+          unawaited(_reportQueueJobPrinted(receiptData));
+        }
         return true;
       } else {
         await _localDb.markPrintFailed(queueId, 'Yaziciya ulasilamadi');

@@ -402,6 +402,8 @@ class _TicketModalState extends State<TicketModal> {
                 printerName: printerName,
                 ticketInfo: ticketInfo,
                 items: groupItems,
+                serverJobId: jobId,        // Faz 2: basinca sunucuya rapor
+                serverTicketId: ticketId,  // Faz 2
               );
             }
             failedGroupsForRetry.add({
@@ -795,6 +797,8 @@ class _TicketModalState extends State<TicketModal> {
                 printerName: printerName,
                 ticketInfo: ticketInfo,
                 items: groupItems,
+                serverJobId: jobId,        // Faz 2: basinca sunucuya rapor
+                serverTicketId: ticketId,  // Faz 2
               );
             }
             failedGroupsForRetry.add({

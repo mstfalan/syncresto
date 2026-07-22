@@ -265,6 +265,15 @@ void main() {
   final printQueueService = PrintQueueService();
   printQueueService.startAutoRetry();
 
+  // Faz 2 (22 Tem 2026): lokal yazici kuyrugu basarili basinca sunucuya 'printed'
+  // raporu. PrinterService ApiService'i import etmez — kablo burada (webpos deseni).
+  printerService.onQueueKitchenPrinted = (serverTicketId, serverJobId) =>
+      apiService.markItemsPrinted(
+        ticketId: serverTicketId,
+        itemIds: const [],
+        jobIds: [serverJobId],
+      );
+
   // WebSocket event handler'larini ayarla
   webSocketService.onNewOrder = (order) {
     print('[Main] Yeni siparis alindi: ${order['order_number']}');

@@ -58,6 +58,24 @@ class SyncService {
   // Settings callback for theme updates
   void Function(Map<String, dynamic> settings)? onSettingsLoaded;
 
+  // 21 Tem 2026: settings fan-out — onSettingsLoaded TEK-SLOT (tema, initial_sync sahibi).
+  // tables_screen poll süresini (table_poll_sec/badge_poll_sec) backend'den okuyabilsin diye EK
+  // listener; TEK-SLOT EZILMEZ (websocket_service fan-out deseniyle aynı). Bir listener'ın
+  // exception'ı diğerlerini/slotu öldürmez (her biri try/catch).
+  final List<void Function(Map<String, dynamic>)> _settingsListeners = [];
+  void addSettingsListener(void Function(Map<String, dynamic>) l) {
+    if (!_settingsListeners.contains(l)) _settingsListeners.add(l);
+  }
+  void removeSettingsListener(void Function(Map<String, dynamic>) l) {
+    _settingsListeners.remove(l);
+  }
+  void _notifySettingsLoaded(Map<String, dynamic> settings) {
+    onSettingsLoaded?.call(settings);
+    for (final l in List<void Function(Map<String, dynamic>)>.from(_settingsListeners)) {
+      try { l(settings); } catch (e) { print('[Sync] settings listener hata: $e'); }
+    }
+  }
+
   void setBackendUrl(String? url) {
     _backendUrl = url;
   }
@@ -255,8 +273,8 @@ class SyncService {
           await _localDb.cacheSettings(settings);
           print('[Sync] Ayarlar cache\'lendi');
 
-          // Tema güncellemesi için callback
-          onSettingsLoaded?.call(settings);
+          // Tema güncellemesi için callback + fan-out (poll süresi vb)
+          _notifySettingsLoaded(settings);
         }
       } catch (e) {
         print('[Sync] Ayarlar alınamadı (opsiyonel): $e');
@@ -481,8 +499,8 @@ class SyncService {
           await _localDb.cacheSettings(settings);
           print('[Sync] Ayarlar güncellendi');
 
-          // Tema güncellemesi için callback
-          onSettingsLoaded?.call(settings);
+          // Tema güncellemesi için callback + fan-out (poll süresi vb)
+          _notifySettingsLoaded(settings);
         }
       } catch (e) {
         print('[Sync] Ayarlar güncellenemedi: $e');
@@ -993,6 +1011,37 @@ class SyncService {
           // 🔴 Fable: zombi olmasin -> markSyncFailed (retry/dead_letter).
           print('[Sync] mark_printed sync hatasi: $e');
           _logService.logSyncError('mark_printed sync hatasi', operation: 'mark_printed', error: e);
+          await _localDb.markSyncFailed(syncId, e.toString());
+        }
+        return false;
+
+      case 'mark_job_printed':
+        // Faz 2 (22 Tem 2026): Lokal yazici kuyrugu fisi basildi — panel_print_jobs
+        // 'printed' telemetri raporu (offline'da/rapor hatasi sonrasi replay).
+        // Server id'ler payload'da HAZIR (backend printKitchen yanitindan gomuldu),
+        // resolve GEREKMEZ. Idempotent: backend job status set'i tekrar zararsiz.
+        final mjTicketId = (payload['server_ticket_id'] as num?)?.toInt();
+        final mjJobId = (payload['server_job_id'] as num?)?.toInt();
+        if (mjTicketId == null || mjJobId == null) {
+          await _localDb.markSyncFailed(syncId, 'mark_job_printed: server id eksik');
+          return false;
+        }
+        try {
+          final mjResp = await _dio!.post('/api/pos/tickets/$mjTicketId/mark-items-printed', data: {
+            'item_ids': const <int>[],
+            'job_ids': [mjJobId],
+          });
+          if (mjResp.statusCode == 200) {
+            await _localDb.markSyncComplete(syncId);
+            print('[Sync] mark_job_printed sync basarili: job=$mjJobId');
+            _logService.logSync('Print job printed raporu sync basarili', operation: 'mark_job_printed', count: 1);
+            return true;
+          }
+          await _localDb.markSyncFailed(syncId, 'mark_job_printed HTTP ${mjResp.statusCode}');
+        } catch (e) {
+          // Zombi olmasin -> markSyncFailed (retry_count -> max_retries -> dead_letter).
+          print('[Sync] mark_job_printed sync hatasi: $e');
+          _logService.logSyncError('mark_job_printed sync hatasi', operation: 'mark_job_printed', error: e);
           await _localDb.markSyncFailed(syncId, e.toString());
         }
         return false;
@@ -1513,7 +1562,7 @@ class SyncService {
           if (r.data != null) {
             final settings = Map<String, dynamic>.from(r.data);
             await _localDb.cacheSettings(settings);
-            onSettingsLoaded?.call(settings);
+            _notifySettingsLoaded(settings); // fan-out (poll süresi push'ta canlı güncellenir)
           }
           break;
         default:

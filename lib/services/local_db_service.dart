@@ -50,7 +50,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 14, // v14 (17 Tem 2026): opened_by_device — masayı hangi kasa açtı (cached_tables + local_tickets)
+      version: 15, // v15 (21 Tem 2026): cached_products.hide_from_tracking — Masa Takipte gizle (offline)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -165,6 +165,7 @@ class LocalDbService {
         combo_discount_percent REAL,
         combo_discount_amount REAL,
         combo_repeat INTEGER DEFAULT 1,
+        hide_from_tracking INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -571,6 +572,17 @@ class LocalDbService {
       print('[LocalDb] v14 opened_by_device kolonlari eklendi');
     }
 
+    // v15 (21 Tem 2026): hide_from_tracking — "Masa Takip Ekranında Gösterme" ürün bazlı gizleme
+    // (offline). Backend dondurmese NULL/0 -> gorunur (mevcut davranis, guvenli). Additive.
+    if (oldVersion < 15) {
+      try {
+        await db.execute('ALTER TABLE cached_products ADD COLUMN hide_from_tracking INTEGER DEFAULT 0');
+        print('[LocalDb] v15 hide_from_tracking kolonu eklendi');
+      } catch (e) {
+        print('[LocalDb] v15 kolon zaten var: $e');
+      }
+    }
+
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
     // local_tickets: garson/salon adi. local_ticket_items: ekleyen/teslim eden garson, porsiyon,
     // odeme durumu, mutfak-gizle. Hepsi nullable/DEFAULT'lu additive -> sync_queue/FIFO etkilenmez.
@@ -744,6 +756,8 @@ class LocalDbService {
           'combo_discount_percent': prod['combo_discount_percent'],
           'combo_discount_amount': prod['combo_discount_amount'],
           'combo_repeat': (prod['combo_repeat'] == false || prod['combo_repeat'] == 0) ? 0 : 1,
+          // 21 Tem 2026: Masa Takipte gizle (offline). Backend dondurmese 0 -> gorunur (guvenli).
+          'hide_from_tracking': (prod['hide_from_tracking'] == true || prod['hide_from_tracking'] == 1) ? 1 : 0,
           'cached_at': now,
         });
       }
@@ -1815,6 +1829,45 @@ class LocalDbService {
       },
       priority: 1,
       description: description ?? 'Mutfak fisi offline yazdirildi (ticket local#$localTicketId)',
+    );
+  }
+
+  /// Faz 2 (22 Tem 2026): Lokal yazici kuyrugu basarili basinca sunucu raporu
+  /// (mark-items-printed job_ids) OFFLINE/HATA durumunda kaybolmasin diye sync_queue'ya
+  /// kuyruklar. SADECE TELEMETRI — basim kararini etkilemez, fis TEKRAR BASILMAZ.
+  /// Ayni server_job_id icin bekleyen kayit varsa yenisi ACILMAZ (dup-guard, idempotent).
+  /// SQLite SEMASI DEGISMEZ — mevcut generic sync_queue tablosu, payload JSON.
+  Future<int?> enqueueMarkJobPrinted({
+    required int serverTicketId,
+    required int serverJobId,
+  }) async {
+    final db = await database;
+    // Dup-guard: bekleyen mark_job_printed kayitlarini tara (sayilari her zaman kucuktur)
+    final existing = await db.query('sync_queue',
+        where: "action = 'mark_job_printed' AND status IN ('pending', 'in_progress')");
+    for (final row in existing) {
+      try {
+        final raw = row['payload'];
+        if (raw is String && raw.isNotEmpty) {
+          final p = jsonDecode(raw);
+          if (p is Map && (p['server_job_id'] as num?)?.toInt() == serverJobId) {
+            print('[LocalDb] mark_job_printed zaten kuyrukta (job=$serverJobId)');
+            return row['id'] as int?;
+          }
+        }
+      } catch (_) {}
+    }
+    return await addToSyncQueueWithReturn(
+      action: 'mark_job_printed',
+      entityType: 'ticket',
+      localId: null, // lokal ticket bagimliligi YOK — server id'ler payload'da hazir
+      serverId: serverTicketId,
+      payload: {
+        'server_ticket_id': serverTicketId,
+        'server_job_id': serverJobId,
+      },
+      priority: 0,
+      description: 'Kuyruk fisi basildi raporu (job#$serverJobId, ticket#$serverTicketId)',
     );
   }
 
@@ -3191,8 +3244,10 @@ class LocalDbService {
  LEFT JOIN cached_sections s ON s.id = tb.section_id
  LEFT JOIN cached_waiters wa ON wa.id = i.added_by
  LEFT JOIN cached_waiters wd ON wd.id = i.delivered_by
+ LEFT JOIN cached_products cp ON cp.id = i.product_id
      WHERE t.status = 'open' AND COALESCE(t.lan_origin,'self') = 'self'
        AND i.status != 'cancelled'
+       AND COALESCE(cp.hide_from_tracking, 0) = 0
      ORDER BY i.created_at
     ''');
   }

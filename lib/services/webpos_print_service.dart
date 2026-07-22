@@ -127,7 +127,16 @@ class WebposPrintService {
         );
 
         // Claim sonrasi sonuc raporu ZORUNLU — backend status'u buna gore set eder.
-        await api.reportPrintJobResult(jobId, ok: ok, error: errorMsg);
+        // Faz 2 (22 Tem 2026): ilk deneme basarisizsa 2sn+5sn backoff (max 2 tekrar),
+        // fire-and-forget — poll dongusunu BLOKLAMAZ (<10sn). Rapor telemetridir;
+        // tek-basim garantisi atomik claim'den gelir, tekrar basim riski YOKTUR.
+        final reported = await api.reportPrintJobResult(jobId, ok: ok, error: errorMsg);
+        if (!reported) {
+          unawaited(PrinterService.retryReportWithBackoff(
+            () => api.reportPrintJobResult(jobId, ok: ok, error: errorMsg),
+            tag: 'webpos result #$jobId',
+          ));
+        }
       }
     } catch (e) {
       if (kDebugMode) print('[WebposPrint] poll hata: $e');

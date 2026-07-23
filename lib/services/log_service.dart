@@ -98,7 +98,10 @@ class LogService {
     _startFlushTimer();
     _isInitialized = true;
 
-    info(LogType.general, 'Log servisi başlatıldı');
+    // 23 Tem 2026: acilista build parmak-izi — hangi surumun GERCEKTEN kurulu
+    // oldugu tek bakista gorunsun (saha "son surum mu?" belirsizligini bitirir).
+    info(LogType.general, 'Log servisi baslatildi (surum $_appVersion)',
+        details: {'app_version': _appVersion, 'platform': _platform});
   }
 
   /// Cihaz bilgilerini yükle
@@ -107,7 +110,11 @@ class LogService {
       final deviceInfo = DeviceInfoPlugin();
       final packageInfo = await PackageInfo.fromPlatform();
 
-      _appVersion = packageInfo.version;
+      // 23 Tem 2026: build numarasini da ekle (1.6.6 -> 1.6.6+58). Surum bump
+      // yapmiyoruz (release tetiklenmesin) ama +buildNumber sahada "hangi build
+      // kurulu" belirsizligini bitirir — ayni "1.6.6" iki farkli build olabiliyordu.
+      final bn = packageInfo.buildNumber;
+      _appVersion = bn.isNotEmpty ? '${packageInfo.version}+$bn' : packageInfo.version;
 
       if (Platform.isWindows) {
         final windowsInfo = await deviceInfo.windowsInfo;

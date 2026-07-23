@@ -252,7 +252,9 @@ class WebSocketService {
             for (final l in List<void Function(List<String>)>.from(_cacheInvalidateListeners)) {
               try { l(types); } catch (e) { print('[WebSocket] cacheInvalidate listener hata: $e'); }
             }
-            _logService.info(LogType.sync, 'Cache invalidate alindi', details: {'types': types});
+            // 23 Tem 2026: sunucu logu KALDIRILDI — masa push Faz 1 sonrasi her adisyon
+            // hareketi x kasa sayisi kadar satir uretiyordu (Aysel's 3.5k/gun, pos_logs
+            // sismesinin en buyuk kalemi). Lokal print (248) teşhis icin yeterli.
           }
         } catch (e) {
           print('[WebSocket] cache:invalidate hata: $e');

@@ -405,8 +405,10 @@ class SyncService {
     // NOT: _lastBgUpdateAt burada DEĞİL, taramanın BAŞARILI sonunda set edilir (filo bulgusu #0/#20:
     // başarısız tarama da 'yapıldı' sayılıp reconnect telafisini 5dk erteliyordu).
 
+    // 23 Tem 2026: rutin baslatildi/tamamlandi sunucu loglari KALDIRILDI (5dk'lik dongu
+    // kasa basina gunde ~576 satir pos_logs sisiriyordu). Hata dali sunucuya loglanmaya
+    // DEVAM eder (asagida, artik hangi URL oldugu da yazilir). Lokal print yeterli.
     print('[Sync] Arka plan güncelleme başlıyor...');
-    _logService.logSync('Arka plan cache guncellemesi baslatildi', operation: 'background_update_start');
 
     try {
       // 1. Ürünleri güncelle
@@ -550,10 +552,16 @@ class SyncService {
 
       _lastBgUpdateAt = DateTime.now(); // BAŞARILI tamamlanma — debounce referansı (filo #0)
       print('[Sync] Arka plan güncelleme tamamlandı');
-      _logService.logSync('Arka plan cache guncellemesi tamamlandi', operation: 'background_update_complete');
     } catch (e) {
       print('[Sync] Arka plan güncelleme hatası: $e');
-      _logService.logSyncError('Arka plan cache guncellemesi hatasi', operation: 'background_update', error: e);
+      // 23 Tem 2026: DioException toString'i URL icermiyor, hangi endpoint'in timeout
+      // oldugu teshis edilemiyordu — path'i mesaja ekle.
+      final hataYolu = (e is DioException) ? (e.requestOptions.path) : '';
+      _logService.logSyncError(
+        hataYolu.isNotEmpty
+            ? 'Arka plan cache guncellemesi hatasi ($hataYolu)'
+            : 'Arka plan cache guncellemesi hatasi',
+        operation: 'background_update', error: e);
     } finally {
       // 11 Haz 2026: guard mutlaka serbest bırakılmalı (yoksa kalıcı kilit → bir daha hiç çalışmaz)
       _isBgUpdating = false;

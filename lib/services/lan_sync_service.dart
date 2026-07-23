@@ -684,11 +684,9 @@ class LanSyncService {
       final sig = (peers.map((p) => p.deviceId).toList()..sort()).join(',');
       if (sig != _lastPeerSig) {
         _lastPeerSig = sig;
-        print('[LanSync] Peer listesi degisti: ${_peers.length} peer');
-        _log('discovery', msg: 'Peer listesi degisti: ${_peers.length} peer (ayni bayi)', extra: {
-          'subnet': subnet.prefix,
-          'peers': peers.map((p) => {'id': p.deviceId, 'ip': p.ip, 'port': p.port}).toList(),
-        });
+        // 23 Tem 2026: sunucu logu KALDIRILDI (flappy aglarda gunde yuzlerce satir
+        // pos_logs sisiriyordu — Aysel's 800+/gun). Lokal print teşhis icin yeterli.
+        print('[LanSync] Peer listesi degisti: ${_peers.length} peer (${peers.map((p) => p.ip).join(',')})');
       }
     } finally {
       _scanning = false;
@@ -778,9 +776,8 @@ class LanSyncService {
       if (isNew) {
         // FIX C: peer bulununca ANINDA yayinla (tarama bitene ~80sn bekletme). UI/lider secimi hizli gorur.
         _peersController.add(peers);
-        _log('peer_found', msg: 'Peer dogrulandi (ayni bayi): $ip:$replyPort', extra: {
-          'peer_ip': ip, 'peer_port': replyPort, 'peer_device_id': peerDeviceId,
-        });
+        // 23 Tem 2026: sunucu logu KALDIRILDI (log sismesi) — lokal print yeterli.
+        print('[LanSync] Peer dogrulandi (ayni bayi): $ip:$replyPort');
       }
       return true;
     } catch (_) {

@@ -226,6 +226,18 @@ class StorageService {
     await _prefs.setBool(variantOnTapKey, value);
   }
 
+  // 24 Tem 2026: Çıkmayan-fiş uyarısı otomatik pop-up açılsın mı (retry 5/5 tükenip mutfak
+  // fişi çıkmayınca fişi giren kasada). DEFAULT AÇIK (Mustafa). Kapalıyken sadece sağ-üst
+  // rozetten görülür. Key PUBLIC — printer_settings (yazar) + tables_screen (okur) paylaşır.
+  static const String failedPrintAutoPopupKey = 'failed_print_auto_popup';
+  Future<bool> getFailedPrintAutoPopup() async {
+    return _prefs.getBool(failedPrintAutoPopupKey) ?? true; // DEFAULT AÇIK
+  }
+
+  Future<void> setFailedPrintAutoPopup(bool value) async {
+    await _prefs.setBool(failedPrintAutoPopupKey, value);
+  }
+
   // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
   // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
   String getOrderTrackingSort() {

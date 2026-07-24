@@ -26,6 +26,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   List<Map<String, dynamic>> _discoveredPrinters = [];
   List<Map<String, dynamic>> _serverPrinters = []; // Sunucudan gelen yazıcılar
   bool _variantOnTap = false; // POS davranisi: urune tiklayinca varyant secimi acilsin mi
+  bool _failedPrintAutoPopup = true; // 24 Tem: cikmayan-fis uyarisi otomatik pop (DEFAULT ACIK)
 
   // Varsayılan yazıcı türleri (ikon ve renk için)
   final Map<String, Map<String, dynamic>> _defaultTypes = {
@@ -57,13 +58,22 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   Future<void> _loadPosBehaviorPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
-    setState(() => _variantOnTap = prefs.getBool(StorageService.variantOnTapKey) ?? false);
+    setState(() {
+      _variantOnTap = prefs.getBool(StorageService.variantOnTapKey) ?? false;
+      _failedPrintAutoPopup = prefs.getBool(StorageService.failedPrintAutoPopupKey) ?? true; // DEFAULT ACIK
+    });
   }
 
   Future<void> _setVariantOnTap(bool value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(StorageService.variantOnTapKey, value);
     if (mounted) setState(() => _variantOnTap = value);
+  }
+
+  Future<void> _setFailedPrintAutoPopup(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.failedPrintAutoPopupKey, value);
+    if (mounted) setState(() => _failedPrintAutoPopup = value);
   }
 
   /// Sunucudan yazıcıları yükle (admin panelden eklenenler)
@@ -222,6 +232,18 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                   'Kapalı: ürün direkt sepete eklenir, varyant sağdaki "Varyant" butonundan seçilir.'),
               value: _variantOnTap,
               onChanged: _setVariantOnTap,
+            ),
+            const Divider(height: 1),
+            // 24 Tem 2026: Çıkmayan-fiş otomatik uyarı toggle (DEFAULT AÇIK).
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Çıkmayan fiş uyarısı otomatik açılsın'),
+              subtitle: const Text(
+                  'Açık: yazıcı denemeleri tükenip mutfak fişi çıkmazsa bu kasada uyarı '
+                  'penceresi otomatik açılır (tekrar yazdırabilirsiniz). '
+                  'Kapalı: sadece sağ üstteki uyarı simgesinden görülür.'),
+              value: _failedPrintAutoPopup,
+              onChanged: _setFailedPrintAutoPopup,
             ),
           ],
         ),

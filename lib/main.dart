@@ -11,6 +11,8 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'services/storage_service.dart';
 import 'services/api_service.dart';
 import 'services/printer_service.dart';
+import 'services/log_service.dart';
+import 'services/failed_prints_notifier.dart';
 import 'services/sound_service.dart';
 import 'services/websocket_service.dart';
 import 'services/webpos_print_service.dart';
@@ -273,6 +275,48 @@ void main() {
         itemIds: const [],
         jobIds: [serverJobId],
       );
+
+  // 24 Tem 2026: retry TÜKENDİ (5/5, mutfak fişi çıkmadı) → (a) SUNUCU LOGU (pos_logs
+  // error — biz uzaktan adminsync #poslogs'ta görürüz; gürültü filtresi error'ı elemez),
+  // (b) POS sağ-üst "çıkmayan fiş" rozetini yenile (global notifier tik). FAZ 3 UYUMU:
+  // online'da badge sunucu 'printed'i görüp otomatik düşürür (kurtarılmışsa gösterilmez).
+  printerService.onQueueKitchenFailed = (info) {
+    // (a) SUNUCU LOGU — biz uzaktan adminsync #poslogs'ta görürüz (error, gürültü filtresi elemez).
+    // Fable H1: printer_service zaten job başına 1 kez çağırır (dedup orada), burada spam yok.
+    try {
+      LogService().error(
+        LogType.error,
+        'Mutfak fisi RETRY TUKENDI cikmadi (masa ${info['table']})',
+        details: {
+          'table': info['table'],
+          'printer_name': info['printer_name'],
+          'item_count': info['item_count'],
+          'ticket_id': info['ticket_id'],
+          'server_job_id': info['server_job_id'],
+          'error': info['error'],
+          'event': 'kitchen_print_exhausted',
+        },
+      );
+    } catch (_) {}
+    // (b) PANEL HARD-FAILED SİNYALİ (Fable H4) — fişi giren kasa kapansa bile panel/başka
+    // kasa "masa X fişi hiç çıkmadı" görsün, kalıcı kayıp olmasın. reportPrintFailed
+    // (amaca özel endpoint) panel_print_jobs.status='failed' set eder + cross-kasa push.
+    // Backend guard: `status NOT IN ('printed','failed')` → zaten basılmış işi bozmaz
+    // (çift-fiş/yanlış-alarm koruması). Online'da çalışır (offline false döner, güvenli).
+    // server_ticket_id + server_job_id GEREKLİ (offline-origin job'da yoksa atla — sunucuya
+    // hiç değmemiş, panel zaten bilmiyor). fire-and-forget, akışı etkilemez.
+    final serverTicketId = info['server_ticket_id'];
+    final serverJobId = info['server_job_id'];
+    if (serverTicketId is int && serverJobId is int) {
+      unawaited(apiService.reportPrintFailed(
+        ticketId: serverTicketId,
+        jobId: serverJobId,
+        error: 'retry_exhausted_5_5',
+      ).catchError((_) => false));
+    }
+    // (c) Badge'i anlik yenile (poll beklemeden)
+    failedKitchenPrintsChanged.value = failedKitchenPrintsChanged.value + 1;
+  };
 
   // WebSocket event handler'larini ayarla
   webSocketService.onNewOrder = (order) {

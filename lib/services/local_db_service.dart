@@ -3632,6 +3632,91 @@ class LocalDbService {
     return result;
   }
 
+  /// 24 Tem 2026: RETRY TÜKENMİŞ (5/5 denendi, çıkmadı) mutfak fişleri — POS sağ-üst
+  /// "çıkmayan fiş" bildirimi için. status='failed' + kitchen + SON 18 SAAT.
+  /// 🔴 Fable H2: takvim-günü (startsWith today) DEĞİL rolling 18h window — yoksa 23:58'de
+  /// çıkmayan fiş 00:01'de takvim değişince SESSİZCE kaybolurdu (restoran gece yarısını geçer).
+  /// 18h = gece servisini kapsar ama ertesi günün servisine taşmaz (pratik "günlük" his).
+  /// Her satır: id (failed job id, sil/retry için), masa, ürünler, yazıcı, saat, server_job_id.
+  Future<List<Map<String, dynamic>>> getFailedKitchenPrints() async {
+    final db = await database;
+    final rows = await db.query(
+      'print_queue',
+      columns: ['id', 'printer_name', 'printer_ip', 'printer_port', 'error_message',
+                'created_at', 'last_attempt_at', 'receipt_data'],
+      where: "print_type = 'kitchen' AND status = 'failed'",
+      orderBy: 'last_attempt_at DESC',
+    );
+    final cutoff = DateTime.now().subtract(const Duration(hours: 18));
+    final result = <Map<String, dynamic>>[];
+    for (final r in rows) {
+      final ts = (r['last_attempt_at'] ?? r['created_at'] ?? '').toString();
+      final dt = DateTime.tryParse(ts);
+      if (dt == null || dt.isBefore(cutoff)) continue; // rolling 18h window (Fable H2)
+      String tableLabel = '-';
+      final items = <String>[];
+      dynamic serverJobId;
+      dynamic serverTicketId;
+      final raw = r['receipt_data'];
+      if (raw is String) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map) {
+            serverJobId = decoded['server_job_id'];
+            serverTicketId = decoded['server_ticket_id'];
+            final ticket = decoded['ticket'];
+            if (ticket is Map) {
+              tableLabel = (ticket['table_number'] ?? ticket['table_name'] ?? ticket['table_id'] ?? '-').toString();
+            }
+            final its = decoded['items'];
+            if (its is List) {
+              for (final it in its) {
+                if (it is Map) {
+                  final name = (it['product_name'] ?? it['name'] ?? '').toString();
+                  final qty = it['quantity'] ?? it['qty'] ?? 1;
+                  if (name.isNotEmpty) items.add('${qty}x $name');
+                }
+              }
+            }
+          }
+        } catch (_) {/* bozuk JSON atla */}
+      }
+      result.add({
+        'id': r['id'],
+        'table': tableLabel,
+        'printer_name': (r['printer_name'] ?? '-').toString(),
+        'printer_ip': r['printer_ip'],
+        'printer_port': r['printer_port'],
+        'items': items,
+        'item_count': items.length,
+        'at': ts.length >= 16 ? ts.substring(11, 16) : ts, // HH:MM
+        'error': (r['error_message'] ?? '').toString(),
+        'server_job_id': serverJobId,
+        'server_ticket_id': serverTicketId,
+        'receipt_data': raw, // manuel Tekrar Yazdır için (items+ticket yeniden gerekir)
+      });
+    }
+    return result;
+  }
+
+  /// 24 Tem 2026: Çıkmayan-fiş bildirimini garson silince o failed job'u kuyruktan çıkar.
+  Future<void> deleteFailedKitchenPrint(int id) async {
+    final db = await database;
+    await db.delete('print_queue', where: "id = ? AND status = 'failed'", whereArgs: [id]);
+    print('[LocalDb] Cikmayan-fis bildirimi silindi: $id');
+  }
+
+  /// 24 Tem 2026 (Fable C2): manuel Tekrar Yazdır BAŞARILI olunca o failed row'u
+  /// completed'a çevir (badge'den düşsün). deleteFailedKitchenPrint yerine bunu kullan
+  /// ki iz kalsın (completed 1h sonra cleanupCompletedPrintJobs ile temizlenir).
+  Future<void> markFailedKitchenPrintResolved(int id) async {
+    final db = await database;
+    await db.update('print_queue',
+      {'status': 'completed', 'completed_at': DateTime.now().toIso8601String()},
+      where: "id = ? AND status = 'failed'", whereArgs: [id]);
+    print('[LocalDb] Cikmayan-fis manuel cozuldu (completed): $id');
+  }
+
   // Yazdırma işini tamamlandı olarak işaretle
   Future<void> markPrintCompleted(int id) async {
     final db = await database;
@@ -3650,17 +3735,21 @@ class LocalDbService {
     print('[LocalDb] Print job tamamlandı: $id');
   }
 
-  // Yazdırma işini başarısız olarak işaretle
-  Future<void> markPrintFailed(int id, String? errorMessage) async {
+  // Yazdırma işini başarısız olarak işaretle.
+  // 24 Tem 2026: retry TÜKENDİĞİNDE (newRetryCount>=maxRetries) `true` döner → çağıran
+  // (printer_service) bunu görüp "çıkmayan fiş" bildirimini + sunucu logunu tetikler.
+  // Katman ayrımı: local_db LogService'e bağlanmaz, sadece durumu raporlar.
+  Future<bool> markPrintFailed(int id, String? errorMessage) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
     // Önce mevcut retry_count'u al
     final job = await getPrintJob(id);
-    if (job == null) return;
+    if (job == null) return false;
 
     final newRetryCount = (job['retry_count'] as int) + 1;
     final maxRetries = job['max_retries'] as int;
+    final didExhaust = newRetryCount >= maxRetries;
 
     await db.update(
       'print_queue',
@@ -3668,13 +3757,14 @@ class LocalDbService {
         'retry_count': newRetryCount,
         'error_message': errorMessage,
         'last_attempt_at': now,
-        'status': newRetryCount >= maxRetries ? 'failed' : 'pending',
+        'status': didExhaust ? 'failed' : 'pending',
       },
       where: 'id = ?',
       whereArgs: [id],
     );
 
-    print('[LocalDb] Print job başarısız: $id (retry: $newRetryCount/$maxRetries)');
+    print('[LocalDb] Print job başarısız: $id (retry: $newRetryCount/$maxRetries)${didExhaust ? ' — RETRY TUKENDI' : ''}');
+    return didExhaust;
   }
 
   // Yazdırma işini sıfırla (manuel retry için)
@@ -3751,6 +3841,19 @@ class LocalDbService {
 
     if (count > 0) {
       print('[LocalDb] $count eski print job temizlendi');
+    }
+
+    // 24 Tem 2026 (Fable H3): failed row'lar HİÇ purge edilmiyordu → SQLite şişme.
+    // 48h'dan eski failed'ları sil (18h bildirim penceresinden UZUN → gece yarısı fişi
+    // kaybolmaz ama günlerce eski ölü kayıt birikmez).
+    final twoDaysAgo = DateTime.now().subtract(const Duration(hours: 48)).toIso8601String();
+    final failedCount = await db.delete(
+      'print_queue',
+      where: "status = 'failed' AND COALESCE(last_attempt_at, created_at) < ?",
+      whereArgs: [twoDaysAgo],
+    );
+    if (failedCount > 0) {
+      print('[LocalDb] $failedCount eski failed print job temizlendi (48h+)');
     }
   }
 

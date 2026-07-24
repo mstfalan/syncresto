@@ -1565,6 +1565,14 @@ class PrinterService {
   /// PrinterService, ApiService'i DOGRUDAN import etmez (webpos configure deseni).
   Future<bool> Function(int serverTicketId, int serverJobId)? onQueueKitchenPrinted;
 
+  /// 24 Tem 2026: retry TÜKENDİĞİNDE (5/5 denendi, kitchen fişi çıkmadı) tetiklenir.
+  /// main.dart kablolar: (a) sunucu logu (pos_logs — biz uzaktan görelim), (b) POS sağ-üst
+  /// "çıkmayan fiş" badge sayacını yenile. FAZ 3 UYUMU: bu sadece "dikkat, retry tükendi"
+  /// sinyali — Faz 3 havuzu başka kasadan kurtarırsa o kasa mark_job_printed raporlar,
+  /// bildirim bir sonraki badge-poll'da sunucudaki 'printed'i görüp kendini düşürür.
+  /// details: {table, printer_name, item_count, ticket_id, error}
+  void Function(Map<String, dynamic> info)? onQueueKitchenFailed;
+
   Future<bool> _isKitchenReportEnabled() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -1695,7 +1703,8 @@ class PrinterService {
 
       if (bytes.isEmpty) {
         print('[Printer] Fis olusturulamadi: $printType');
-        await _localDb.markPrintFailed(queueId, 'Fis olusturulamadi');
+        final exhausted = await _localDb.markPrintFailed(queueId, 'Fis olusturulamadi');
+        await _notifyIfKitchenExhausted(queueId, exhausted, printType, receiptData, 'Fis olusturulamadi');
         return false;
       }
 
@@ -1711,15 +1720,62 @@ class PrinterService {
         }
         return true;
       } else {
-        await _localDb.markPrintFailed(queueId, 'Yaziciya ulasilamadi');
+        final exhausted = await _localDb.markPrintFailed(queueId, 'Yaziciya ulasilamadi');
         print('[Printer] Print job basarisiz: $queueId');
+        await _notifyIfKitchenExhausted(queueId, exhausted, printType, receiptData, 'Yaziciya ulasilamadi');
         return false;
       }
     } catch (e) {
       print('[Printer] Retry hatasi: $e');
-      await _localDb.markPrintFailed(queueId, e.toString());
+      final exhausted = await _localDb.markPrintFailed(queueId, e.toString());
+      await _notifyIfKitchenExhausted(queueId, exhausted, printType, receiptData, e.toString());
       return false;
     }
+  }
+
+  /// 24 Tem 2026 (Fable H1/M4): aynı job için "retry tükendi" bildirimini/logunu gün içinde
+  /// SADECE 1 KEZ tetikle. Yoksa manuel retry tekrar tükenince pos_logs SPAM olur (log-diyeti
+  /// sonrası). In-memory Set — kasa restart'ında sıfırlanır (kabul edilebilir, restart nadir).
+  final Set<int> _kitchenExhaustNotified = <int>{};
+
+  /// retry TÜKENDİYSE (5/5) ve KITCHEN fişiyse "çıkmayan fiş" bildirimini tetikle (bir kez).
+  /// receipt_data'dan masa/ürün/ticket çöz, onQueueKitchenFailed callback'i çağır (main.dart:
+  /// sunucu log + panel hard-failed sinyali + badge yenile). Best-effort — akışı ETKİLEMEZ.
+  Future<void> _notifyIfKitchenExhausted(int queueId, bool exhausted, String printType,
+      Map<String, dynamic> receiptData, String error) async {
+    if (!exhausted || printType != 'kitchen' || onQueueKitchenFailed == null) return;
+    if (_kitchenExhaustNotified.contains(queueId)) return; // Fable H1: gün içi 1 kez
+    _kitchenExhaustNotified.add(queueId);
+    try {
+      String table = '-';
+      int itemCount = 0;
+      int? ticketId;
+      final ticket = receiptData['ticket'];
+      if (ticket is Map) {
+        table = (ticket['table_number'] ?? ticket['table_name'] ?? ticket['table_id'] ?? '-').toString();
+        final tid = ticket['id'] ?? ticket['ticket_id'];
+        ticketId = tid is int ? tid : int.tryParse('${tid ?? ''}');
+      }
+      final items = receiptData['items'];
+      if (items is List) itemCount = items.length;
+      onQueueKitchenFailed!({
+        'queue_id': queueId,
+        'table': table,
+        'item_count': itemCount,
+        'ticket_id': ticketId,
+        'server_job_id': receiptData['server_job_id'],
+        'server_ticket_id': receiptData['server_ticket_id'],
+        'printer_name': _printerNameFromReceipt(receiptData),
+        'error': error,
+      });
+    } catch (e) {
+      print('[Printer] onQueueKitchenFailed bildirim hatasi (yutuldu): $e');
+    }
+  }
+
+  String _printerNameFromReceipt(Map<String, dynamic> receiptData) {
+    final p = receiptData['printer_name'] ?? receiptData['printer'];
+    return (p ?? '-').toString();
   }
 
   /// Fiş verilerinden ESC/POS baytlarını yeniden oluştur

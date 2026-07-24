@@ -18,6 +18,10 @@ import 'printer_settings_screen.dart';
 import '../widgets/ticket_modal.dart';
 import '../widgets/add_item_modal.dart';
 import '../widgets/offline_data_modal.dart';
+import '../widgets/failed_print_badge.dart';
+import '../widgets/failed_print_modal.dart';
+import '../services/failed_prints_notifier.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'order_tracking_screen.dart';
 import '../services/version_service.dart';
 import '../widgets/update_modal.dart';
@@ -102,6 +106,9 @@ class _TablesScreenState extends State<TablesScreen> {
     _setupConnectivity();
     _startLicenseCheck();
     _startVersionCheck();
+    // 24 Tem 2026: çıkmayan-fiş OTOMATİK pop-up dinleyicisi. Retry 5/5 tükenip mutfak fişi
+    // çıkmayınca (main.dart notifier'ı tikler), toggle AÇIKSA bu kasada pop-up otomatik açılır.
+    failedKitchenPrintsChanged.addListener(_maybeAutoOpenFailedModal);
     // 21 Tem 2026: masa durumu PUSH dinleyicisi (fan-out — main.dart TEK-SLOT'unu EZMEZ).
     // Backend adisyon aç/kapa/taşı/böl/ürün-ekle sonrası 'table_status' yollar → o an yenile.
     widget.webSocketService.addCacheInvalidateListener(_onCachePush);
@@ -175,6 +182,7 @@ class _TablesScreenState extends State<TablesScreen> {
     _versionCheckTimer?.cancel();
     _connectivitySubscription?.cancel();
     _pushDebounce?.cancel(); // 21 Tem 2026: masa push debounce
+    failedKitchenPrintsChanged.removeListener(_maybeAutoOpenFailedModal); // 24 Tem: oto-pop dinleyici
     widget.webSocketService.removeCacheInvalidateListener(_onCachePush); // 21 Tem 2026: fan-out kaydı kaldır
     _syncService.removeSettingsListener(_onSettingsRefreshed); // 21 Tem 2026: poll settings listener kaldır
     super.dispose();
@@ -540,7 +548,22 @@ class _TablesScreenState extends State<TablesScreen> {
     } finally {
       _isFetchingPending = false; // 11 Haz 2026: guard mutlaka serbest (kalıcı kilit önle)
     }
+    // 24 Tem 2026: çıkmayan-fiş sayısı ARTTIYSA notifier'ı tikle → badge yenilenir + toggle
+    // açıksa otomatik pop-up (gerçek retry-tükendi anını main.dart zaten tikler; bu poll,
+    // uygulama açıkken oluşan/lokal DB'ye düşen yeni failed'ı da yakalar — çift-tik zararsız,
+    // guard'lar var). SADECE arttığında tik (azalma/aynıda spam yok).
+    try {
+      final failedNow = (await LocalDbService().getFailedKitchenPrints()).length;
+      if (failedNow > _lastFailedKitchenCount) {
+        _lastFailedKitchenCount = failedNow;
+        failedKitchenPrintsChanged.value = failedKitchenPrintsChanged.value + 1;
+      } else {
+        _lastFailedKitchenCount = failedNow;
+      }
+    } catch (_) {}
   }
+
+  int _lastFailedKitchenCount = 0; // 24 Tem: çıkmayan-fiş sayısı (sadece artışta notifier tik)
 
   void _openTableTracking() {
     Navigator.push(
@@ -1093,6 +1116,13 @@ class _TablesScreenState extends State<TablesScreen> {
             },
           ),
 
+          // 24 Tem 2026: Çıkmayan-fiş rozeti (retry 5/5 tükenmiş mutfak fişi). Yanıp söner,
+          // tıklayınca pop-up. Sayaç 0 → gizli. Yazıcı ikonundan ÖNCE.
+          FailedPrintBadge(
+            color: const Color(0xFFDC2626),
+            onTap: _openFailedPrintModal,
+          ),
+
           // Printer settings button
           IconButton(
             onPressed: _openPrinterSettings,
@@ -1112,6 +1142,33 @@ class _TablesScreenState extends State<TablesScreen> {
         ],
       ),
     );
+  }
+
+  // 24 Tem 2026: Çıkmayan-fiş pop-up'ı (badge tıklama VE otomatik). _failedModalOpen guard
+  // ile aynı anda 2 pop-up açılmaz.
+  bool _failedModalOpen = false;
+  Future<void> _openFailedPrintModal() async {
+    if (_failedModalOpen || !mounted) return;
+    _failedModalOpen = true;
+    try {
+      await FailedPrintModal.show(context,
+          printerService: widget.printerService, apiService: widget.apiService);
+    } finally {
+      _failedModalOpen = false;
+    }
+  }
+
+  // Notifier tetiklenince (yeni çıkmayan fiş): toggle AÇIKSA + modal kapalıysa otomatik aç.
+  // Toggle SharedPreferences'tan (default AÇIK). Toggle kapalıyken sadece badge görünür.
+  Future<void> _maybeAutoOpenFailedModal() async {
+    if (!mounted || _failedModalOpen) return;
+    final prefs = await SharedPreferences.getInstance();
+    final autoOpen = prefs.getBool(StorageService.failedPrintAutoPopupKey) ?? true;
+    if (!autoOpen || !mounted) return;
+    // Gerçekten gösterilecek fiş var mı (rolling 18h) — boşsa açma
+    final rows = await LocalDbService().getFailedKitchenPrints();
+    if (rows.isEmpty || !mounted || _failedModalOpen) return;
+    _openFailedPrintModal();
   }
 
   void _openPrinterSettings() {

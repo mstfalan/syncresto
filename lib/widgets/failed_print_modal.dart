@@ -93,9 +93,12 @@ class _FailedPrintModalState extends State<FailedPrintModal> {
     }
     final port = (row['printer_port'] as int?) ?? 9100;
 
-    // receipt_data'dan ticket + items çöz (tekrar basmak için gerekli)
+    // receipt_data'dan basma verisi çöz. İKİ format: 'kitchen' → {ticket, items} (garson direkt);
+    // 'kitchen_order' → {order, department} (online Web POS mutfak fişi). Doğru basma yolu seçilir.
     Map<String, dynamic>? ticket;
     List<dynamic> items = const [];
+    Map<String, dynamic>? order;
+    String orderDepartment = 'MUTFAK';
     final raw = row['receipt_data'];
     if (raw is String) {
       try {
@@ -105,10 +108,15 @@ class _FailedPrintModalState extends State<FailedPrintModal> {
           if (t is Map) ticket = Map<String, dynamic>.from(t);
           final its = decoded['items'];
           if (its is List) items = its;
+          final o = decoded['order'];
+          if (o is Map) order = Map<String, dynamic>.from(o);
+          final dep = decoded['department'];
+          if (dep is String && dep.isNotEmpty) orderDepartment = dep;
         }
       } catch (_) {}
     }
-    if (ticket == null || items.isEmpty) {
+    // Ne ticket-formatı ne order-formatı çözülebildiyse basılamaz
+    if ((ticket == null || items.isEmpty) && order == null) {
       setState(() => _rowError[id] = 'Fiş verisi okunamadı');
       return;
     }
@@ -120,8 +128,19 @@ class _FailedPrintModalState extends State<FailedPrintModal> {
 
     bool ok = false;
     try {
-      ok = await widget.printerService.printKitchenReceiptToIp(
-        ticket: ticket, items: items, ip: ip, port: port);
+      if (ticket != null && items.isNotEmpty) {
+        // 'kitchen' formatı — mutfak fişi doğrudan
+        ok = await widget.printerService.printKitchenReceiptToIp(
+          ticket: ticket, items: items, ip: ip, port: port);
+      } else if (order != null) {
+        // 'kitchen_order' formatı — online sipariş mutfak fişi, order-formatında bas.
+        // enqueueOnFail:false (Fable D) → tekrar fail olursa MÜKERRER kuyruk satırı EKLEMEZ
+        // (fiş zaten kuyrukta failed; başarısızsa mevcut satır kalır, çift bildirim olmaz).
+        ok = await widget.printerService.printOrderReceipt(
+          order, orderDepartment,
+          targetPrinter: {'ip': ip, 'port': port, 'name': row['printer_name']},
+          enqueueOnFail: false);
+      }
     } catch (e) {
       ok = false;
     }

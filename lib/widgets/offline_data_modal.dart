@@ -578,6 +578,7 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
         typeIcon = Icons.receipt;
         break;
       case 'kitchen':
+      case 'kitchen_order': // 24 Tem: online Web POS mutfak fişi
         typeLabel = 'Mutfak Fisi';
         typeIcon = Icons.restaurant;
         break;

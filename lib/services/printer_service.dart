@@ -370,8 +370,13 @@ class PrinterService {
   Future<bool> printOrderReceipt(
     Map<String, dynamic> order,
     String department,
-    {String? printerType, Map<String, dynamic>? targetPrinter}
+    {String? printerType, Map<String, dynamic>? targetPrinter, bool enqueueOnFail = true}
   ) async {
+    // 24 Tem 2026 (Fable D): enqueueOnFail=false → başarısızlıkta kuyruğa YENİ satır EKLEME.
+    // Çıkmayan-fiş pop-up'ının "Tekrar Yazdır"ı bunu kullanır: fiş zaten kuyrukta failed;
+    // tekrar fail olursa mükerrer satır + çift bildirim + kuyruk şişme OLMASIN (modal'ın
+    // kitchen yolunda printKitchenReceiptToIp bare-send kullanması gibi). Normal online
+    // yazdırma (onPrintRequest) enqueueOnFail=true (varsayılan) — otomatik retry için kuyruğa alır.
     String ip;
     int port;
     String type;
@@ -421,11 +426,11 @@ class PrinterService {
           'printer_name': printerName,
           'is_online_order': targetPrinter != null,
         });
-      } else {
-        // Başarısız - kuyruğa ekle
+      } else if (enqueueOnFail) {
+        // Başarısız - kuyruğa ekle (SADECE enqueueOnFail=true; pop-up retry'ta false → mükerrer önlenir)
         final printerName = targetPrinter?['name'] ?? PrinterService.getPrinterTypeName(type);
         await _localDb.addToPrintQueue(
-          printType: 'order',
+          printType: _orderQueueType(department),
           printerIp: ip,
           printerPort: port,
           printerName: printerName,
@@ -442,21 +447,23 @@ class PrinterService {
       return success;
     } catch (e) {
       print('[Printer] Order yazdirilirken hata: $e');
-      // Hata durumunda kuyruğa ekle
-      final printerName = targetPrinter?['name'] ?? PrinterService.getPrinterTypeName(type);
-      await _localDb.addToPrintQueue(
-        printType: 'order',
-        printerIp: ip,
-        printerPort: port,
-        printerName: printerName,
-        receiptData: {'order': order, 'department': department},
-      );
-      onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
-      _logService.warning(LogType.action, 'Siparis fisi kuyruga alindi (exception path)', details: {
-        'order_number': order['order_number'],
-        'department': department,
-        'error': e.toString(),
-      });
+      // Hata durumunda kuyruğa ekle (SADECE enqueueOnFail=true)
+      if (enqueueOnFail) {
+        final printerName = targetPrinter?['name'] ?? PrinterService.getPrinterTypeName(type);
+        await _localDb.addToPrintQueue(
+          printType: _orderQueueType(department),
+          printerIp: ip,
+          printerPort: port,
+          printerName: printerName,
+          receiptData: {'order': order, 'department': department},
+        );
+        onStatusChange?.call('Yazıcıya anlık ulaşılamadı ama kuyruğa ekledik, ulaşıldığı ilk anda tekrar göndereceğiz.', true);
+        _logService.warning(LogType.action, 'Siparis fisi kuyruga alindi (exception path)', details: {
+          'order_number': order['order_number'],
+          'department': department,
+          'error': e.toString(),
+        });
+      }
       return false;
     }
   }
@@ -470,6 +477,20 @@ class PrinterService {
       return 'bar';
     }
     return 'kitchen'; // Varsayılan mutfak
+  }
+
+  /// 24 Tem 2026: printOrderReceipt fail'inde kuyruk print_type'i.
+  /// MUTFAK/BAR fişi ise 'kitchen_order' (çıkmayan-fiş bildirimi görsün — getFailedKitchenPrints
+  /// hem 'kitchen' hem 'kitchen_order' okur; retry _regenerateReceipt order-formatını kullanır).
+  /// KASA/WEB-özet fişi ise 'order' (mutfak DEĞİL, bildirime girmemeli). Bug fix: eskiden hep
+  /// 'order' idi → online Web POS mutfak fişi fail olunca 'order' etiketiyle bildirime görünmez,
+  /// SESSİZ KAYIP (24 Tem Masa 36/28 IZGARA vakasi). department'a bakarak dogru etiket.
+  String _orderQueueType(String department) {
+    final dept = department.toLowerCase();
+    if (dept.contains('mutfak') || dept.contains('kitchen') || dept.contains('bar')) {
+      return 'kitchen_order';
+    }
+    return 'order'; // KASA, WEB SIPARIS ozet vb — mutfak degil
   }
 
   /// Test printer connection
@@ -1715,7 +1736,9 @@ class PrinterService {
         await _localDb.markPrintCompleted(queueId);
         print('[Printer] Print job basarili: $queueId');
         // Faz 2: fire-and-forget sunucu raporu — donus degerini ETKILEMEZ, basim tekrari YOK.
-        if (printType == 'kitchen') {
+        // 24 Tem: kitchen_order da dahil (tutarlılık; server_job_id yoksa _reportQueueJobPrinted
+        // zaten no-op — online orders claim/markItemsPrinted ile ayrı reconcile eder).
+        if (printType == 'kitchen' || printType == 'kitchen_order') {
           unawaited(_reportQueueJobPrinted(receiptData));
         }
         return true;
@@ -1743,20 +1766,27 @@ class PrinterService {
   /// sunucu log + panel hard-failed sinyali + badge yenile). Best-effort — akışı ETKİLEMEZ.
   Future<void> _notifyIfKitchenExhausted(int queueId, bool exhausted, String printType,
       Map<String, dynamic> receiptData, String error) async {
-    if (!exhausted || printType != 'kitchen' || onQueueKitchenFailed == null) return;
+    // 24 Tem: 'kitchen' (garson direkt) VEYA 'kitchen_order' (online Web POS mutfak fişi) ikisi de bildirir.
+    if (!exhausted || (printType != 'kitchen' && printType != 'kitchen_order') || onQueueKitchenFailed == null) return;
     if (_kitchenExhaustNotified.contains(queueId)) return; // Fable H1: gün içi 1 kez
     _kitchenExhaustNotified.add(queueId);
     try {
       String table = '-';
       int itemCount = 0;
       int? ticketId;
+      // 'kitchen' → receiptData.ticket + items; 'kitchen_order' → receiptData.order + items (order-formatı)
       final ticket = receiptData['ticket'];
+      final order = receiptData['order'];
       if (ticket is Map) {
         table = (ticket['table_number'] ?? ticket['table_name'] ?? ticket['table_id'] ?? '-').toString();
         final tid = ticket['id'] ?? ticket['ticket_id'];
         ticketId = tid is int ? tid : int.tryParse('${tid ?? ''}');
+      } else if (order is Map) {
+        table = (order['table_number'] ?? order['table_name'] ?? order['table_id'] ?? order['order_number'] ?? '-').toString();
+        final tid = order['ticket_id'] ?? order['id'];
+        ticketId = tid is int ? tid : int.tryParse('${tid ?? ''}');
       }
-      final items = receiptData['items'];
+      final items = (ticket is Map ? receiptData['items'] : (order is Map ? (order['items'] ?? receiptData['items']) : null));
       if (items is List) itemCount = items.length;
       onQueueKitchenFailed!({
         'queue_id': queueId,
@@ -1791,6 +1821,7 @@ class PrinterService {
         return await _generateKitchenReceipt(ticket, items);
 
       case 'order':
+      case 'kitchen_order': // 24 Tem: MUTFAK online fişi — order-formatında (aynı blob) üretilir
         final order = data['order'] as Map<String, dynamic>;
         final department = data['department'] as String? ?? 'WEB SIPARIS';
         // Settings zaten order['_settings'] içinde saklanıyor

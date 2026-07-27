@@ -3609,7 +3609,7 @@ class LocalDbService {
     final rows = await db.query(
       'print_queue',
       columns: ['receipt_data'],
-      where: "print_type = 'kitchen' AND status IN ('pending', 'failed')",
+      where: "print_type IN ('kitchen','kitchen_order') AND status IN ('pending', 'failed')",
     );
     final result = <int>{};
     for (final r in rows) {
@@ -3644,7 +3644,7 @@ class LocalDbService {
       'print_queue',
       columns: ['id', 'printer_name', 'printer_ip', 'printer_port', 'error_message',
                 'created_at', 'last_attempt_at', 'receipt_data'],
-      where: "print_type = 'kitchen' AND status = 'failed'",
+      where: "print_type IN ('kitchen','kitchen_order') AND status = 'failed'",
       orderBy: 'last_attempt_at DESC',
     );
     final cutoff = DateTime.now().subtract(const Duration(hours: 18));
@@ -3664,11 +3664,15 @@ class LocalDbService {
           if (decoded is Map) {
             serverJobId = decoded['server_job_id'];
             serverTicketId = decoded['server_ticket_id'];
+            // 'kitchen' → receipt.ticket + items; 'kitchen_order' → receipt.order + items (order-formatı)
             final ticket = decoded['ticket'];
-            if (ticket is Map) {
-              tableLabel = (ticket['table_number'] ?? ticket['table_name'] ?? ticket['table_id'] ?? '-').toString();
+            final order = decoded['order'];
+            final src = (ticket is Map) ? ticket : (order is Map ? order : null);
+            if (src != null) {
+              tableLabel = (src['table_number'] ?? src['table_name'] ?? src['table_id'] ?? src['order_number'] ?? '-').toString();
             }
-            final its = decoded['items'];
+            // items: ticket-formatında kökte, order-formatında order.items ya da kökte
+            final its = decoded['items'] ?? (order is Map ? order['items'] : null);
             if (its is List) {
               for (final it in its) {
                 if (it is Map) {
@@ -3807,15 +3811,18 @@ class LocalDbService {
     final db = await database;
     final rows = await db.query('print_queue',
         columns: ['id', 'receipt_data'],
-        where: "print_type = 'kitchen' AND status IN ('pending', 'failed')");
+        where: "print_type IN ('kitchen','kitchen_order') AND status IN ('pending', 'failed')");
     final idsToDelete = <int>[];
     for (final r in rows) {
       final raw = r['receipt_data'];
       if (raw is! String) continue;
       try {
         final decoded = jsonDecode(raw);
+        // 'kitchen' → ticket.table_id; 'kitchen_order' → order.table_id (order-formatı)
         final ticket = decoded is Map ? decoded['ticket'] : null;
-        final tid = ticket is Map ? ticket['table_id'] : null;
+        final order = decoded is Map ? decoded['order'] : null;
+        final src = (ticket is Map) ? ticket : (order is Map ? order : null);
+        final tid = src != null ? src['table_id'] : null;
         final parsed = tid is int ? tid : int.tryParse('${tid ?? ''}');
         if (parsed == tableId) idsToDelete.add(r['id'] as int);
       } catch (_) {}

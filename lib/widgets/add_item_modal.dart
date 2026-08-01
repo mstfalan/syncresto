@@ -1432,8 +1432,7 @@ class _AddItemModalState extends State<AddItemModal> {
     // secilen adede ORANLANIR (panel-direct/comboCalculator kismiSet). Kapaliyken eski
     // davranis: tam sayi secilmeden buton pasif. ⚠️ SADECE POS — web/telefon okumaz.
     // 31 Tem 2026: cevrimdisi cache 0/1 doner (bkz. combo_calculator._truthy).
-    final _u = product['combo_pos_unlimited'];
-    final bool posUnlimited = _u == true || _u == 1 || _u == '1' || _u == 'true';
+    final bool posUnlimited = ComboCalculator.posLimitsiz(product); // TEK KAYNAK
     final basePrice = _restaurantBasePrice(product);
     final variants = (product['variants'] is List) ? product['variants'] as List : const [];
 
@@ -2440,6 +2439,78 @@ class _AddItemModalState extends State<AddItemModal> {
       return;
     }
 
+    // =========================================================================
+    // 1 Agu 2026 — COMBO PAKETI PARCALI IPTAL EDILEMEZ (Fable denetimi, bulgu ①)
+    // Combo paketinin fiyati uyelere BOLUNEREK yazilir (splitComboPackagePrice).
+    // Tek uye iptal edilirse kalan uyeler bolunmus fiyatta kalir -> paket bedeli
+    // orantisiz duser. Ozellikle `extra` modda artik hediye de FIZIKSEL satir ve
+    // mutfaga gidiyor: mutfak 3 urunu yaptiktan sonra bir satir iptal edilirse
+    // musteri 3 urun alip 2 urun parasi oder (ciro kaybi).
+    // KURAL: paketin bir uyesi iptal edilecekse PAKETIN TAMAMI iptal edilir.
+    // ⚠️ YETKI KONTROLLERI YUKARIDA, DEGISMEDI. Grup yoksa akis BIREBIR eskisi gibi.
+    // =========================================================================
+    final gid = (item['combo_group_id'] ?? '').toString().trim();
+    var iptalKalemleri = <Map<String, dynamic>>[item];
+    if (gid.isNotEmpty) {
+      iptalKalemleri = _ticketItems
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .where((e) =>
+              (e['combo_group_id'] ?? '').toString().trim() == gid &&
+              (e['status'] ?? 'active').toString() != 'cancelled')
+          .toList();
+      if (iptalKalemleri.isEmpty) iptalKalemleri = [item];
+      if (iptalKalemleri.length > 1) {
+        final paketAdi = (item['combo_group_name'] ?? item['product_name'] ?? 'Combo')
+            .toString();
+        final onay = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            title: Row(children: [
+              Icon(Icons.card_giftcard_rounded, color: Colors.orange[800]),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('Combo Paketi', style: TextStyle(fontSize: 17))),
+            ]),
+            content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('"$paketAdi" combo paketinin parçası (${iptalKalemleri.length} ürün).',
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              const Text(
+                'Paketin fiyatı ürünlere bölünerek yazıldığı için tek ürün iptal edilemez — '
+                'kalan ürünler eksik fiyatta kalır. Devam ederseniz PAKETİN TAMAMI iptal edilir.',
+                style: TextStyle(fontSize: 13, height: 1.35),
+              ),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(9),
+                decoration: BoxDecoration(
+                    color: Colors.orange[50], borderRadius: BorderRadius.circular(8)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  for (final k in iptalKalemleri)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 1),
+                      child: Text('• ${(k['product_name'] ?? '').toString()}',
+                          style: const TextStyle(fontSize: 12.5)),
+                    ),
+                ]),
+              ),
+            ]),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgeç')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red[700]),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Paketin tamamını iptal et',
+                    style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          ),
+        );
+        if (onay != true) return;
+      }
+    }
+
     // 1 Haz 2026 (v1.5.6): Mutfağa GİTMEMİŞ ürün iptalinde uyarı YOK.
     //  - printed=0 → direkt sil, reason='Mutfağa gönderilmedi' otomatik
     //  - printed=1 → mevcut sebep seçme dialog'u (panel_pos_cancel_reasons)
@@ -2549,50 +2620,84 @@ class _AddItemModalState extends State<AddItemModal> {
 
     if (selectedReason == null) return;
 
-    try {
-      // 16 May 2026: Backend cancel_print payload'u döner (printed=1 + printer_ip varsa)
-      // Mevcut mutfak fiş akışı bozulmadı, sadece response'a ek field eklendi.
-      final cancelResponse = await widget.apiService.deleteTicketItem(
-        ticketId: widget.ticketId,
-        itemId: itemId,
-        cancelReason: selectedReason,
-        waiterId: widget.waiterId,
-      );
-
-      // Backend "cancel_print" payload döndüyse → mutfağa iptal fişi bas
-      final cancelPrint = (cancelResponse is Map) ? cancelResponse['cancel_print'] : null;
-      bool printedSuccess = false;
-      if (cancelPrint != null && widget.printerService != null) {
-        try {
-          final now = DateTime.now();
-          final timeStr = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-          printedSuccess = await widget.printerService!.printCancelItem(
-            productName: (cancelPrint['product_name'] ?? '').toString(),
-            quantity: _safeInt(cancelPrint['quantity']) ?? 1,
-            notes: (cancelPrint['notes'] ?? '').toString(),
-            tableName: (cancelPrint['table_name'] ?? '').toString(),
-            waiterName: (cancelPrint['waiter_name'] ?? widget.waiter?['name'] ?? 'Garson').toString(),
-            reason: selectedReason,
-            timeStr: timeStr,
-            printerIp: cancelPrint['printer_ip']?.toString(),
-            printerPort: _safeInt(cancelPrint['printer_port']),
-          );
-        } catch (e) {
-          print('[Cancel] İptal fişi yazılamadı: $e');
-        }
-      }
-
-      setState(() => _selectedItemId = null);
-      await _loadTicketItems();
-      widget.onItemAdded();
-      _showSuccess(printedSuccess
-          ? 'Ürün iptal edildi + mutfağa iptal fişi gönderildi: $selectedReason'
-          : (cancelPrint != null
-              ? 'Ürün iptal edildi (iptal fişi yazıcıya ulaşamadı): $selectedReason'
-              : 'Ürün iptal edildi: $selectedReason'));
-    } catch (e) {
-      _showError('Ürün iptal edilemedi: $e');
+    // 1 Agu 2026: combo paketinde BIRDEN COK kalem iptal edilir; tek kalemde liste
+    // 1 elemanlidir ve akis BIREBIR eskisi gibi calisir (0 regresyon).
+    final idler = <int>[];
+    for (final k in iptalKalemleri) {
+      final kid = _safeInt(k['id']);
+      if (kid != null && !idler.contains(kid)) idler.add(kid);
     }
+    if (idler.isEmpty) idler.add(itemId);
+
+    var basarili = 0;
+    var fisBasildi = 0;
+    var fisGerekti = 0;
+    Object? ilkHata;
+
+    for (final kid in idler) {
+      try {
+        // 16 May 2026: Backend cancel_print payload'u döner (printed=1 + printer_ip varsa)
+        // Mevcut mutfak fiş akışı bozulmadı, sadece response'a ek field eklendi.
+        final cancelResponse = await widget.apiService.deleteTicketItem(
+          ticketId: widget.ticketId,
+          itemId: kid,
+          cancelReason: selectedReason,
+          waiterId: widget.waiterId,
+        );
+        basarili++;
+
+        // Backend "cancel_print" payload döndüyse → mutfağa iptal fişi bas
+        final cancelPrint = (cancelResponse is Map) ? cancelResponse['cancel_print'] : null;
+        if (cancelPrint != null) {
+          fisGerekti++;
+          if (widget.printerService != null) {
+            try {
+              final now = DateTime.now();
+              final timeStr = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+              final ok = await widget.printerService!.printCancelItem(
+                productName: (cancelPrint['product_name'] ?? '').toString(),
+                quantity: _safeInt(cancelPrint['quantity']) ?? 1,
+                notes: (cancelPrint['notes'] ?? '').toString(),
+                tableName: (cancelPrint['table_name'] ?? '').toString(),
+                waiterName: (cancelPrint['waiter_name'] ?? widget.waiter?['name'] ?? 'Garson').toString(),
+                reason: selectedReason,
+                timeStr: timeStr,
+                printerIp: cancelPrint['printer_ip']?.toString(),
+                printerPort: _safeInt(cancelPrint['printer_port']),
+              );
+              if (ok) fisBasildi++;
+            } catch (e) {
+              print('[Cancel] İptal fişi yazılamadı: $e');
+            }
+          }
+        }
+      } catch (e) {
+        ilkHata ??= e;
+        // Paketin kalan kalemlerini denemeye DEVAM et — yarim iptal birakma.
+      }
+    }
+
+    setState(() => _selectedItemId = null);
+    await _loadTicketItems();
+    widget.onItemAdded();
+
+    if (basarili == 0) {
+      _showError('Ürün iptal edilemedi: ${ilkHata ?? 'bilinmeyen hata'}');
+      return;
+    }
+    if (ilkHata != null) {
+      // Paketin bir kismi iptal EDILEMEDI — kasiyer MUTLAKA gormeli (tutar yanlis kalir).
+      _showError('DİKKAT: paketin $basarili/${idler.length} ürünü iptal edildi, '
+          'kalanı iptal EDİLEMEDİ. Adisyonu kontrol edin. Hata: $ilkHata');
+      return;
+    }
+    final coklu = idler.length > 1;
+    final onEk = coklu ? 'Combo paketi (${idler.length} ürün) iptal edildi' : 'Ürün iptal edildi';
+    _showSuccess(fisGerekti == 0
+        ? '$onEk: $selectedReason'
+        : (fisBasildi == fisGerekti
+            ? '$onEk + mutfağa iptal fişi gönderildi: $selectedReason'
+            : '$onEk (iptal fişi yazıcıya ulaşamadı: $fisBasildi/$fisGerekti): $selectedReason'));
   }
 
   /// Mutfağa gönder — 12 May 2026: v1.2.0 atomik akisa GERI SARILDI.

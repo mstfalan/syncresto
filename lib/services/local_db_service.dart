@@ -50,7 +50,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 15, // v15 (21 Tem 2026): cached_products.hide_from_tracking — Masa Takipte gizle (offline)
+      version: 19, // v19 (1 Agu 2026): cached_products.ingredients — urun icerikleri (cikar/ekle) cevrimdisi
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -165,6 +165,11 @@ class LocalDbService {
         combo_discount_percent REAL,
         combo_discount_amount REAL,
         combo_repeat INTEGER DEFAULT 1,
+        combo_pos_selection_required INTEGER DEFAULT 1,
+        combo_pos_unlimited INTEGER DEFAULT 0,
+        variants_allow_multiple_pos INTEGER DEFAULT 0,
+        variants_required_pos INTEGER DEFAULT 0,
+        ingredients TEXT,
         hide_from_tracking INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
@@ -294,6 +299,9 @@ class LocalDbService {
         payment_status TEXT,
         payment_method TEXT,
         skip_pos_print INTEGER DEFAULT 0,
+        combo_group_id TEXT,
+        combo_group_name TEXT,
+        combo_pick_name TEXT,
         FOREIGN KEY (local_ticket_id) REFERENCES local_tickets(local_id)
       )
     ''');
@@ -583,6 +591,69 @@ class LocalDbService {
       }
     }
 
+    // v16 (31 Tem 2026): combo paket kimligi — ayni combo seciminden gelen kalemler ayni
+    // combo_group_id'yi tasir; fis/mutfak/adisyon ANA URUN altinda gruplar. Backend
+    // panel_pos_ticket_items ile AYNI isimler. NULL = combo disi kalem (mevcut davranis). Additive.
+    if (oldVersion < 16) {
+      for (final k in ['combo_group_id', 'combo_group_name', 'combo_pick_name']) {
+        try {
+          await db.execute('ALTER TABLE local_ticket_items ADD COLUMN $k TEXT');
+          print('[LocalDb] v16 $k kolonu eklendi');
+        } catch (e) {
+          print('[LocalDb] v16 $k zaten var: $e');
+        }
+      }
+    }
+
+    // v17 (31 Tem 2026): combo POS ayarlari CEVRIMDISI da gecerli olsun. Bu iki alan
+    // cache'lenmedigi surece internet gidince ayar YOK sayiliyordu (eski davranisa dusuyordu):
+    // "limitsiz secim" kapali gibi, "zorunlu secim" acik gibi. Varsayilanlar ESKI DAVRANIS
+    // (secim zorunlu=1, limitsiz=0) — backend dondurmezse hicbir sey degismez. Additive.
+    if (oldVersion < 17) {
+      for (final col in [
+        'ALTER TABLE cached_products ADD COLUMN combo_pos_selection_required INTEGER DEFAULT 1',
+        'ALTER TABLE cached_products ADD COLUMN combo_pos_unlimited INTEGER DEFAULT 0',
+      ]) {
+        try {
+          await db.execute(col);
+          print('[LocalDb] v17 kolon eklendi: $col');
+        } catch (e) {
+          print('[LocalDb] v17 kolon zaten var: $e');
+        }
+      }
+    }
+
+    // v18 (31 Tem 2026): POS varyant coklu secim ayarlari CEVRIMDISI da gecerli olsun.
+    // Varsayilanlar ESKI DAVRANIS (coklu kapali=0, zorunlu kapali=0) — backend dondurmezse
+    // hicbir sey degismez, tekli varyant akisi aynen calisir. Additive.
+    if (oldVersion < 18) {
+      for (final col in [
+        'ALTER TABLE cached_products ADD COLUMN variants_allow_multiple_pos INTEGER DEFAULT 0',
+        'ALTER TABLE cached_products ADD COLUMN variants_required_pos INTEGER DEFAULT 0',
+      ]) {
+        try {
+          await db.execute(col);
+          print('[LocalDb] v18 kolon eklendi: $col');
+        } catch (e) {
+          print('[LocalDb] v18 kolon zaten var: $e');
+        }
+      }
+    }
+
+    // v19 (1 Agu 2026): URUN ICERIKLERI cevrimdisi (Mustafa: "webde gosteriyoruz ama POS'ta
+    // gostermiyoruz"). JSON metin olarak saklanir (variants/extras ile ayni desen).
+    // Kolon bos/NULL ise Flutter icerik bolumunu HIC cizmez -> eski gorunum BIREBIR ayni.
+    // ⚠️ Varyant SECIM GRUPLARI icin goc GEREKMEZ: variants zaten JSON saklaniyor,
+    //    group_name/group_required/group_multi otomatik tasinir.
+    if (oldVersion < 19) {
+      try {
+        await db.execute('ALTER TABLE cached_products ADD COLUMN ingredients TEXT');
+        print('[LocalDb] v19 ingredients kolonu eklendi');
+      } catch (e) {
+        print('[LocalDb] v19 ingredients zaten var: $e');
+      }
+    }
+
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
     // local_tickets: garson/salon adi. local_ticket_items: ekleyen/teslim eden garson, porsiyon,
     // odeme durumu, mutfak-gizle. Hepsi nullable/DEFAULT'lu additive -> sync_queue/FIFO etkilenmez.
@@ -746,6 +817,10 @@ class LocalDbService {
           'extras': prod['extras'] is String ? prod['extras'] : (prod['extras'] != null ? jsonEncode(prod['extras']) : null),
           'show_variants_pos': prod['show_variants_pos'] ?? 0,
           'variants': prod['variants'] is String ? prod['variants'] : (prod['variants'] != null ? jsonEncode(prod['variants']) : null),
+          // v19: icerikler (variants ile ayni desen — JSON metin)
+          'ingredients': prod['ingredients'] is String
+              ? prod['ingredients']
+              : (prod['ingredients'] != null ? jsonEncode(prod['ingredients']) : null),
           'printer_id': prod['printer_id'], // v8: offline mutfak fisi icin
           // v12 COMBO: backend combo_* dondurunce offline hesap icin sakla. Bool->0/1, sayilar oldugu gibi.
           // Backend dondurmese hepsi NULL -> combo_enabled 0 -> combo KAPALI (guvenli).
@@ -756,6 +831,17 @@ class LocalDbService {
           'combo_discount_percent': prod['combo_discount_percent'],
           'combo_discount_amount': prod['combo_discount_amount'],
           'combo_repeat': (prod['combo_repeat'] == false || prod['combo_repeat'] == 0) ? 0 : 1,
+          // v17: combo POS ayarlari. Backend alani hic gondermezse (eski surum) ESKI DAVRANIS
+          // korunur: secim zorunlu (1), limitsiz kapali (0).
+          'combo_pos_selection_required':
+              (prod['combo_pos_selection_required'] == false || prod['combo_pos_selection_required'] == 0) ? 0 : 1,
+          'combo_pos_unlimited':
+              (prod['combo_pos_unlimited'] == true || prod['combo_pos_unlimited'] == 1) ? 1 : 0,
+          // v18: POS varyant coklu secim. Backend gondermezse ESKI DAVRANIS (0/0).
+          'variants_allow_multiple_pos':
+              (prod['variants_allow_multiple_pos'] == true || prod['variants_allow_multiple_pos'] == 1) ? 1 : 0,
+          'variants_required_pos':
+              (prod['variants_required_pos'] == true || prod['variants_required_pos'] == 1) ? 1 : 0,
           // 21 Tem 2026: Masa Takipte gizle (offline). Backend dondurmese 0 -> gorunur (guvenli).
           'hide_from_tracking': (prod['hide_from_tracking'] == true || prod['hide_from_tracking'] == 1) ? 1 : 0,
           'cached_at': now,
@@ -775,6 +861,8 @@ class LocalDbService {
       final m = Map<String, dynamic>.from(row);
       m['variants'] = _decodeJsonList(m['variants']);
       m['extras'] = _decodeJsonList(m['extras']);
+      // v19: icerikler de List olarak tuketiliyor (bozuk/eksik kayitta bos liste)
+      m['ingredients'] = _decodeJsonList(m['ingredients']);
       return m;
     }).toList();
   }
@@ -1381,6 +1469,10 @@ class LocalDbService {
     String? notes,
     int waiterId = 1,
     String? portion,
+    String? comboGroupId,
+    String? comboGroupName,
+    String? comboPickName,
+    String? extras,
   }) async {
     final localId = await addTicketItem(
       localTicketId: localTicketId,
@@ -1391,6 +1483,10 @@ class LocalDbService {
       notes: notes,
       waiterId: waiterId, // v11: ekleyen garson (rapor için) — önceden iletilmiyordu
       portion: portion,
+      comboGroupId: comboGroupId,
+      comboGroupName: comboGroupName,
+      comboPickName: comboPickName,
+      extras: extras,
     );
     return {'id': localId, 'success': true};
   }
@@ -1406,6 +1502,9 @@ class LocalDbService {
     String? extras,
     int? waiterId,
     String? portion,
+    String? comboGroupId,
+    String? comboGroupName,
+    String? comboPickName,
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
@@ -1423,6 +1522,9 @@ class LocalDbService {
       'synced': 0,
       'added_by': waiterId, // v11: ekleyen garson (garson performans raporu)
       'portion': portion,
+      'combo_group_id': comboGroupId,
+      'combo_group_name': comboGroupName,
+      'combo_pick_name': comboPickName,
     });
 
     // Ticket'ın sync_id'sini al (bağımlılık için)
@@ -1446,6 +1548,12 @@ class LocalDbService {
         'notes': notes,
         if (waiterId != null) 'waiter_id': waiterId, // v11: backend key adı waiter_id
         if (portion != null) 'portion': portion,
+        if (comboGroupId != null) 'combo_group_id': comboGroupId,
+        if (comboGroupName != null) 'combo_group_name': comboGroupName,
+        if (comboPickName != null) 'combo_pick_name': comboPickName,
+        // 31 Tem 2026: coklu varyant secimleri cevrimdisi eklemede de korunsun; internet
+        // gelince sync ayni yapiyi backend'e gonderir (yoksa alt satirlar kaybolurdu).
+        if (extras != null && extras.isNotEmpty) 'extras': extras,
       },
       description: 'Masa $tableNumber: $productName x$quantity eklendi',
       dependsOnSyncId: dependsOn,
@@ -2684,6 +2792,24 @@ class LocalDbService {
   /// Sync kaydını sil. 🔴 Fable Fix 4: pending-sil butonu artık bağımlı işlemleri de ele almalı —
   /// aksi halde silinen create'e bağımlı add_item/close YETİM kalır (satış verisi sessiz kaybolur).
   /// cascade=true ise bağımlıları da siler; false ise bağımlıları 'failed' işaretler (kullanıcı görsün).
+  /// 31 Tem 2026 — ONLINE ISLEM ZATEN BASARILI OLDU, kuyruktaki ESI GEREKSIZ.
+  /// closeLocalTicket/voidLocalTicket lokal cache'i guncellerken KOSULSUZ sync kaydi birakir.
+  /// Online yol basardiginda bu kayit ikinci bir POST'a yol acar; adisyon o an silinmis/
+  /// yetim ise 404 -> 3 retry -> dead_letter -> kasada kalici kirmizi uyari.
+  /// Burada SADECE o adisyonun BEKLEYEN (pending/in_progress) kaydi 'completed' yapilir.
+  /// SILMEZ (iz kalsin), failed/dead_letter'a DOKUNMAZ (gercek hatalar gorunur kalsin).
+  Future<int> completeRedundantSync(String action, int localTicketId) async {
+    final db = await database;
+    final n = await db.update(
+      'sync_queue',
+      {'status': 'completed', 'processed_at': DateTime.now().toIso8601String()},
+      where: "action = ? AND entity_type = 'ticket' AND local_id = ? AND status IN ('pending','in_progress')",
+      whereArgs: [action, localTicketId],
+    );
+    if (n > 0) print('[LocalDb] Gereksiz $action kaydi tamamlandi (online zaten basardi): $n adet');
+    return n;
+  }
+
   Future<void> deleteSyncItem(int syncId, {bool cascade = true}) async {
     final db = await database;
     // Bu kayda bağımlı olan tüm alt işlemleri bul (zincir — recursive değil ama tek seviye yeterli

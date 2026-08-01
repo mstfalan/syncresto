@@ -112,6 +112,9 @@ class _TablesScreenState extends State<TablesScreen> {
     // 21 Tem 2026: masa durumu PUSH dinleyicisi (fan-out — main.dart TEK-SLOT'unu EZMEZ).
     // Backend adisyon aç/kapa/taşı/böl/ürün-ekle sonrası 'table_status' yollar → o an yenile.
     widget.webSocketService.addCacheInvalidateListener(_onCachePush);
+    // 31 Tem 2026: ham payload (degisen masa satirlari) icin AYRI dinleyici.
+    // _onCachePushRaw ONCE calisir (kayit sirasi), payload'i saklar; _onCachePush tuketir.
+    widget.webSocketService.addCacheInvalidateRawListener(_onCachePushRaw);
     // 21 Tem 2026: poll süresini backend'den al (offline-safe cache) + canlı değişimi dinle.
     _loadPollSettings();
     _syncService.addSettingsListener(_onSettingsRefreshed);
@@ -184,6 +187,7 @@ class _TablesScreenState extends State<TablesScreen> {
     _pushDebounce?.cancel(); // 21 Tem 2026: masa push debounce
     failedKitchenPrintsChanged.removeListener(_maybeAutoOpenFailedModal); // 24 Tem: oto-pop dinleyici
     widget.webSocketService.removeCacheInvalidateListener(_onCachePush); // 21 Tem 2026: fan-out kaydı kaldır
+    widget.webSocketService.removeCacheInvalidateRawListener(_onCachePushRaw); // 31 Tem 2026
     _syncService.removeSettingsListener(_onSettingsRefreshed); // 21 Tem 2026: poll settings listener kaldır
     super.dispose();
   }
@@ -197,6 +201,11 @@ class _TablesScreenState extends State<TablesScreen> {
   static const int _kDefaultBadgePollSec = 15;
   int _tablePollSec = _kDefaultTablePollSec;
   int _badgePollSec = _kDefaultBadgePollSec;
+  // 31 Tem 2026 — kismi guncelleme (push payload'indaki masa satirlari) ve debounce.
+  // Varsayilan ACIK; backend push_partial_enabled=0 gonderirse uzaktan kapanir.
+  static const int _kDefaultPushDebounceMs = 400;   // eski sabit deger
+  bool _pushPartialEnabled = true;
+  int _pushDebounceMs = _kDefaultPushDebounceMs;
 
   void _startAutoRefresh() {
     // Masa gridi + badge poll. Süreler backend'den (yoksa 6/15sn fallback). Masa değişiklikleri
@@ -241,10 +250,21 @@ class _TablesScreenState extends State<TablesScreen> {
   void _applyPollSettings(Map<String, dynamic> s) {
     final t = _parsePollSec(s['table_poll_sec'], _kDefaultTablePollSec, 3, 60);
     final b = _parsePollSec(s['badge_poll_sec'], _kDefaultBadgePollSec, 5, 300);
+
+    // 31 Tem 2026 — KISMI GUNCELLEME KILL-SWITCH + AYARLANABILIR DEBOUNCE.
+    // push_partial_enabled=0 → payload'daki masa satirlari YOK SAYILIR, eski tam-fetch
+    // davranisina UZAKTAN donulur (POS surumu dagitmadan, panel_settings ile).
+    // Bu, poll-sec ayarinin kanitlanmis desenidir; sorun cikarsa saniyeler icinde kapatilir.
+    final pe = s['push_partial_enabled'];
+    _pushPartialEnabled = !(pe == false || pe == 0 || pe == '0' || pe == 'false');
+    final dRaw = int.tryParse(s['push_debounce_ms']?.toString() ?? '');
+    _pushDebounceMs = (dRaw == null || dRaw <= 0) ? _kDefaultPushDebounceMs : dRaw.clamp(200, 5000);
+
     if (t == _tablePollSec && b == _badgePollSec) return; // değişmedi → timer'a dokunma
     _tablePollSec = t;
     _badgePollSec = b;
-    print('[Tables] Poll süreleri backend\'den: grid=${t}sn badge=${b}sn');
+    print('[Tables] Poll süreleri backend\'den: grid=${t}sn badge=${b}sn '
+        'kismi=${_pushPartialEnabled ? "acik" : "KAPALI"} debounce=${_pushDebounceMs}ms');
     if (mounted) _restartPollTimers();
   }
 
@@ -254,11 +274,58 @@ class _TablesScreenState extends State<TablesScreen> {
   // poll ile üst üste binmez. Offline'da soket kopuk → event gelmez; poll emniyet ağı devrede.
   // 'table_status' DIŞI tipler (products/printers...) main.dart global handler'ında işlenir.
   Timer? _pushDebounce;
+
+  // 31 Tem 2026 — HAM PAYLOAD YOLU (kismi guncelleme).
+  // Backend artik push'a degisen masalarin GUNCEL SATIRLARINI koyuyor (internal-print-emit.js).
+  // Satirlar gelirse tam listeyi CEKMEDEN gridi guncelliyoruz: 31 Tem olcumunde yogun saatte
+  // /tables + /sections isteklerinin buyuk kismi (~7.8k/saat) bu yuzden dogmustu.
+  // Payload'da satir YOKSA (4002 kaynakli emit, eski backend, SQL hatasi) → eski tam-fetch yolu.
+  Map<String, dynamic>? _sonPayload;
+  void _onCachePushRaw(List<String> types, Map<String, dynamic> raw) {
+    if (!types.contains('table_status')) return;
+    _sonPayload = raw;          // _onCachePush hemen ardindan cagrilir, orada tuketilir
+  }
+
+  /// Payload'daki satirlari mevcut _tables listesine id ile uygular.
+  /// true donerse tam fetch'e GEREK YOK.
+  bool _kismiUygula(Map<String, dynamic>? raw) {
+    if (!_pushPartialEnabled || raw == null) return false;
+    final list = raw['tables'];
+    if (list is! List || list.isEmpty) return false;
+    // Fetch suruyorsa merge etme — bayat tam-fetch taze merge'i ezebilir.
+    if (_isFetchingData) return false;
+    try {
+      final gelen = <int, Map<String, dynamic>>{};
+      for (final e in list) {
+        if (e is Map) {
+          final id = _safeInt(e['id']);
+          if (id != null) gelen[id] = Map<String, dynamic>.from(e);
+        }
+      }
+      if (gelen.isEmpty) return false;
+      // Bilinmeyen masa id'si (yeni masa eklenmis) → tam fetch gerekir.
+      final mevcutIdler = _tables.map((t) => _safeInt(t['id'])).whereType<int>().toSet();
+      if (!gelen.keys.every(mevcutIdler.contains)) return false;
+
+      setState(() {
+        for (var i = 0; i < _tables.length; i++) {
+          final id = _safeInt(_tables[i]['id']);
+          if (id != null && gelen.containsKey(id)) _tables[i] = gelen[id]!;
+        }
+      });
+      print('[Tables] Kismi guncelleme: ${gelen.length} masa (istek ATILMADI)');
+      return true;
+    } catch (e) {
+      print('[Tables] Kismi guncelleme hatasi, tam fetch\'e dusuluyor: $e');
+      return false;
+    }
+  }
+
   void _onCachePush(List<String> types) {
     if (!types.contains('table_status')) return;
     if (!mounted) return;
     _pushDebounce?.cancel();
-    _pushDebounce = Timer(const Duration(milliseconds: 400), () async {
+    _pushDebounce = Timer(Duration(milliseconds: _pushDebounceMs), () async {
       if (!mounted) return;
       // 21 Tem 2026 SELF-ECHO GUARD + ardışık refresh (DONMA FIX):
       // Kullanıcının kendi aksiyonu (masa kapat/ürün ekle) zaten close/ekleme sonrası _loadData
@@ -271,12 +338,27 @@ class _TablesScreenState extends State<TablesScreen> {
       // Sadece kendi aksiyonunun echo'sunu ele; yabancı olay 500ms'i aşarsa _loadData çalışır.
       final last = _lastLoadStartedAt;
       final freshLoad = last != null && DateTime.now().difference(last).inMilliseconds < 500;
-      if (!freshLoad) {
+
+      // 31 Tem 2026 — ONCE KISMI GUNCELLEME DENE (istek atmadan).
+      // Payload'da degisen masalarin satirlari varsa gridi yerinde guncelle; tam fetch YOK.
+      // Basarisizsa (kismi kapali / satir yok / bilinmeyen masa / fetch suruyor) eski yola dus.
+      final payload = _sonPayload;
+      _sonPayload = null;
+      final kismiOldu = _kismiUygula(payload);
+
+      if (!freshLoad && !kismiOldu) {
         await _loadData(silent: true);
       }
       if (mounted) {
-        // Badge push'suz yolu olmadığı için HER ZAMAN yenilenir (ürün ekle/close/FİŞ ÇIKMADI anlık).
-        await _refreshPendingCount();
+        // 31 Tem 2026: Badge de self-echo guard'ina alindi. Eskiden HER push'ta calisiyordu
+        // ("badge push'suz yolu yok" gerekcesiyle) — ama kendi aksiyonunun modallari zaten
+        // kapanista _loadData cagiriyor ve badge'i tazeliyor; kendi echo'sunda tekrar cekmek
+        // gereksizdi. Bu yuzden badge ayari 30sn olmasina ragmen olculen ~12sn idi.
+        // YABANCI kasa olayinda badge HALA aninda yenilenir (freshLoad false) — FIS CIKMADI
+        // ve mutfak uyarilarinin anlik gorunmesi KORUNUR.
+        if (!freshLoad) {
+          await _refreshPendingCount();
+        }
       }
     });
   }

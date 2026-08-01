@@ -84,7 +84,16 @@ class ApiService {
 
   void setBaseUrl(String url) {
     _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
-    _initDio();
+    // 31 Tem 2026 — CAPRAZ-KIRACI FIX. Eskiden burada _initDio() YENI bir Dio nesnesi
+    // yaratiyordu. Oysa Dio nesnesi bir kez PAYLASILIYOR: SyncService (api_service:114),
+    // ayrica LicenseService/LogService/VersionService (initial_sync_screen:63-65). Yeni nesne
+    // uretilince o servisler ESKI nesneyi -> ESKI KIRACININ X-API-Key'ini tutmaya devam
+    // ediyordu. Sonuc (Dora'da canli yakalandi): kasa Dora anahtariyla acikken SyncService'in
+    // 5 dakikalik backgroundCacheUpdate'i /api/pos/products'i IZABELLA anahtariyla cekip
+    // 316 Izabella urununu Dora'nin urun cache'ine yaziyordu; lisans karti da Izabella
+    // gorunuyordu. Cozum: nesneyi DEGISTIRME, ayni ornegin baseUrl'unu guncelle — tum
+    // tutucular otomatik olarak dogru anahtari kullanir. Interceptor'lar da korunur.
+    _dio.options.baseUrl = _baseUrl;
     _connectivity.setProbeBaseUrl(_baseUrl); // 6 Tem 2026 (Adim 8): probe hedefini de guncelle
     if (_apiKey != null) {
       _dio.options.headers['X-API-Key'] = _apiKey;
@@ -641,6 +650,16 @@ class ApiService {
     int? waiterId,
     int? clientTempId,
     double extrasAmount = 0,
+    // 31 Tem 2026 — COMBO PAKET KIMLIGI. Ayni secimden gelen kalemler ayni comboGroupId'yi
+    // tasir; fis/mutfak/adisyon ekrani ANA URUN altinda gruplar. Alan adlari web standardiyla
+    // AYNI (panel_orders.items[] + api/kitchen.js). Combo disi eklemede null → davranis degismez.
+    String? comboGroupId,
+    String? comboGroupName,
+    String? comboPickName,
+    // 31 Tem 2026 — POS VARYANT COKLU SECIM. [{name, price}] listesi; backend addItem bunu
+    // ZATEN kabul edip panel_pos_ticket_items.extras'a yaziyor, getByTable geri donduruyor.
+    // Urun adi TEMIZ kalir, secimler adisyon/fiste ALT SATIR olarak cikar (web deseni).
+    List<Map<String, dynamic>>? extras,
   }) async {
     if (_connectivity.isOnline) {
       try {
@@ -655,6 +674,10 @@ class ApiService {
           if (portion != null) 'portion': portion,
           if (waiterId != null) 'waiter_id': waiterId,
           if (clientTempId != null) 'client_temp_id': clientTempId,
+          if (comboGroupId != null) 'combo_group_id': comboGroupId,
+          if (comboGroupName != null) 'combo_group_name': comboGroupName,
+          if (comboPickName != null) 'combo_pick_name': comboPickName,
+          if (extras != null && extras.isNotEmpty) 'extras': extras,
         });
         if (response.data['success'] == true) {
           _logService.logAction('Urun eklendi (online)', details: {
@@ -700,6 +723,10 @@ class ApiService {
       notes: notes,
       waiterId: waiterId ?? 1,
       portion: portion,
+      comboGroupId: comboGroupId,
+      comboGroupName: comboGroupName,
+      comboPickName: comboPickName,
+      extras: (extras != null && extras.isNotEmpty) ? jsonEncode(extras) : null,
     );
 
     _logService.logAction('Urun eklendi (offline)', details: {
@@ -725,11 +752,15 @@ class ApiService {
     int? waiterId,
     double? unitPrice,
     double? extrasAmount,
+    // 1 Agu 2026: POS varyant coklu secimi mevcut kalemde degistirilebilsin.
+    // Gonderilmezse backend COALESCE ile mevcut extras'i KORUR (davranis degismez).
+    List<Map<String, dynamic>>? extras,
   }) async {
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.put('/api/pos/tickets/$ticketId/items/$itemId', data: {
           if (quantity != null) 'quantity': quantity,
+          if (extras != null) 'extras': extras,
           if (notes != null) 'notes': notes,
           if (waiterId != null) 'waiter_id': waiterId,
           if (extrasAmount != null) 'extras_amount': extrasAmount,
@@ -947,6 +978,10 @@ class ApiService {
               discountType: discountType,
               waiterId: waiterId ?? 1,
             );
+            // 31 Tem 2026: closeLocalTicket kuyruga KOSULSUZ 'close' birakti; online zaten
+            // basardik -> o kayit gereksiz. Birakilirsa ikinci POST atilir, adisyon silinmis/
+            // yetim ise 404 -> dead_letter -> kasada kalici kirmizi uyari. Kapat.
+            await _localDb.completeRedundantSync('close', resolvedLocalId);
           }
           await _releaseLanLease(localTicket?['table_id'] as int?); // O-4
         }
@@ -1042,9 +1077,11 @@ class ApiService {
               waiterId: waiterId ?? 1,
               reason: reason,
             );
-            // Lokal sync queue'ya eklenen 'void' action'i temizle (cunku zaten online yaptik)
-            // Not: voidLocalTicket sync_queue'ya 'void' ekledi, ama biz online basardik. Yine kalsin
-            // (sync_service zaten server_id varsa skip eder).
+            // 31 Tem 2026 DUZELTME: asagidaki eski not YANLISTI — sync_service'te "server_id
+            // varsa skip" diye bir kontrol HIC YOKTU (case 'void' dogrudan yeniden POST atiyor).
+            // Sonuc: her online iptal kuyrukta bir es birakiyor, o da 404 alip dead_letter'a
+            // dusuyordu (kasada kalici kirmizi uyari). Artik kaydi burada kapatiyoruz.
+            await _localDb.completeRedundantSync('void', resolvedLocalId);
           }
           await _releaseLanLease(localTicket?['table_id'] as int?); // O-4
         }

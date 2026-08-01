@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -294,13 +295,78 @@ class _AddItemModalState extends State<AddItemModal> {
     // Karar: extra hediye BACKEND uretir (panel/web birebir) — POS N odenen kalem ekler, hediyeyi
     // close handler'i giftLines ile olusturur. Boylece cifte-hediye/reload sorunu YOK.
     if (_comboIsActive(product)) {
+      // 31 Tem 2026 (Mustafa) — CAKISMA COZUMU: bir urunde HEM combo HEM "POS varyant coklu
+      // secim" acikken eskiden combo KOSULSUZ kazaniyor, varyant yoluna hic gelinmiyordu
+      // (iki ozellik birbirini eziyordu). Artik ikisi de aktifse ONCE kucuk bir secim ekrani
+      // cikar: "Varyant" mi "Combo" mu. Tek ozellik aciksa ekran CIKMAZ — eski akis aynen.
+      final _varyantlar = (product['variants'] is List) ? product['variants'] as List : const [];
+
+      // 1 Agu 2026 (Mustafa: "varyant ve combo icinde de gecerli olmali o ozellik") —
+      // "SORAYIM MI?" ile "NASIL SORAYIM?" AYRI iki sorudur:
+      //   SORAYIM MI  -> urun ZORUNLU isaretliyse EVET; degilse GLOBAL toggle
+      //                  (Yazici Ayarlari > POS Davranisi) ne diyorsa.
+      //   NASIL       -> combo+coklu ikisi de aciksa secim ekrani, biri aciksa o ekran.
+      // Onceki halimde "coklu secim" acik olmak ekrani ZORLA aciyordu; bu yanlisti —
+      // coklu secim bir BICIM ayaridir, "sor" emri degil. Toggle'in islevsiz gorunmesinin
+      // sebebi buydu.
+      // ⚠️ combo_pos_selection_required VARSAYILANI true -> combo urunlerde davranis
+      //    ESKISIYLE AYNI kalir (her zaman sorar). Regresyon yok.
+      final _comboZorunlu = ComboCalculator.posSecimZorunlu(product); // TEK KAYNAK
+      if (!_comboZorunlu && !_variantOnTap) {
+        // Ne urun zorunlu kiliyor ne de global tercih "sor" diyor -> DOGRUDAN EKLE
+        _addProductWithPrice(product, product['name']?.toString() ?? '',
+          _restaurantBasePrice(product));
+        return;
+      }
+      // 1 Agu 2026 — TEK PENCERE, SEKMELI. Combo urununde varyant ve/veya icerik de
+      // varsa hepsi AYNI pencerede sekme olur (Varyant / Ekle-Cikar / Combo).
+      // Hicbiri yoksa (sadece combo) dogrudan combo ekrani acilir — gereksiz sekme olmaz.
+      final _icerikVar = _urunIcerikleri(product).isNotEmpty;
+      final _varyantVar = _varyantlar.isNotEmpty;
+      if (_varyantVar || _icerikVar) {
+        // 1 Agu 2026 (Mustafa: "combo urunu de oraya ekle... ekstra varyant butonu combo
+        // butonu da olmaz") — ARA SECIM EKRANI TAMAMEN KALKTI. Tek pencere acilir;
+        // ustte hangi ozellik doluysa o sekme cikar: Varyant / Ekle-Cikar / Combo.
+        // Combo sekmesinden "devam" denirse pencere kapanir ve combo secim ekrani acilir.
+        await _openIcerikVaryantDialog(product, _varyantlar, mod: 'hepsi');
+        return;
+      }
+      // 31 Tem 2026 — SECIM ZORUNLU DEGILSE ekran ACILMAZ, urun DOGRUDAN sepete eklenir.
+      // Panel > combo pop > "Sadece POS" > "Secim zorunlu" kapatilinca gelir
+      // (panel_products.combo_pos_selection_required=false). Varyant dialogu da ACILMAZ
+      // (Mustafa: "zorunlu secili degilse direkt urun eklenecek, varyant secenegi cikmayacak").
+      // Fiyat: ana kartin restoran fiyati (_restaurantBasePrice) — varyantsiz ekleme kurali.
+      // ⚠️ SADECE POS. Web ve telefon bu alani OKUMAZ, orada secim her zaman zorunlu.
+      // 31 Tem 2026: cevrimdisi cache 0/1 doner -> hem false hem 0 kabul edilmeli,
+      // yoksa internet gidince "opsiyonel" ayari yok sayilip dialog yine acilirdi.
+      if (!ComboCalculator.posSecimZorunlu(product)) { // TEK KAYNAK
+        _addProductWithPrice(product, product['name']?.toString() ?? '',
+          _restaurantBasePrice(product));
+        return;
+      }
       await _openComboSelectionDialog(product);
       return;
     }
-    if (_variantOnTap) {
-      final variants = (product['variants'] is List) ? product['variants'] as List : const [];
-      if (variants.isNotEmpty) {
-        await _openVariantDialogForProduct(product, variants);
+    final variants = (product['variants'] is List) ? product['variants'] as List : const [];
+    // 1 Agu 2026 — ICERIK / GRUPLU VARYANT EKRANI.
+    // Urunde icerik (cikarilabilir/eklenebilir) VEYA gruplu varyant varsa web'deki gibi
+    // bolumlu ekran acilir. IKISI DE YOKSA asagidaki eski akis AYNEN calisir.
+    // "Sorayim mi" kurali burada da gecerli: zorunlu bir grup varsa HER ZAMAN sorar,
+    // yoksa global toggle'a uyar (Yazici Ayarlari > POS Davranisi).
+    if (variants.isNotEmpty || _urunIcerikleri(product).isNotEmpty) {
+      // 1 Agu 2026 — "SORAYIM MI" / "NASIL SORAYIM" ayrimi.
+      //   SORAYIM MI : urunde ZORUNLU bir grup varsa VEYA variants_required_pos aciksa EVET;
+      //                degilse GLOBAL toggle (Yazici Ayarlari > POS Davranisi).
+      //   NASIL      : _varyantEkraniAc karar verir (icerik/gruplu > coklu > tekli).
+      // ⚠️ "coklu secim" bir BICIM ayaridir, "sor" emri DEGIL (31 Tem'de bunu karistirmistim,
+      //    global toggle islevsiz kalmisti).
+      final _zorunluGrup = variants.any((v) =>
+          v is Map &&
+          (v['group_name'] ?? '').toString().trim().isNotEmpty &&
+          v['group_required'] == true);
+      final _sorulacak = _zorunluGrup || _posVaryantZorunlu(product) || _variantOnTap;
+      if (_sorulacak) {
+        await _varyantEkraniAc(product, variants);
         return;
       }
     }
@@ -314,9 +380,11 @@ class _AddItemModalState extends State<AddItemModal> {
   /// isletme indirimi urun FIYATINA gomebilir ("2 al" combo urun zaten indirimli fiyatli girilmis).
   /// O durumda combo ekrani yine acilir (N urun sec), ekstra indirim comboCalculator'dan GELMEZ
   /// (eligible=false, dogru — indirim fiyatta). Indirim tipi VARSA calcCartCombos ayrica duser.
-  bool _comboIsActive(Map<String, dynamic> product) {
-    return product['combo_enabled'] == true || product['combo_enabled'] == 1;
-  }
+  // 1 Agu 2026 — TEK KAYNAK: ComboCalculator. Eskiden burada `== true || == 1`
+  // yaziyordu ve '1'/'true' METNINI kaciriyordu (hesaplayici ise kabul ediyordu)
+  // -> ayni urun bir yerde combo, digerinde degil sayilabiliyordu.
+  bool _comboIsActive(Map<String, dynamic> product) =>
+      ComboCalculator.comboAktif(product);
 
   /// Combo kural ozeti: N (secilecek), G (hediye), mod, repeat, stepPerSet (bir set icin secilecek adet),
   /// label. within/percent/amount -> N sec; extra -> N+G sec (G'si hediye, BACKEND uretir).
@@ -324,7 +392,8 @@ class _AddItemModalState extends State<AddItemModal> {
     final n = (_safeInt(product['combo_required_qty']) ?? 2).clamp(1, 10);
     final g = (_safeInt(product['combo_gift_qty']) ?? 0);
     final giftMode = product['combo_gift_mode'] == 'extra' ? 'extra' : 'within';
-    final repeat = product['combo_repeat'] != false;
+    // 1 Agu 2026 — TEK KAYNAK (SQLite INTEGER tuzagi burada cozulur).
+    final repeat = ComboCalculator.katlanmaAcik(product);
     final pct = _safeDouble(product['combo_discount_percent']);
     final amt = _safeDouble(product['combo_discount_amount']);
     // Bir set icin secilecek adet: extra -> N+G (G hediye slotu), digerleri -> N.
@@ -346,15 +415,970 @@ class _AddItemModalState extends State<AddItemModal> {
   /// Ayar ACIK iken: urune tiklaninca varyant sec, secilen varyantla sepete EKLE (mevcut item'i
   /// guncellemez — yeni kalem ekler). Ekleme sonrasi mevcut _addProductWithPrice yolunu kullanir
   /// (fiyat = baz + varyant modifier), varyant adi note olarak yazilir.
+  /// Urunde HEM combo HEM POS coklu varyant acikken hangisiyle devam edilecegini sorar.
+  /// Doner: 'varyant' | 'combo' | null (iptal). Sadece IKISI DE aktifken cagrilir.
+  /// 1 Agu 2026 — DINAMIK SECIM EKRANI (Mustafa: "hepsi dolu oldugunda pop penceresinde
+  /// secenek ciksin COMBO - VARYANT - EKLE/CIKAR").
+  /// Sadece GECERLI olan secenekler cizilir: 2 tanesi varsa 2 kart, 3'u varsa 3 kart.
+  /// Doner: 'combo' | 'varyant' | 'icerik' | null (iptal).
+  Future<String?> _openAkisSecimDialog(Map<String, dynamic> product,
+      {bool comboVar = true, bool varyantVar = true, bool icerikVar = false}) async {
+    final productName = product['name']?.toString() ?? '';
+    final t = _comboTargetFor(product);
+    final comboLabel = (t['label'] as String?)?.trim();
+    final varyantSayisi = (product['variants'] is List) ? (product['variants'] as List).length : 0;
+    final _icerikSayisi = _urunIcerikleri(product).length;
+
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          width: (varyantVar ? 1 : 0) + (icerikVar ? 1 : 0) + (comboVar ? 1 : 0) >= 3 ? 580 : 420,
+          padding: const EdgeInsets.all(20),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              Expanded(
+                child: Text(productName,
+                    style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              ),
+              IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx, null)),
+            ]),
+            Text('Nasıl eklensin?',
+                style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+            const SizedBox(height: 16),
+            Row(children: [
+              if (varyantVar) ...[
+                Expanded(
+                  child: _akisSecimKarti(
+                    ctx: ctx,
+                    deger: 'varyant',
+                    ikon: Icons.checklist_rounded,
+                    baslik: 'Varyant',
+                    altYazi: '$varyantSayisi seçenek\nfiyatlar toplanır',
+                    renk: Colors.orange[700]!,
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              if (icerikVar) ...[
+                Expanded(
+                  child: _akisSecimKarti(
+                    ctx: ctx,
+                    deger: 'icerik',
+                    ikon: Icons.tune_rounded,
+                    baslik: 'Ekle / Çıkar',
+                    altYazi: '$_icerikSayisi malzeme\nekle veya çıkar',
+                    renk: Colors.blue[700]!,
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              if (comboVar)
+                Expanded(
+                  child: _akisSecimKarti(
+                    ctx: ctx,
+                    deger: 'combo',
+                    ikon: Icons.card_giftcard_rounded,
+                    baslik: 'Combo',
+                    altYazi: (comboLabel != null && comboLabel.isNotEmpty)
+                        ? comboLabel
+                        : 'paket seçimi',
+                    renk: Colors.green[700]!,
+                  ),
+                ),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _akisSecimKarti({
+    required BuildContext ctx,
+    required String deger,
+    required IconData ikon,
+    required String baslik,
+    required String altYazi,
+    required Color renk,
+  }) {
+    return Material(
+      color: renk.withOpacity(0.08),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.pop(ctx, deger),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: renk.withOpacity(0.45), width: 1.5),
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(ikon, size: 30, color: renk),
+            const SizedBox(height: 8),
+            Text(baslik,
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: renk)),
+            const SizedBox(height: 4),
+            Text(altYazi,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 11.5, color: Colors.grey[700], height: 1.25)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /// Coklu varyant secimi: birden fazla varyant birlikte secilir, TEK adisyon kalemi eklenir.
+  /// Fiyat = ana restoran fiyati + Secilen varyant farklari (web ile BIREBIR ayni kural).
+  /// Secimler `extras` alaninda yapilandirilmis gider (backend tickets.js addItem ZATEN kabul
+  /// ediyor ve getByTable geri donduruyor) -> adisyon/fis urun adinin ALTINDA satir satir gosterir.
+  /// Urun adi TEMIZ kalir (web deseni) — isim icine parantez YAZILMAZ.
+  /// [guncellenecekKalem] verilirse YENI KALEM EKLEMEZ, o kalemi GUNCELLER.
+  /// 1 Agu 2026 (Mustafa: "bu pencere ayni koddan beslenmeli, sen ayri tasarim mi yaptin") —
+  /// Varyant BUTONU (adisyondaki secili kaleme) ayri bir dialog kullaniyordu ve yeni POS
+  /// ayarlarini (coklu secim / secim zorunlu) HIC OKUMUYORDU. Artik iki giris noktasi da
+  /// BU fonksiyondan besleniyor; tek kod, tek davranis.
+  Future<void> _openMultiVariantDialog(Map<String, dynamic> product, List variants,
+      {Map<String, dynamic>? guncellenecekKalem}) async {
+    final basePrice = _restaurantBasePrice(product);
+    final productName = product['name']?.toString() ?? '';
+    final zorunlu = _posVaryantZorunlu(product);
+    final secili = <Map<String, dynamic>>[];
+
+    final onay = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSt) {
+        final toplamFark = secili.fold<double>(0, (t, v) => t + _variantModifier(v));
+        final toplam = basePrice + toplamFark;
+        final eklenebilir = zorunlu ? secili.isNotEmpty : true;
+        final tiles = <Widget>[
+          // 1 Agu 2026 (Mustafa: "secim yapmadan ekleyebilecegim ana urun yok?") —
+          // ZORUNLU DEGILSE ana urunun KENDISI de secilebilir olmali. Tekli varyant
+          // ekraninda "1 Porsiyon" kutucugu vardi, coklu ekranda eksikti: buton
+          // "secim yapmadan da eklenebilir" diyor ama tiklanacak bir sey yoktu.
+          // Bu kutucuk = SIFIR secimle onayla (fiyat = ana restoran fiyati).
+          // Zorunlu ise GOSTERILMEZ — orada zaten en az bir secim sart.
+          if (!zorunlu)
+              // 1 Agu 2026 (Mustafa: "1 porsiyon yazmasi hatali, ana urunun adi yazmali,
+              // web sitesinde de yanlis anlasiliyor") — bu kutucuk ANA URUNUN KENDISI;
+              // varyantsiz, ana fiyattan. Sabit "1 Porsiyon" yerine urun adi yazilir.
+            _variantOptionTile(
+              label: productName,
+              price: basePrice,
+              selected: secili.isEmpty,
+              onTap: () {
+                secili.clear();
+                Navigator.pop(ctx, true);
+              },
+              color: Colors.blue[600]!,
+            ),
+          ...variants.map((raw) {
+          final v = Map<String, dynamic>.from(raw as Map);
+          final mod = _variantModifier(v);
+          final vname = v['name']?.toString() ?? '';
+          final isSecili = secili.any((x) => x['id'] == v['id'] && x['name'] == v['name']);
+          return _variantOptionTile(
+            label: vname,
+            price: basePrice + mod,
+            modifier: mod,
+            selected: isSecili,
+            onTap: () => setSt(() {
+              if (isSecili) {
+                secili.removeWhere((x) => x['id'] == v['id'] && x['name'] == v['name']);
+              } else {
+                secili.add(v);
+              }
+            }),
+            color: isSecili ? Colors.green[700]! : Colors.orange[600]!,
+          );
+          }),
+        ];
+
+        return _buildResponsiveVariantDialog(
+          ctx: ctx,
+          title: productName,
+          tiles: tiles,
+          altBar: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (secili.isNotEmpty) ...[
+              Wrap(spacing: 6, runSpacing: 6, children: [
+                for (int i = 0; i < secili.length; i++)
+                  InputChip(
+                    label: Text(secili[i]['name']?.toString() ?? '', style: const TextStyle(fontSize: 12)),
+                    onDeleted: () => setSt(() => secili.removeAt(i)),
+                    deleteIcon: const Icon(Icons.close, size: 15),
+                  ),
+              ]),
+              const SizedBox(height: 8),
+            ],
+            Row(children: [
+              Expanded(
+                child: Text(
+                  secili.isEmpty
+                      ? (zorunlu
+                          ? 'En az bir seçim yapın'
+                          : '"1 Porsiyon" ile seçimsiz de eklenebilir')
+                      : '${secili.length} seçim  •  ${toplam.toStringAsFixed(2)} TL',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: secili.isEmpty ? Colors.grey[600] : Colors.green[800],
+                  ),
+                ),
+              ),
+              ElevatedButton(
+                onPressed: eklenebilir ? () => Navigator.pop(ctx, true) : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: eklenebilir ? Colors.green[700] : Colors.grey[300],
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(0, 48),
+                ),
+                child: Text(secili.isEmpty ? 'Ekle' : 'Ekle (${toplam.toStringAsFixed(2)} TL)'),
+              ),
+            ]),
+          ]),
+        );
+      }),
+    );
+
+    if (onay != true) return; // iptal
+    final toplamFark = secili.fold<double>(0, (t, v) => t + _variantModifier(v));
+
+    // GUNCELLEME MODU: mevcut kalemin fiyatini/secimlerini degistir, YENI KALEM EKLEME.
+    if (guncellenecekKalem != null) {
+      final gItemId = _safeInt(guncellenecekKalem['id']);
+      if (gItemId == null) return;
+      final gExtras = secili
+          .map((v) => {'name': v['name']?.toString() ?? '', 'price': _variantModifier(v)})
+          .toList();
+      try {
+        final res = await widget.apiService.updateTicketItem(
+          ticketId: widget.ticketId,
+          itemId: gItemId,
+          // Not alanina fiyat YAZILMAZ (backend unit_price safety-net'i notlardaki
+          // '+NTL' desenine bakiyor — cift sayim riski). Secimler extras'ta.
+          notes: secili.isEmpty
+              ? null
+              : secili.map((v) => v['name']?.toString() ?? '').join(', '),
+          unitPrice: basePrice + toplamFark,
+          waiterId: widget.waiterId,
+          extras: gExtras,
+        );
+        if (res['success'] == true) {
+          await _loadTicketItems();
+        } else {
+          _showError(res['error']?.toString() ?? 'Varyant uygulanamadi');
+        }
+      } catch (e) {
+        _showError('Varyant hatasi: $e');
+      }
+      return;
+    }
+
+    // extras: [{name, price}] — backend JSON.stringify ile panel_pos_ticket_items.extras'a yazar.
+    // DIKKAT: notes'a "+50TL" YAZILMAZ; backend'in unit_price safety-net'i notes'taki fiyat
+    // desenine bakiyor, buraya fiyat yazarsak cift sayim riski dogar (tickets.js:199-236).
+    final extras = secili
+        .map((v) => {'name': v['name']?.toString() ?? '', 'price': _variantModifier(v)})
+        .toList();
+    await _addProductWithPrice(product, productName, basePrice + toplamFark, extras: extras);
+  }
+
+  // ============================================================================
+  // 1 Agu 2026 — URUN ICERIKLERI + VARYANT SECIM GRUPLARI
+  // Mustafa: "bizim aslinda icerikler kismini da eklememiz lazim. onu webde
+  // gosteriyoruz ama POS'ta gostermiyoruz. keza coklu secimi de?"
+  //
+  // Backend (panel-direct/products.js, 1 Agu) artik gonderiyor:
+  //   ingredients[] : {id, name, role:'removable'|'addon', is_default, price}
+  //   variants[]    : + group_name / group_required / group_multi
+  //
+  // 🔴 GERI UYUMLULUK: ikisi de YOKSA (bos dizi / group_name null) hicbir sey degismez —
+  //    urun eski akisla eklenir, ekranda ek bolum CIZILMEZ.
+  // ============================================================================
+
+  /// Urunun icerikleri var mi (cikarilabilir veya eklenebilir)
+  List<Map<String, dynamic>> _urunIcerikleri(Map<String, dynamic> product) {
+    final raw = product['ingredients'];
+    List list;
+    if (raw is List) {
+      list = raw;
+    } else if (raw is String && raw.trim().isNotEmpty) {
+      try { final d = jsonDecode(raw); list = d is List ? d : const []; } catch (_) { return const []; }
+    } else {
+      return const [];
+    }
+    return list
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .where((e) => (e['name'] ?? '').toString().trim().isNotEmpty)
+        .toList();
+  }
+
+  /// Varyantlari SECIM GRUPLARINA ayirir. group_name olmayanlar '' anahtarinda toplanir
+  /// (duz liste = eski davranis). Sira korunur.
+  Map<String, List<Map<String, dynamic>>> _varyantGruplari(List variants) {
+    final gruplar = <String, List<Map<String, dynamic>>>{};
+    for (final raw in variants) {
+      if (raw is! Map) continue;
+      final v = Map<String, dynamic>.from(raw);
+      final g = (v['group_name'] ?? '').toString().trim();
+      (gruplar[g] ??= []).add(v);
+    }
+    return gruplar;
+  }
+
+  /// İÇERİK + GRUPLU VARYANT SEÇİM EKRANI (1 Agu 2026)
+  /// Web'deki urun modalinin POS karsiligi. Uc bolum:
+  ///   1. Gruplu varyantlar — her grup ayri baslik, group_multi ? cok secim : tek secim
+  ///   2. Cikarilabilir icerikler (role='removable') — isaretlenirse CIKARILIR
+  ///   3. Eklenebilir icerikler (role='addon')     — isaretlenirse EKLENIR
+  /// Fiyat = ana fiyat + Σ(varyant farki) + Σ(eklenen) + Σ(cikarilan fiyat etkisi)
+  /// Secimler `extras` alaninda yapilandirilmis gider -> adisyon/fis alt satirlarinda gorunur.
+  /// [mod] hangi bolumlerin cizilecegini belirler (1 Agu 2026, Mustafa: "eklenebilir
+  /// cikartilabilir varyanti eziyor"):
+  ///   'hepsi'   -> varyant gruplari + icerikler (tek ozellik varsa bu yeterli)
+  ///   'varyant' -> SADECE varyant gruplari (icerikler ayri ekranda)
+  ///   'icerik'  -> SADECE ekle/cikar (varyantlar ayri ekranda)
+  Future<void> _openIcerikVaryantDialog(Map<String, dynamic> product, List variants,
+      {String mod = 'hepsi'}) async {
+    final basePrice = _restaurantBasePrice(product);
+    final productName = product['name']?.toString() ?? '';
+    final _icerikGoster = mod == 'hepsi' || mod == 'icerik';
+    final _varyantGoster = mod == 'hepsi' || mod == 'varyant';
+    final icerikler = _icerikGoster ? _urunIcerikleri(product) : <Map<String, dynamic>>[];
+    final cikarilabilir = icerikler.where((i) => i['role'] == 'removable').toList();
+    final eklenebilir = icerikler.where((i) => i['role'] == 'addon').toList();
+    final gruplar = _varyantGoster
+        ? _varyantGruplari(variants)
+        : <String, List<Map<String, dynamic>>>{};
+
+    // 1 Agu 2026 (Mustafa: "ekle cikari da mevcut pencerede TAB olarak eklesene,
+    // bosa tik yapmasin sonucta ayni urune ait") — ayri secim ekrani yerine AYNI pencerede
+    // sekme. Secimler sekme degisince KAYBOLMAZ (ayni StatefulBuilder durumu).
+    int sekme = 0; // 0 = Varyant, 1 = Ekle/Cikar, 2 = Combo
+    // 1 Agu 2026: Combo sekmesinden cikilirsa bu bayrak dolar ve pencere kapandiktan
+    // SONRA combo secim ekrani acilir (combo'nun kendi N-secim/paket-bolme mantigi var).
+    bool comboyaGec = false;
+
+    // Secim durumu
+    final secVaryant = <String, List<Map<String, dynamic>>>{}; // grup -> secilenler
+    final cikarilan = <Map<String, dynamic>>[];
+    final eklenen = <Map<String, dynamic>>[];
+
+    double toplamHesapla() {
+      double t = basePrice;
+      secVaryant.forEach((_, list) {
+        for (final v in list) t += _variantModifier(v);
+      });
+      for (final c in cikarilan) t += _icerikFiyati(c);   // genelde negatif
+      for (final e in eklenen) t += _icerikFiyati(e);
+      return t;
+    }
+
+    bool zorunluTamam() {
+      for (final g in gruplar.keys) {
+        if (g.isEmpty) continue;
+        final ilk = gruplar[g]!.first;
+        if (ilk['group_required'] == true && (secVaryant[g]?.isEmpty ?? true)) return false;
+      }
+      return true;
+    }
+
+    final onay = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSt) {
+        final toplam = toplamHesapla();
+        // 1 Agu 2026 (Mustafa: "coklu varyant secimi sagda, solda normal varyantlar
+        // yan urun 1 yan urun 2 yazan") —
+        //   SOL : GRUPLU varyantlar (Yan urun secimi 1/2, Acili-Acisiz ...)
+        //   SAG : COKLU/duz varyant secimi
+        //   ALT : ekle/cikar malzemeler — tam genislik, iki sutunun ALTINDA
+        // Tek taraf doluysa TEK sutun cizilir (bos yarim ekran olmasin).
+        final solBolumler = <Widget>[];   // gruplu varyantlar
+        final sagBolumler = <Widget>[];   // coklu/duz varyant
+        final altBolumler = <Widget>[];   // icerikler (ekle/cikar)
+
+        Widget baslik(String metin, {String? alt}) => Padding(
+              padding: const EdgeInsets.only(top: 14, bottom: 6),
+              child: Row(children: [
+                Text(metin,
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                if (alt != null) ...[
+                  const SizedBox(width: 6),
+                  Text(alt, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                ],
+              ]),
+            );
+
+        // ---- 1) GRUPLU VARYANTLAR ----
+        gruplar.forEach((grupAdi, secenekler) {
+          if (grupAdi.isEmpty) return; // duz varyantlar asagida
+          final ilk = secenekler.first;
+          final coklu = ilk['group_multi'] == true;
+          final zorunlu = ilk['group_required'] == true;
+          solBolumler.add(baslik(grupAdi,
+              alt: (zorunlu ? 'zorunlu' : 'opsiyonel') + (coklu ? ' · çoklu' : '')));
+          solBolumler.add(Wrap(spacing: 8, runSpacing: 8, children: secenekler.map((v) {
+            final secili = (secVaryant[grupAdi] ?? []).any((x) => x['id'] == v['id']);
+            final mod = _variantModifier(v);
+            return SizedBox(
+              width: _variantTileWidth,
+              child: _variantOptionTile(
+                label: v['name']?.toString() ?? '',
+                price: basePrice + mod,
+                modifier: mod,
+                selected: secili,
+                onTap: () => setSt(() {
+                  final liste = secVaryant[grupAdi] ??= [];
+                  if (secili) {
+                    liste.removeWhere((x) => x['id'] == v['id']);
+                  } else {
+                    if (!coklu) liste.clear(); // tekli grup: oncekini degistir
+                    liste.add(v);
+                  }
+                }),
+                color: secili ? Colors.green[700]! : Colors.orange[600]!,
+              ),
+            );
+          }).toList()));
+        });
+
+        // ---- 1b) GRUPSUZ (DUZ) VARYANTLAR ----
+        // 🔴 1 Agu 2026 (Mustafa: "coklu secim yok, onu eklememissin") — ILK YAZIMDA
+        // `if (grupAdi.isEmpty) return;` ile grupsuz varyantlar ATLANIYORDU ve "duz varyantlar
+        // asagida" diye not dusulmustu ama ASAGIDA BOYLE BIR BOLUM YOKTU. Sonuc: gruplu +
+        // duz varyanti olan urunde DUZ OLANLAR KAYBOLUYORDU, coklu secim de hic devreye
+        // girmiyordu. Artik bu bolum ciziliyor ve variants_allow_multiple_pos'a UYUYOR:
+        //   coklu ACIK  -> birden fazla secilebilir (fiyatlar toplanir)
+        //   coklu KAPALI-> tek secim (yeni secim oncekini degistirir)
+        if (_varyantGoster && (gruplar[''] ?? const []).isNotEmpty) {
+          final duzler = gruplar['']!;
+          final cokluDuz = _posCokluVaryant(product);
+          sagBolumler.add(baslik('Varyant', alt: cokluDuz ? 'çoklu seçilebilir' : 'tek seçim'));
+          sagBolumler.add(Wrap(spacing: 8, runSpacing: 8, children: duzler.map((v) {
+            final secili = (secVaryant[''] ?? []).any((x) => x['id'] == v['id']);
+            final mod = _variantModifier(v);
+            return SizedBox(
+              width: _variantTileWidth,
+              child: _variantOptionTile(
+                label: v['name']?.toString() ?? '',
+                price: basePrice + mod,
+                modifier: mod,
+                selected: secili,
+                onTap: () => setSt(() {
+                  final liste = secVaryant[''] ??= [];
+                  if (secili) {
+                    liste.removeWhere((x) => x['id'] == v['id']);
+                  } else {
+                    if (!cokluDuz) liste.clear();
+                    liste.add(v);
+                  }
+                }),
+                color: secili ? Colors.green[700]! : Colors.orange[600]!,
+              ),
+            );
+          }).toList()));
+        }
+
+        // ---- 2) CIKARILABILIR ICERIKLER ----
+        if (cikarilabilir.isNotEmpty) {
+          altBolumler.add(baslik('Çıkartılacak Malzemeler', alt: 'işaretlenen çıkarılır'));
+          altBolumler.add(Wrap(spacing: 8, runSpacing: 8, children: cikarilabilir.map((i) {
+            final secili = cikarilan.any((x) => x['id'] == i['id']);
+            final f = _icerikFiyati(i);
+            return _icerikCipi(
+              ad: i['name']?.toString() ?? '',
+              fiyat: f,
+              secili: secili,
+              renk: Colors.red[600]!,
+              onTap: () => setSt(() {
+                if (secili) {
+                  cikarilan.removeWhere((x) => x['id'] == i['id']);
+                } else {
+                  cikarilan.add(i);
+                }
+              }),
+            );
+          }).toList()));
+        }
+
+        // ---- 3) EKLENEBILIR ICERIKLER ----
+        if (eklenebilir.isNotEmpty) {
+          altBolumler.add(baslik('Eklenecek Malzemeler', alt: 'işaretlenen eklenir'));
+          altBolumler.add(Wrap(spacing: 8, runSpacing: 8, children: eklenebilir.map((i) {
+            final secili = eklenen.any((x) => x['id'] == i['id']);
+            final f = _icerikFiyati(i);
+            return _icerikCipi(
+              ad: i['name']?.toString() ?? '',
+              fiyat: f,
+              secili: secili,
+              renk: Colors.green[700]!,
+              onTap: () => setSt(() {
+                if (secili) {
+                  eklenen.removeWhere((x) => x['id'] == i['id']);
+                } else {
+                  eklenen.add(i);
+                }
+              }),
+            );
+          }).toList()));
+        }
+
+        final hazir = zorunluTamam();
+        // Ekran genisligine gore: iki taraf da doluysa VE yer varsa 2 sutun.
+        final _ekranG = MediaQuery.of(ctx).size.width;
+        final _ikiSutun =
+            solBolumler.isNotEmpty && sagBolumler.isNotEmpty && _ekranG >= 900;
+        // Sekme SADECE hem varyant hem icerik varsa anlamli
+        final _comboVar = _comboIsActive(product);
+        // Sekme cubugu: varyant+icerik ikisi de varsa VEYA combo varsa
+        final _sekmeVar = ((solBolumler.isNotEmpty || sagBolumler.isNotEmpty) &&
+                altBolumler.isNotEmpty) ||
+            _comboVar;
+        final _genislik = (_ikiSutun ? 1040.0 : 660.0).clamp(360.0, _ekranG * 0.95);
+
+        Widget _sutun(List<Widget> ler) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: ler,
+            );
+
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Container(
+            width: _genislik,
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.85),
+            padding: const EdgeInsets.all(20),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Row(children: [
+                Expanded(child: Text(productName,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+                IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx, false)),
+              ]),
+              // SEKME CUBUGU — sadece IKI taraf da doluysa cizilir.
+              // Tek taraf varsa sekme yok, dogrudan o icerik gosterilir (gereksiz tik olmasin).
+              if (_sekmeVar) ...[
+                const SizedBox(height: 4),
+                Row(children: [
+                  _sekmeButonu(
+                    secili: sekme == 0,
+                    ikon: Icons.checklist_rounded,
+                    metin: 'Varyant',
+                    onTap: () => setSt(() => sekme = 0),
+                  ),
+                  const SizedBox(width: 8),
+                  _sekmeButonu(
+                    secili: sekme == 1,
+                    ikon: Icons.tune_rounded,
+                    metin: 'Ekle / Çıkar',
+                    rozet: (cikarilan.length + eklenen.length),
+                    onTap: () => setSt(() => sekme = 1),
+                  ),
+                  if (_comboVar) ...[
+                    const SizedBox(width: 8),
+                    _sekmeButonu(
+                      secili: sekme == 2,
+                      ikon: Icons.card_giftcard_rounded,
+                      metin: 'Combo',
+                      onTap: () => setSt(() => sekme = 2),
+                    ),
+                  ],
+                ]),
+                const SizedBox(height: 10),
+              ],
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    // VARYANT SEKMESI (veya sekme yoksa varyantlar)
+                    if (!_sekmeVar || sekme == 0) ...[
+                      if (_ikiSutun)
+                        // SOL: gruplu varyantlar · SAG: coklu varyant secimi
+                        IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(flex: 1, child: _sutun(solBolumler)),
+                              Container(
+                                width: 1,
+                                margin: const EdgeInsets.symmetric(horizontal: 20),
+                                color: Colors.grey[300],
+                              ),
+                              Expanded(flex: 1, child: _sutun(sagBolumler)),
+                            ],
+                          ),
+                        )
+                      else
+                        _sutun([...solBolumler, ...sagBolumler]),
+                    ],
+                    // EKLE/CIKAR SEKMESI (veya sekme yoksa altta)
+                    if (!_sekmeVar || sekme == 1) ..._sutunListesi(altBolumler),
+
+                    // ---- COMBO SEKMESI ----
+                    // 1 Agu 2026 (Mustafa): "combo urunlerde varyant secimi secilmemeli".
+                    // Combo paketi KENDI fiyatlandirmasini kullanir (paket fiyati N kaleme
+                    // bolunur); ustune varyant/icerik farki eklenirse tutar YANLIS olur.
+                    // Bu yuzden secim varsa combo'ya GECIRMEYIZ — ama kullaniciyi "git
+                    // temizle" diye ugrastirmak yerine TEK TIKLA cozeriz.
+                    if (sekme == 2) _comboSekmesi(
+                      ctx: ctx,
+                      secimVar: secVaryant.values.any((l) => l.isNotEmpty) ||
+                          cikarilan.isNotEmpty || eklenen.isNotEmpty,
+                      comboEtiket: (_comboTargetFor(product)['label'] as String?) ?? '',
+                      temizle: () => setSt(() {
+                        secVaryant.clear();
+                        cikarilan.clear();
+                        eklenen.clear();
+                      }),
+                      devam: () {
+                        comboyaGec = true;
+                        Navigator.pop(ctx, false);
+                      },
+                    ),
+                  ]),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: Text(
+                  hazir ? '${toplam.toStringAsFixed(2)} TL' : 'Zorunlu seçim bekleniyor',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                      color: hazir ? Colors.green[800] : Colors.grey[600]),
+                )),
+                ElevatedButton(
+                  onPressed: hazir ? () => Navigator.pop(ctx, true) : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: hazir ? Colors.green[700] : Colors.grey[300],
+                    foregroundColor: Colors.white, minimumSize: const Size(0, 48),
+                  ),
+                  child: Text('Ekle (${toplam.toStringAsFixed(2)} TL)'),
+                ),
+              ]),
+            ]),
+          ),
+        );
+      }),
+    );
+
+    // Combo sekmesinden "devam" denmisse bu pencere kapandi, simdi combo ekrani acilir.
+    if (comboyaGec) {
+      await _openComboSelectionDialog(product);
+      return;
+    }
+    if (onay != true) return;
+
+    // extras: varyant secimleri + eklenen + cikarilan (hepsi tek yapida, fis zaten basiyor)
+    final extras = <Map<String, dynamic>>[];
+    secVaryant.forEach((_, list) {
+      for (final v in list) {
+        extras.add({'name': v['name']?.toString() ?? '', 'price': _variantModifier(v)});
+      }
+    });
+    for (final e in eklenen) {
+      extras.add({'name': e['name']?.toString() ?? '', 'price': _icerikFiyati(e)});
+    }
+    for (final c in cikarilan) {
+      // '-' onekli ad -> fis zincirinde "Cikartilacak Malzemeler" basligina duser
+      extras.add({'name': '-' + (c['name']?.toString() ?? ''), 'price': _icerikFiyati(c)});
+    }
+
+    double toplam = basePrice;
+    secVaryant.forEach((_, list) { for (final v in list) toplam += _variantModifier(v); });
+    for (final c in cikarilan) toplam += _icerikFiyati(c);
+    for (final e in eklenen) toplam += _icerikFiyati(e);
+
+    await _addProductWithPrice(product, productName, toplam, extras: extras);
+  }
+
+  /// Kalem alt satiri: secilen varyant / eklenen malzeme / CIKARILAN malzeme.
+  /// 1 Agu 2026 (Mustafa: "eklenecek urun cikarilacak urun veya varyantlar adisyonda
+  /// gozukmeli") — CIKARILAN malzemeler '-' onekiyle geliyor; burada ONEK TEMIZLENIR,
+  /// satir KIRMIZI ve ustu cizili gosterilir (web sepetiyle ayni desen).
+  /// ⚠️ FIYAT ISARETI FIX: onceden sabit '+' yaziliyordu -> negatif fiyatta "+-20.00"
+  ///    gibi bozuk metin cikiyordu. Artik isaret degere gore.
+  Widget _secimAltSatiri(Map e) {
+    final hamAd = (e['name'] ?? '').toString();
+    final cikarilan = hamAd.startsWith('-');
+    final ad = cikarilan ? hamAd.substring(1).trim() : hamAd;
+    final fiyat = _safeDouble(e['price']) ?? 0;
+    final renk = cikarilan ? Colors.red[700]! : Colors.grey[800]!;
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, left: 2),
+      child: Row(children: [
+        Text(cikarilan ? '−  ' : '•  ',
+            style: TextStyle(fontSize: 12, color: cikarilan ? Colors.red[400] : Colors.grey[500])),
+        Expanded(
+          child: Text(
+            ad,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12.5,
+              color: renk,
+              decoration: cikarilan ? TextDecoration.lineThrough : null,
+            ),
+          ),
+        ),
+        if (fiyat != 0)
+          Text(
+            '${fiyat > 0 ? '+' : '−'}${fiyat.abs().toStringAsFixed(2)}',
+            style: TextStyle(
+                fontSize: 12,
+                color: fiyat > 0 ? Colors.grey[600] : Colors.red[600],
+                fontWeight: FontWeight.w600),
+          ),
+      ]),
+    );
+  }
+
+  /// COMBO SEKMESI icerigi (1 Agu 2026).
+  /// [secimVar] ise combo'ya GECILMEZ: combo paketi kendi fiyatlandirmasini kullanir
+  /// (paket fiyati N kaleme bolunur), ustune varyant/icerik farki binerse tutar yanlis olur.
+  /// Kullaniciyi "git temizle" diye ugrastirmak yerine TEK BUTONLA cozuyoruz.
+  Widget _comboSekmesi({
+    required BuildContext ctx,
+    required bool secimVar,
+    required String comboEtiket,
+    required VoidCallback temizle,
+    required VoidCallback devam,
+  }) {
+    if (secimVar) {
+      return Container(
+        margin: const EdgeInsets.only(top: 8),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.amber[50],
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.amber[300]!),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.info_outline_rounded, size: 20, color: Colors.amber[800]),
+            const SizedBox(width: 8),
+            Text('Combo paketi ayrı fiyatlandırılır',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold,
+                    color: Colors.amber[900])),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+            'Combo\'da paket fiyatı seçilen ürünlere bölünür. Şu an yaptığınız varyant '
+            've malzeme seçimleri bu hesaba dahil edilemez — birlikte kullanılırsa tutar '
+            'yanlış çıkar.\n\nComboya geçmek için mevcut seçimleri kaldırmanız gerekiyor.',
+            style: TextStyle(fontSize: 13.5, color: Colors.grey[800], height: 1.4),
+          ),
+          const SizedBox(height: 14),
+          Row(children: [
+            ElevatedButton.icon(
+              onPressed: temizle,
+              icon: const Icon(Icons.restart_alt_rounded, size: 18),
+              label: const Text('Seçimleri kaldır ve devam et'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.amber[800], foregroundColor: Colors.white,
+                minimumSize: const Size(0, 44),
+              ),
+            ),
+          ]),
+        ]),
+      );
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.green[50],
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.green[200]!),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.card_giftcard_rounded, size: 22, color: Colors.green[700]),
+          const SizedBox(width: 8),
+          Text(comboEtiket.isNotEmpty ? comboEtiket : 'Combo paketi',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                  color: Colors.green[800])),
+        ]),
+        const SizedBox(height: 8),
+        Text('Paket içeriğini seçmek için devam edin. Paket fiyatı seçilen ürünlere '
+            'otomatik bölünür.',
+            style: TextStyle(fontSize: 13.5, color: Colors.grey[800], height: 1.4)),
+        const SizedBox(height: 14),
+        ElevatedButton.icon(
+          onPressed: devam,
+          icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+          label: const Text('Combo seçimine geç'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.green[700], foregroundColor: Colors.white,
+            minimumSize: const Size(0, 46),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  /// Sekme butonu (Varyant / Ekle-Cikar). Rozet = o sekmede kac secim yapildi.
+  Widget _sekmeButonu({
+    required bool secili,
+    required IconData ikon,
+    required String metin,
+    required VoidCallback onTap,
+    int rozet = 0,
+  }) {
+    return Material(
+      color: secili ? const Color(0xFF1F2937) : Colors.grey[100],
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(ikon, size: 16, color: secili ? Colors.white : Colors.grey[700]),
+            const SizedBox(width: 6),
+            Text(metin, style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: secili ? Colors.white : Colors.grey[800])),
+            if (rozet > 0) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: secili ? Colors.white24 : Colors.blue[600],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('$rozet', style: const TextStyle(
+                    fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+              ),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _sutunListesi(List<Widget> ler) => ler;
+
+  Widget _icerikCipi({
+    required String ad,
+    required double fiyat,
+    required bool secili,
+    required Color renk,
+    required VoidCallback onTap,
+  }) {
+    final fiyatMetni = fiyat == 0
+        ? ''
+        : '  ${fiyat > 0 ? '+' : '-'}${fiyat.abs().toStringAsFixed(0)}₺';
+    return Material(
+      color: secili ? renk.withOpacity(0.12) : Colors.grey[100],
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+                color: secili ? renk : Colors.grey[300]!, width: secili ? 1.6 : 1),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(secili ? Icons.check_circle : Icons.circle_outlined,
+                size: 16, color: secili ? renk : Colors.grey[400]),
+            const SizedBox(width: 6),
+            Text(ad, style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: secili ? FontWeight.w600 : FontWeight.normal,
+                color: secili ? renk : const Color(0xFF374151))),
+            if (fiyatMetni.isNotEmpty)
+              Text(fiyatMetni, style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey[700])),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /// 1 Agu 2026 — VARYANT EKRANI SECICI (TEK KARAR NOKTASI).
+  /// Mustafa: "combo ve varyant ayni anda aciksa POS'ta secim ekrani gosteriyorduk,
+  /// bunda nasil yapabiliriz?"
+  ///
+  /// Artik UC farkli varyant ekrani var. Hangisinin acilacagi TEK yerden belirlenir ki
+  /// hem urune tiklama, hem varyant butonu, hem de combo secim ekraninin "Varyant" dali
+  /// AYNI karari versin (kod tekrari ve davranis farki olmasin).
+  ///
+  /// Oncelik (en zengin ekran once):
+  ///   1. Icerik VEYA gruplu varyant varsa -> _openIcerikVaryantDialog (web muadili, bolumlu)
+  ///   2. variants_allow_multiple_pos      -> _openMultiVariantDialog  (coklu, fiyat toplanir)
+  ///   3. digerleri                        -> _openVariantDialogForProduct (tekli, eski akis)
+  Future<void> _varyantEkraniAc(Map<String, dynamic> product, List variants) async {
+    final _icerik = _urunIcerikleri(product).isNotEmpty;
+    final _gruplu = _urunGrupluVaryantli(product);
+    final _varyant = variants.isNotEmpty;
+
+    // 1 Agu 2026 (Mustafa: "ekle cikari da mevcut pencerede TAB olarak eklesene, bosa tik
+    // yapmasin sonucta ayni urune ait") — HEM varyant HEM icerik varsa ARTIK ARA SECIM
+    // EKRANI YOK. Tek pencere acilir, ust tarafta "Varyant | Ekle/Cikar" sekmeleri olur.
+    // Secimler sekme degisince korunur, tek "Ekle" butonu hepsini birlikte uygular.
+    if (_icerik && _varyant) {
+      await _openIcerikVaryantDialog(product, variants, mod: 'hepsi');
+      return;
+    }
+
+    // Tek ozellik varsa dogrudan o ekran
+    if (_icerik && !_varyant) {
+      await _openIcerikVaryantDialog(product, variants, mod: 'icerik');
+      return;
+    }
+    if (_gruplu) {
+      await _openIcerikVaryantDialog(product, variants, mod: 'varyant');
+      return;
+    }
+    if (_posCokluVaryant(product)) {
+      await _openMultiVariantDialog(product, variants);
+      return;
+    }
+    await _openVariantDialogForProduct(product, variants);
+  }
+
+  bool _urunGrupluVaryantli(Map<String, dynamic> product) {
+    final variants = (product['variants'] is List) ? product['variants'] as List : const [];
+    return variants.any((v) =>
+        v is Map && (v['group_name'] ?? '').toString().trim().isNotEmpty);
+  }
+
+  double _icerikFiyati(Map<String, dynamic> i) {
+    final p = i['price'];
+    if (p is num) return p.toDouble();
+    return double.tryParse('${p ?? ''}') ?? 0;
+  }
+
+  /// 31 Tem 2026 — POS VARYANT COKLU SECIM (panel > Urun Duzenle > Varyant Ayarlari).
+  /// Web'deki variants_allow_multiple'in POS karsiligi; AYRI kolon okur, web davranisi degismez.
+  /// COMBO ILE ILGISI YOK: combo = paket/set mantigi (N kalem, indirim); bu = TEK kalemin
+  /// uzerine birden fazla varyant farkinin eklenmesi. Kapaliyken (varsayilan) eski tekli akis.
+  // 1 Agu 2026 — TEK KAYNAK: bayrak okuma kurali ComboCalculator'da.
+  bool _posCokluVaryant(Map<String, dynamic> product) =>
+      ComboCalculator.posCokluVaryant(product);
+
+  bool _posVaryantZorunlu(Map<String, dynamic> product) =>
+      ComboCalculator.posVaryantZorunlu(product);
+
   Future<void> _openVariantDialogForProduct(Map<String, dynamic> product, List variants) async {
+    if (_posCokluVaryant(product)) {
+      await _openMultiVariantDialog(product, variants);
+      return;
+    }
     final basePrice = _restaurantBasePrice(product);
     final productName = product['name']?.toString() ?? '';
     final result = await showDialog<Map<String, dynamic>?>(
       context: context,
       builder: (ctx) {
         final tiles = <Widget>[
+          // 1 Agu 2026: sabit "1 Porsiyon" yerine URUN ADI (bkz. coklu ekrandaki not).
           _variantOptionTile(
-            label: '1 Porsiyon',
+            label: productName,
             price: basePrice,
             selected: false,
             onTap: () => Navigator.pop(ctx, {'variant': null}),
@@ -403,6 +1427,13 @@ class _AddItemModalState extends State<AddItemModal> {
     final String giftMode = t['giftMode'] as String;
     final int giftPerSet = t['G'] as int;
     final productName = product['name']?.toString() ?? '';
+    // 31 Tem 2026 — LIMITSIZ SECIM (panel > combo pop > "Sadece POS").
+    // Acikken N adedin tamami secilmeden de "Sepete Ekle" CALISIR; indirim backend'de
+    // secilen adede ORANLANIR (panel-direct/comboCalculator kismiSet). Kapaliyken eski
+    // davranis: tam sayi secilmeden buton pasif. ⚠️ SADECE POS — web/telefon okumaz.
+    // 31 Tem 2026: cevrimdisi cache 0/1 doner (bkz. combo_calculator._truthy).
+    final _u = product['combo_pos_unlimited'];
+    final bool posUnlimited = _u == true || _u == 1 || _u == '1' || _u == 'true';
     final basePrice = _restaurantBasePrice(product);
     final variants = (product['variants'] is List) ? product['variants'] as List : const [];
 
@@ -415,7 +1446,8 @@ class _AddItemModalState extends State<AddItemModal> {
     // GERCEK combo degeri (baz+mod) — extra hediye "en ucuz" secimi BUNA gore (B1 fix: POS+telefon
     // ayni, gercek fiyata gore en ucuz musteri lehine hediye).
     final options = <Map<String, dynamic>>[
-      {'name': '1 Porsiyon', 'price': basePrice, 'note': null, 'mod': 0.0, 'realValue': basePrice},
+      // 1 Agu 2026: combo secim ekraninda da sabit metin yerine URUN ADI.
+      {'name': productName, 'price': basePrice, 'note': null, 'mod': 0.0, 'realValue': basePrice},
       ...variants.map((v) {
         final mod = _variantModifier(Map<String, dynamic>.from(v as Map));
         final vname = v['name']?.toString() ?? '';
@@ -439,7 +1471,9 @@ class _AddItemModalState extends State<AddItemModal> {
         return StatefulBuilder(builder: (ctx, setSt) {
           final target = stepPerSet * setCount;
           final selected = picks.length;
-          final canAdd = selected == target && selected > 0;
+          // 31 Tem 2026: limitsiz secimde EKSIK adetle de eklenebilir (en az 1).
+          final canAdd = posUnlimited ? (selected > 0) : (selected == target && selected > 0);
+          final kismiSecim = posUnlimited && selected > 0 && selected < target;
           // extra modda hediye vurgusu: secilen en ucuz (giftPerSet*setCount) tane bilgi amacli isaretlenir.
           final giftCount = giftMode == 'extra' ? giftPerSet * setCount : 0;
           return Dialog(
@@ -500,6 +1534,8 @@ class _AddItemModalState extends State<AddItemModal> {
                               priceLabel: priceLabel,
                               selected: cnt > 0,
                               onTap: () {
+                                // Limitsizde de hedefi ASMA — eksik secime izin var, fazlaya degil
+                                // (fazla secim set mantigini bozar; kullanici "Set daha" ile artirir).
                                 if (picks.length >= target) return; // hedefe ulasti -> ekleme yok
                                 setSt(() => picks.add(Map<String, dynamic>.from(opt)));
                               },
@@ -540,7 +1576,11 @@ class _AddItemModalState extends State<AddItemModal> {
                           backgroundColor: canAdd ? Colors.green[700] : Colors.grey[300],
                           foregroundColor: Colors.white, minimumSize: const Size(0, 48),
                         ),
-                        child: Text(canAdd ? 'Sepete Ekle ($selected)' : 'Kalan: ${target - selected}'),
+                        child: Text(!canAdd
+                            ? 'Kalan: ${target - selected}'
+                            : (kismiSecim
+                                ? 'Sepete Ekle ($selected/$target)'   // eksik set — indirim oranlanacak
+                                : 'Sepete Ekle ($selected)')),
                       ),
                     ),
                   ]),
@@ -560,18 +1600,42 @@ class _AddItemModalState extends State<AddItemModal> {
     // extra modda en ucuz (giftPerSet*setCount) tane HEDIYE slotu EKLENMEZ (backend uretir).
     // within/percent/amount'ta giftCount=0 -> hepsi eklenir. Statik+test edilebilir yardimci.
     final giftCount = (giftMode == 'extra') ? giftPerSet * setCount : 0;
+    // paidPicks ARTIK SADECE PAKET TUTARINI hesaplamak icin: hediye BEDAVA oldugu icin onun
+    // varyant sursarji pakete eklenmez (en ucuz giftCount kalem cikarilir).
     final paidPicks = ComboCalculator.paidPicksAfterGift(picks, giftCount);
     // FIYAT BOLME (Mustafa kesin kural): combo=PAKET. Bolunecek toplam = ana restoran fiyati +
     // secilen odenen kalemlerin POZITIF modifier toplami. N odenen kaleme ESIT bolunur (kurus son
     // kaleme). Negatif modifier (-940 = baz-sifirla niyeti) toplama katilmaz. Or N=2 baz 940:
     // iki normal -> 470+470; bir +100 -> 1040/2=520+520. ₺0 kalem/ciro kaybi YOK.
     final paidMods = paidPicks.map((p) => (p['mod'] as double?) ?? 0.0).toList();
-    final splitPrices = ComboCalculator.splitComboPackagePrice(paidMods, basePrice);
-    for (int i = 0; i < paidPicks.length; i++) {
-      final p = paidPicks[i];
+    // 🔴 1 Agu 2026 (Mustafa: "mutfak gormesi lazim olur mu canim") — EXTRA MODU DEGISTI.
+    // ESKI: hediye kalemi adisyona HIC eklenmiyordu; backend kapanista ₺0 satir uretiyordu.
+    //       Ama o satir printed=1 ile ve KAPANISTA yaziliyordu -> MUTFAK HIC GORMUYORDU.
+    //       Musteri 3 urun seciyor, mutfak 2 yapiyordu.
+    // YENI: secilen TUM kalemler (N+G) adisyona girer -> kasiyer gorur, mutfak fisine duser.
+    // PARA DEGISMEDI: bolunecek paket tutari YINE SADECE odenen kalemlerin modifier'i +
+    // baz fiyat (hediyenin sursarji dahil edilmez); sadece daha cok kaleme bolunur.
+    // Backend kapanista bu paket icin IKINCI bir hediye satiri URETMEZ (combo_group_id tespiti).
+    final splitPrices = ComboCalculator.splitComboPackagePrice(paidMods, basePrice,
+        satirSayisi: picks.length);
+    // 31 Tem 2026 — BU SECIM ICIN TEK PAKET KIMLIGI.
+    // Karar (Mustafa): bir secim ekrani = bir grup. "Set daha" ile artirilan setler AYNI gruba
+    // girer (web davranisiyla ayni); kasiyer combo urune TEKRAR tiklayip yeni secim yaparsa
+    // bu fonksiyon yeniden calisir ve YENI kimlik uretilir → fiste ayri paket gorunur.
+    // Format web ile ayni ailede ('cg' + zaman) ama POS'ta ayni milisaniyede iki ekleme
+    // olabildigi icin sonuna MIKROSANIYE eki konur (cakisma = iki farkli paket birlesir).
+    // Ayni milisaniyedeki iki cagri farkli mikrosaniye alir → kimlik ayrisir.
+    final comboGid = 'cg${DateTime.now().millisecondsSinceEpoch}'
+        '${(DateTime.now().microsecondsSinceEpoch % 100000).toString().padLeft(5, '0')}';
+    for (int i = 0; i < picks.length; i++) {
+      final p = picks[i];
       final note = p['note'] as String?;
       final display = note != null ? '$productName ($note)' : productName;
-      _addProductWithPrice(product, display, splitPrices[i], variantNote: note);
+      _addProductWithPrice(product, display, splitPrices[i],
+        variantNote: note,
+        comboGroupId: comboGid,
+        comboGroupName: productName,          // ANA urun adi → fiste ust satir
+        comboPickName: note ?? productName);  // secilen varyant → fiste alt satir
     }
   }
 
@@ -605,8 +1669,57 @@ class _AddItemModalState extends State<AddItemModal> {
     final prod = _products.where((p) => p['id'] == productId).firstOrNull;
     if (prod == null) return;
 
+    // =========================================================================
+    // 1 Agu 2026 (Mustafa) — VARYANT BUTONU İKİ KİLİT
+    // "varyant seçiyorum kaydetmiyor, bu doğru bir davranış ama ... seçtirmemesi
+    //  lazım. bir de fiş çıktıysa da düzenlemeye izin de vermemesi lazım"
+    // Eskiden pencere açılıp seçim yaptırıyor, sonra sessizce kaydetmiyordu —
+    // kasiyer seçtim sanıyordu. Artık HİÇ AÇILMIYOR, sebebi yazıyor.
+    //
+    // ⚠️ KAPSAM: bu kilit SADECE yazdırılmış kalemin varyantla İÇERİĞİNİN
+    //    değiştirilmesini engeller. Ürün İPTAL akışı DEĞİŞMEDİ — yetkisi olan
+    //    (cancel_item / cancel_item_unprinted) eskisi gibi sebep seçip iptal eder.
+    // =========================================================================
+    // KİLİT 1 — FİŞ MUTFAĞA GİTTİYSE İÇERİK DEĞİŞMEZ.
+    // 'printed' SQLite'ta INTEGER (1) / API'de bool → iki şekil de kabul
+    // (dosyadaki mevcut idiom, satır ~2389 ile aynı).
+    final bool _fisCikti = item['printed'] == 1 || item['printed'] == true;
+    if (_fisCikti) {
+      _showError('Bu ürünün fişi mutfağa gitti — varyantı değiştirilemez. '
+          'Değişmesi gerekiyorsa ürünü iptal edip yeniden ekleyin.');
+      return;
+    }
+
+    // KİLİT 2 — COMBO ÜRÜNDE VARYANT SONRADAN DEĞİŞTİRİLEMEZ.
+    // Combo paketinin fiyatı seçilen N kaleme BÖLÜNEREK yazılır
+    // (splitComboPackagePrice). Kalem tek başına varyantla değiştirilirse bölünmüş
+    // fiyat ile yeni varyant modifier'ı tutmaz → adisyon tutarı YANLIŞ olur.
+    if (_comboIsActive(Map<String, dynamic>.from(prod))) {
+      final ad = prod['name']?.toString() ?? 'Bu ürün';
+      _showError('$ad combo ürünü — varyant sonradan değiştirilemez. '
+          'Combo paketinin fiyatı seçilen ürünlere bölündüğü için kalemi iptal edip '
+          'combo seçimini yeniden yapmanız gerekir.');
+      return;
+    }
+
     final variants = (prod['variants'] is List) ? prod['variants'] as List : const [];
     if (variants.isEmpty) return;
+
+    // 1 Agu 2026 — VARYANT BUTONU ARTIK AYNI KODDAN BESLENIYOR.
+    // Urunde "Varyantlarda Coklu Secim (POS)" acikas coklu ekran acilir ve secili kalem
+    // GUNCELLENIR (yeni kalem eklenmez). Kapaliysa asagidaki TEKLI akis aynen calisir —
+    // yani mevcut davranis bozulmaz.
+    final _p = Map<String, dynamic>.from(prod);
+    if (_urunIcerikleri(_p).isNotEmpty || _urunGrupluVaryantli(_p)) {
+      // Icerik/gruplu varyant ekrani YENI KALEM ekler (guncelleme modu yok) — kasiyer
+      // eski kalemi silip yenisini ekler. Coklu ekranin guncelleme modu korunuyor.
+      await _openIcerikVaryantDialog(_p, variants);
+      return;
+    }
+    if (_posCokluVaryant(_p)) {
+      await _openMultiVariantDialog(_p, variants, guncellenecekKalem: item);
+      return;
+    }
 
     final basePrice = _restaurantBasePrice(Map<String, dynamic>.from(prod));
     final productName = prod['name']?.toString() ?? '';
@@ -626,8 +1739,9 @@ class _AddItemModalState extends State<AddItemModal> {
       context: context,
       builder: (ctx) {
         final tiles = <Widget>[
+          // 1 Agu 2026: sabit "1 Porsiyon" yerine URUN ADI (bkz. coklu ekrandaki not).
           _variantOptionTile(
-            label: '1 Porsiyon',
+            label: productName,
             price: basePrice,
             selected: currentSelectedId == null,
             onTap: () => Navigator.pop(ctx, {'variant': null}),
@@ -717,6 +1831,9 @@ class _AddItemModalState extends State<AddItemModal> {
     required String title,
     String subtitle = 'Varyant secin',
     required List<Widget> tiles,
+    // 31 Tem 2026: coklu secimde alt bar (secim ozeti + toplam + Ekle). Tekli akista null
+    // -> dialog eskisiyle BIREBIR ayni kalir (tile'a tiklayinca kapanir, buton yok).
+    Widget? altBar,
   }) {
     final screen = MediaQuery.of(ctx).size;
     // Kac sutun sigar (tile genisligi + 10 bosluk), 1..4 arasi; varyant sayisini gecmesin.
@@ -750,6 +1867,12 @@ class _AddItemModalState extends State<AddItemModal> {
                 ),
               ),
             ),
+            if (altBar != null) ...[
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              altBar,
+            ],
           ],
         ),
       ),
@@ -793,8 +1916,14 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
+  /// 31 Tem 2026 — COMBO PAKET KIMLIGI (comboGroupId/comboGroupName/comboPickName)
+  /// Ayni combo seciminden gelen kalemler AYNI comboGroupId'yi tasir → fis, mutfak ekrani ve
+  /// adisyon ekrani bunlari ANA URUN altinda gruplayabilir. Alan adlari panel_orders.items[]
+  /// icindeki WEB STANDARDIYLA AYNI (api/kitchen.js + admin/kitchen.html gruplama UI'i HAZIR).
+  /// Combo DISI eklemelerde null gecilir → hicbir davranis degismez (geri uyumlu).
   Future<void> _addProductWithPrice(Map<String, dynamic> product, String displayName, double price,
-      {String? variantNote}) async {
+      {String? variantNote, String? comboGroupId, String? comboGroupName, String? comboPickName,
+      List<Map<String, dynamic>>? extras}) async {
     try {
       final productId = _safeInt(product['id']);
       if (productId == null) return;
@@ -817,8 +1946,13 @@ class _AddItemModalState extends State<AddItemModal> {
           'status': 'active',
           'printed': 0,
           'notes': variantNote,
-          'extras': [],
+          // 31 Tem 2026: POS coklu varyant secimleri — sunucu cevabi beklenmeden alt satirlar cikar.
+          'extras': extras ?? const [],
           'skip_pos_print': skipPosPrint,
+          // 31 Tem 2026: optimistic satirda da tasi → sunucu cevabi gelmeden gruplu gorunur
+          'combo_group_id': comboGroupId,
+          'combo_group_name': comboGroupName,
+          'combo_pick_name': comboPickName,
         });
       });
 
@@ -841,6 +1975,10 @@ class _AddItemModalState extends State<AddItemModal> {
         notes: variantNote,
         waiterId: widget.waiterId,
         clientTempId: tempId,
+        comboGroupId: comboGroupId,
+        comboGroupName: comboGroupName,
+        comboPickName: comboPickName,
+        extras: extras,
       ).then((response) {
         widget.onItemAdded();
         if (!mounted) return;
@@ -3216,7 +4354,7 @@ class _AddItemModalState extends State<AddItemModal> {
     for (final p in _products) {
       final id = _safeInt(p['id']);
       if (id == null) continue;
-      final enabled = p['combo_enabled'] == true || p['combo_enabled'] == 1;
+      final enabled = ComboCalculator.comboAktif(Map<String, dynamic>.from(p)); // TEK KAYNAK
       if (enabled) byId[id.toString()] = p;
     }
     if (byId.isEmpty) return ComboCartResult();
@@ -3858,6 +4996,60 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
+  /// Kalemin `extras` alanindan alt satirlar uretir (POS coklu varyant secimleri).
+  /// Backend jsonb doner (List), cevrimdisi cache JSON METIN saklar -> ikisini de coz.
+  /// Hatali/eksik veride BOS liste -> satir eskisi gibi cizilir (gorunum bozulmaz).
+  List<Widget> _secimAltSatirlari(Map<String, dynamic> item) {
+    final raw = item['extras'];
+    List list;
+    if (raw is List) {
+      list = raw;
+    } else if (raw is String && raw.trim().isNotEmpty) {
+      try {
+        final d = jsonDecode(raw);
+        list = d is List ? d : const [];
+      } catch (_) {
+        return const [];
+      }
+    } else {
+      return const [];
+    }
+    if (list.isEmpty) return const [];
+    return [
+      for (final e in list)
+        if (e is Map) _secimAltSatiri(e),
+    ];
+  }
+
+  /// 1 Agu 2026 — ADISYONDA COMBO GRUPLU GORUNUM (Mustafa: "ana kartin altinda sonradan
+  /// eklenenler yine TIKLANABILIR olacak, not girmek icin falan").
+  ///
+  /// TASARIM KARARI: liste YENIDEN YAPILANDIRILMADI. Her kalem kendi satiri olarak kalir —
+  /// yani secim, not girme, silme, parcali odeme HEPSI aynen calisir. Sadece GORSEL olarak
+  /// gruplanir: grubun ILK kaleminin ustune ana urun basligi cizilir, kalem adlari girintili
+  /// secim adina doner.
+  /// Kanit kurali fisle AYNI: combo_group_id dolu + ayni kimlikte >=2 kalem. Yoksa hicbir sey
+  /// degismez (eski gorunum birebir).
+  Map<String, dynamic> _comboGrupBilgi(Map<String, dynamic> item) {
+    final gid = (item['combo_group_id'] ?? '').toString().trim();
+    if (gid.isEmpty) return const {'grupluMu': false};
+    final uyeler = _ticketItems
+        .where((x) =>
+            x['status'] != 'cancelled' &&
+            (x['combo_group_id'] ?? '').toString().trim() == gid)
+        .toList();
+    if (uyeler.length < 2) return const {'grupluMu': false};
+    final ilkId = _safeInt(uyeler.first['id']);
+    final buId = _safeInt(item['id']);
+    final ad = (item['combo_group_name'] ?? '').toString().trim();
+    return {
+      'grupluMu': true,
+      'ilkMi': ilkId != null && buId != null && ilkId == buId,
+      'ad': ad.isNotEmpty ? ad : (item['product_name'] ?? '').toString(),
+      'adet': uyeler.length,
+    };
+  }
+
   Widget _buildTicketItemRow(Map<String, dynamic> item, ThemeProvider theme, int index, bool isSelected) {
     final quantity = _safeInt(item['quantity']) ?? 1;
     final unitPrice = _safeDouble(item['unit_price']);
@@ -3874,6 +5066,13 @@ class _AddItemModalState extends State<AddItemModal> {
     // restoran yazıcısına gönderilmeyen, garson elden getiren ürünler).
     final skipRaw = item['skip_pos_print'];
     final isSkipPrint = skipRaw == true || skipRaw == 1 || skipRaw == '1' || skipRaw == 'true' || skipRaw == 't';
+    // Combo gruplu gorunum bilgisi (hata olursa gruplama YOK -> eski gorunum).
+    Map<String, dynamic> _grupBilgi;
+    try {
+      _grupBilgi = _comboGrupBilgi(item);
+    } catch (_) {
+      _grupBilgi = const {'grupluMu': false};
+    }
 
     // 22 May 2026: Dokunmatik POS — GestureDetector → InkWell (ripple)
     return Material(
@@ -3888,7 +5087,11 @@ class _AddItemModalState extends State<AddItemModal> {
         splashColor: theme.primaryColor.withOpacity(0.18),
         highlightColor: theme.primaryColor.withOpacity(0.08),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+          // 31 Tem 2026 (Mustafa): "adisyon kalemleri cok buyuk, uzunlugu kisalsin, amac daha
+          // COK URUN SIGMASI". Olculu kucultme: dikey bosluk 16->9, adet rozeti 40->34,
+          // yazi 18->16.5. Satir ~105px -> ~80px (%25 daha fazla kalem). Dokunma alani
+          // hala ~80px (44px esiginin cok ustunde) — dokunmatik kasada kayip yok.
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
             border: Border(
               bottom: BorderSide(color: Colors.grey[200]!),
@@ -3899,38 +5102,71 @@ class _AddItemModalState extends State<AddItemModal> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
-              width: 40,
-              height: 40,
+              width: 34,
+              height: 34,
               decoration: BoxDecoration(
                 color: isPaid ? Colors.green : theme.primaryColor,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Center(child: Text('$quantity', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18))),
+              child: Center(child: Text('$quantity', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16))),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // 1 Agu 2026: combo grubunda ILK kalemin ustunde ANA URUN basligi.
+                  if (_grupBilgi['grupluMu'] == true && _grupBilgi['ilkMi'] == true)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Row(children: [
+                        Icon(Icons.card_giftcard_rounded, size: 14, color: Colors.green[700]),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            _grupBilgi['ad']?.toString() ?? '',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green[800],
+                            ),
+                          ),
+                        ),
+                        Text('${_grupBilgi['adet']} secim',
+                            style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                      ]),
+                    ),
                   Text(
-                    item['product_name']?.toString() ?? '',
+                    // Grupluysa kalem adi yerine SECIM adi gosterilir (fisle ayni gorunum).
+                    _grupBilgi['grupluMu'] == true
+                        ? '• ' +
+                            ((item['combo_pick_name'] ?? item['product_name'] ?? '').toString())
+                        : (item['product_name']?.toString() ?? ''),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
+                      fontSize: _grupBilgi['grupluMu'] == true ? 14.5 : 16.5,
+                      fontWeight: _grupBilgi['grupluMu'] == true
+                          ? FontWeight.w500
+                          : FontWeight.w600,
                       color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
                     ),
                   ),
                   if (notes != null && notes.isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(notes, style: TextStyle(fontSize: 14, color: Colors.grey[600], fontStyle: FontStyle.italic)),
+                      padding: const EdgeInsets.only(top: 1),
+                      child: Text(notes, style: TextStyle(fontSize: 12.5, color: Colors.grey[600], fontStyle: FontStyle.italic)),
                     ),
+                  // 31 Tem 2026 — POS VARYANT COKLU SECIM: secimler urun adinin ALTINDA
+                  // satir satir (web deseni). Urun adi TEMIZ kalir. extras yoksa (combo'suz,
+                  // tekli varyantli, eski kayitlar) HICBIR SEY cizilmez -> gorunum aynen eskisi.
+                  ..._secimAltSatirlari(item),
                   // Ekleyen garson + saat — Omer Bey istegi
                   if (addedBy.isNotEmpty || addedTime.isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.only(top: 4),
+                      padding: const EdgeInsets.only(top: 2),
                       child: Row(children: [
                         Icon(Icons.person_outline, size: 12, color: Colors.grey[500]),
                         const SizedBox(width: 3),
@@ -3975,12 +5211,12 @@ class _AddItemModalState extends State<AddItemModal> {
                 Text(
                   '${total.toStringAsFixed(2)}',
                   style: TextStyle(
-                    fontSize: 18,
+                    fontSize: 16.5,
                     fontWeight: FontWeight.bold,
                     color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
                   ),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 if (!isSkipPrint)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),

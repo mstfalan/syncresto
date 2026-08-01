@@ -32,6 +32,19 @@ class WebSocketService {
   void removeCacheInvalidateListener(void Function(List<String>) l) {
     _cacheInvalidateListeners.remove(l);
   }
+  // 31 Tem 2026 KISMI GUNCELLEME: yukaridaki liste SADECE types tasir; backend artik
+  // payload'a degisen masalarin GUNCEL SATIRLARINI da koyuyor (table_ids + tables).
+  // Eski imzayi (List<String>) BOZMAMAK icin AYRI bir liste: ham payload'i isteyen
+  // ekranlar buraya kayit olur. Boylece TablesScreen tam liste cekmeden gridi
+  // guncelleyebilir (yogun saatte ~5.4k istek/saat tasarruf, 31 Tem olcumu).
+  // Kayitli dinleyici yoksa hicbir maliyet yok; exception digerlerini OLDURMEZ.
+  final List<void Function(List<String>, Map<String, dynamic>)> _cacheInvalidateRawListeners = [];
+  void addCacheInvalidateRawListener(void Function(List<String>, Map<String, dynamic>) l) {
+    if (!_cacheInvalidateRawListeners.contains(l)) _cacheInvalidateRawListeners.add(l);
+  }
+  void removeCacheInvalidateRawListener(void Function(List<String>, Map<String, dynamic>) l) {
+    _cacheInvalidateRawListeners.remove(l);
+  }
   // 16 May 2026: Aynı tenant POS'lar arası kitchen print broadcast
   // payload: { ticket_id, ticket_number, table_number, printer_groups, source_socket_id, ... }
   Function(Map<String, dynamic>)? onKitchenPrint;
@@ -246,6 +259,14 @@ class WebSocketService {
           }
           if (types.isNotEmpty) {
             print('[WebSocket] cache:invalidate -> $types');
+            // 31 Tem 2026: ham payload isteyen dinleyiciler (kismi masa guncellemesi).
+            // data Map degilse bos gonderilir → dinleyici tam-fetch fallback'ine duser.
+            if (_cacheInvalidateRawListeners.isNotEmpty) {
+              final raw = (data is Map) ? Map<String, dynamic>.from(data) : <String, dynamic>{};
+              for (final l in List<void Function(List<String>, Map<String, dynamic>)>.from(_cacheInvalidateRawListeners)) {
+                try { l(types, raw); } catch (e) { print('[WebSocket] cacheInvalidateRaw listener hata: $e'); }
+              }
+            }
             onCacheInvalidate?.call(types);
             // 21 Tem 2026 fan-out — kopya liste (iterasyon sirasinda remove guvenli);
             // bir listener'in exception'i digerlerini ve global slotu OLDURMEZ.

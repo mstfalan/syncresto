@@ -932,13 +932,31 @@ class SyncService {
           print('[Sync] Close: Server ID resolve edilemedi, bekleniyor...');
           return false;
         }
-        final closeResponse = await _dio!.post('/api/pos/tickets/$closeServerId/close', data: {
-          'payment_method': payload['payment_method'],
-          'waiter_id': payload['waiter_id'] ?? 1,
-          'discount_amount': payload['discount_amount'] ?? 0,
-          if (payload['discount_type'] != null) 'discount_type': payload['discount_type'],
-          'is_offline': true, // yetki bypass icin
-        });
+        // 31 Tem 2026 — 404 = ISLEM ZATEN TAMAM. Backend verifyTicketOwnership SADECE
+        // id+panel_id bakar; 404 "boyle bir adisyon yok" demektir (online kapatma zaten
+        // gecti, adisyon silindi, ya da kayit baska kiraciya ait yetim). Yeniden denemek
+        // ASLA basaramaz -> 3 tur sonra dead_letter -> kasada KALICI kirmizi "senkronize
+        // olmuyor" uyarisi, oysa hicbir sey kayip degil. Kapatma/iptal dogasi geregi
+        // idempotent: hedef durum zaten saglanmis. Diger hatalar (500/timeout) eskisi gibi
+        // retry'a gider — SADECE 404 tamamlanmis sayilir.
+        Response? closeResponse;
+        try {
+          closeResponse = await _dio!.post('/api/pos/tickets/$closeServerId/close', data: {
+            'payment_method': payload['payment_method'],
+            'waiter_id': payload['waiter_id'] ?? 1,
+            'discount_amount': payload['discount_amount'] ?? 0,
+            if (payload['discount_type'] != null) 'discount_type': payload['discount_type'],
+            'is_offline': true, // yetki bypass icin
+          });
+        } on DioException catch (e) {
+          if (e.response?.statusCode == 404) {
+            await _localDb.markSyncComplete(syncId);
+            print('[Sync] Ticket close 404 -> sunucuda yok, ZATEN TAMAM sayildi: server=$closeServerId');
+            _logService.logSync('Ticket close 404 (zaten kapali/yok) tamam sayildi', operation: 'ticket_close', count: 1);
+            return true;
+          }
+          rethrow; // 500/timeout vs. -> _processSyncItem retry akisi
+        }
         if (closeResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Ticket close sync başarılı: server=$closeServerId');
@@ -955,11 +973,25 @@ class SyncService {
           print('[Sync] Void: Server ID resolve edilemedi, bekleniyor...');
           return false;
         }
-        final voidResponse = await _dio!.post('/api/pos/tickets/$voidServerId/void', data: {
-          if (payload['reason'] != null) 'reason': payload['reason'],
-          'waiter_id': payload['waiter_id'] ?? 1,
-          'is_offline': true,
-        });
+        // 31 Tem 2026 — 404 = ISLEM ZATEN TAMAM (close ile ayni gerekce, yukariya bak).
+        // Yasanmis vaka: kiraci degisiminden kalma yetim adisyonun iptali 3 kez 404 alip
+        // dead_letter'a dustu; kasada kalici kirmizi uyari cikti, oysa kayip YOKTU.
+        Response? voidResponse;
+        try {
+          voidResponse = await _dio!.post('/api/pos/tickets/$voidServerId/void', data: {
+            if (payload['reason'] != null) 'reason': payload['reason'],
+            'waiter_id': payload['waiter_id'] ?? 1,
+            'is_offline': true,
+          });
+        } on DioException catch (e) {
+          if (e.response?.statusCode == 404) {
+            await _localDb.markSyncComplete(syncId);
+            print('[Sync] Ticket void 404 -> sunucuda yok, ZATEN TAMAM sayildi: server=$voidServerId');
+            _logService.logSync('Ticket void 404 (zaten iptal/yok) tamam sayildi', operation: 'ticket_void', count: 1);
+            return true;
+          }
+          rethrow;
+        }
         if (voidResponse.statusCode == 200) {
           await _localDb.markSyncComplete(syncId);
           print('[Sync] Ticket void sync başarılı: server=$voidServerId');
@@ -1084,6 +1116,19 @@ class SyncService {
   /// her 10sn bosa deneme onlenir. Parent yok + resolve zaten null ise kayit hicbir zaman
   /// cozulemeyecegi icin fail dogru karardir. Parent canli (pending/in_progress) ise false doner
   /// (bekle, retry HARCAMA — normal davranis korunur). close/void/add_item/mark_printed ortak.
+  /// Lokal kuyrukta extras JSON METIN olarak durur; backend dizi bekler.
+  /// Bozuk/eski kayitta sessizce bos dizi -> kalem yine de eklenir (veri kaybi yok).
+  static List<dynamic> _decodeExtras(dynamic raw) {
+    if (raw is List) return raw;
+    if (raw is String && raw.trim().isNotEmpty) {
+      try {
+        final d = jsonDecode(raw);
+        if (d is List) return d;
+      } catch (_) {}
+    }
+    return const [];
+  }
+
   Future<bool> _failIfParentDead(int syncId, String context) async {
     final db = await _localDb.database;
     final row = await db.query('sync_queue',
@@ -1168,6 +1213,14 @@ class SyncService {
           'notes': payload['notes'],
           'waiter_id': payload['waiter_id'] ?? 1,
           if (payload['portion'] != null) 'portion': payload['portion'], // v11: offline porsiyon backend'e
+          // v16 (31 Tem 2026): combo paket kimligi cevrimdisi eklemede de KORUNSUN — yoksa
+          // internet gelince sync olan combo kalemleri fiste gruplanmaz, duz liste kalirdi.
+          if (payload['combo_group_id'] != null) 'combo_group_id': payload['combo_group_id'],
+          if (payload['combo_group_name'] != null) 'combo_group_name': payload['combo_group_name'],
+          if (payload['combo_pick_name'] != null) 'combo_pick_name': payload['combo_pick_name'],
+          // 31 Tem 2026: POS coklu varyant secimleri (extras) cevrimdisi replay'de de gitsin.
+          // Lokalde JSON METIN olarak saklanir; backend JSON dizi bekler -> coz.
+          if (payload['extras'] != null) 'extras': _decodeExtras(payload['extras']),
           'is_offline': true, // Offline sync - kapalı ticket'a da eklenebilir
         });
 

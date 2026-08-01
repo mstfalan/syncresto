@@ -759,7 +759,53 @@ class PrinterService {
 
     // Items
     final items = ticket['items'] as List? ?? [];
-    for (final item in items) {
+    // 1 Agu 2026 — COMBO GRUPLAMA (Mustafa: "ana urunun adi yazicak, secilenler altinda
+    // sanki o urunun varyantiymis gibi listelensin").
+    // 🔴 FIS SOZLESMESI: gruplama SADECE kanit varsa (combo_group_id dolu + ayni kimlikte >=2
+    // kalem). Kanit yoksa `_comboGrupla` listeyi AYNEN, SIRASI BOZULMADAN doner -> combo'suz
+    // siparislerde cikti BIREBIR eskisi gibi. Hesaplama patlasa bile fis DUSMEZ: catch ile
+    // duz listeye donuluyor.
+    List<Map<String, dynamic>> _satirlar;
+    try {
+      _satirlar = _comboGrupla(items);
+    } catch (grupErr) {
+      print('[Printer] combo gruplama atlandi (duz listeye donuldu): $grupErr');
+      _satirlar = items.map((e) => {'tip': 'tek', 'kalem': e}).toList();
+    }
+
+    for (final _s in _satirlar) {
+      // ---- COMBO GRUBU: ana urun ustte, secimler altinda ----
+      if (_s['tip'] == 'grup') {
+        final gAd = _turkishToAscii(_s['ad'] ?? '');
+        final gAdet = _s['adet'] ?? 1;
+        final gTutar = (_s['tutar'] ?? 0).toDouble();
+        bytes += generator.row([
+          PosColumn(
+            text: '$gAdet x $gAd',
+            width: 8,
+            styles: const PosStyles(align: PosAlign.left, bold: true),
+          ),
+          PosColumn(
+            text: '${gTutar.toStringAsFixed(2)} TL',
+            width: 4,
+            styles: const PosStyles(align: PosAlign.right, bold: true),
+          ),
+        ]);
+        for (final sec in (_s['secimler'] as List)) {
+          bytes += generator.text('   - ${_turkishToAscii(sec)}');
+        }
+        // Grup uyelerinin notlari kaybolmasin
+        for (final u in (_s['uyeler'] as List)) {
+          final n = (u is Map) ? u['notes'] : null;
+          if (n != null && n.toString().trim().isNotEmpty) {
+            bytes += generator.text('   * ${_turkishToAscii(n)}');
+          }
+        }
+        continue;
+      }
+
+      // ---- TEK KALEM: eski akis, HIC DEGISMEDI ----
+      final item = _s['kalem'];
       final name = _turkishToAscii(item['product_name'] ?? '');
       final qty = item['quantity'] ?? 1;
       final price = (item['unit_price'] ?? 0).toDouble() * qty;
@@ -776,6 +822,21 @@ class PrinterService {
           styles: const PosStyles(align: PosAlign.right),
         ),
       ]);
+
+      // 31 Tem 2026 — POS varyant coklu secimleri (extras) MUSTERI fisinde de gorunsun.
+      // Kalemde extras YOKSA hicbir sey basilmaz -> combo'suz/eski siparislerde cikti
+      // BIREBIR eskisi gibi kalir. Hata olursa fis DUSMEZ (try/catch, duz listeye don).
+      try {
+        final ex = item['extras'];
+        if (ex is List && ex.isNotEmpty) {
+          for (final e in ex) {
+            final satir = _extraSatiri(e);
+            if (satir.isNotEmpty) {
+              bytes += generator.text('  + ${_turkishToAscii(satir)}');
+            }
+          }
+        }
+      } catch (_) {/* fis biciminden ONEMLI: hata fisi dusuremez */}
 
       // Notes
       if (item['notes'] != null && item['notes'].toString().isNotEmpty) {
@@ -940,12 +1001,20 @@ class PrinterService {
         ),
       );
 
-      // Extras
-      if (item['extras'] != null && (item['extras'] as List).isNotEmpty) {
-        for (final extra in item['extras']) {
-          bytes += generator.text('  + ${_turkishToAscii(extra.toString())}');
+      // Extras — 31 Tem 2026: eskiden extra.toString() idi; POS varyant coklu secimi
+      // {name, price} map gonderdiginde mutfak fisine "{name: X, price: 50}" diye HAM
+      // basiyordu. _extraSatiri String ogelerde ESKI CIKTIYI birebir korur.
+      try {
+        final ex = item['extras'];
+        if (ex is List && ex.isNotEmpty) {
+          for (final extra in ex) {
+            final satir = _extraSatiri(extra);
+            if (satir.isNotEmpty) {
+              bytes += generator.text('  + ${_turkishToAscii(satir)}');
+            }
+          }
         }
-      }
+      } catch (_) {/* mutfak fisi ASLA dusmemeli */}
 
       // Notes
       if (item['notes'] != null && item['notes'].toString().isNotEmpty) {
@@ -1042,6 +1111,103 @@ class PrinterService {
     bytes += generator.cut();
 
     return bytes;
+  }
+
+  /// 1 Agu 2026 — COMBO GRUPLAMA (Mustafa: "ana urunun adi yazicak, secilenler altinda
+  /// sanki o urunun varyantiymis gibi listelensin").
+  ///
+  /// 🔴 FIS SOZLESMESI (feedback_fis_akisi_bozulamaz):
+  ///  - Gruplama SADECE KANIT varsa devreye girer: combo_group_id DOLU **ve** ayni kimlikte
+  ///    **>=2** kalem. Tek kalemlik "grup" gruplanmaz (gorsel kazanc yok, risk var).
+  ///  - Kanit yoksa liste AYNEN, SIRASI BOZULMADAN geri doner -> combo'suz siparislerde
+  ///    cikti BIREBIR eskisi gibi kalir.
+  ///  - Cagiran taraf try/catch ile sarar; herhangi bir hata -> duz liste.
+  ///
+  /// Doner: her ogesi ya {tip:'tek', kalem} ya da {tip:'grup', ad, adet, tutar, secimler[]}.
+  /// Grubun SIRASI = o gruba ait ILK kalemin listedeki sirasi (fis sirasi korunur).
+  List<Map<String, dynamic>> _comboGrupla(List<dynamic> kalemler) {
+    final sonuc = <Map<String, dynamic>>[];
+    // 1. gecis: hangi grup kimliginde kac kalem var
+    final sayac = <String, int>{};
+    for (final k in kalemler) {
+      if (k is! Map) continue;
+      final g = (k['combo_group_id'] ?? '').toString().trim();
+      if (g.isEmpty) continue;
+      sayac[g] = (sayac[g] ?? 0) + 1;
+    }
+    // 2. gecis: sirayi koruyarak kur
+    final acilanlar = <String>{};
+    for (final k in kalemler) {
+      if (k is! Map) { sonuc.add({'tip': 'tek', 'kalem': k}); continue; }
+      final g = (k['combo_group_id'] ?? '').toString().trim();
+      // KANIT YOK -> tek kalem, eski davranis
+      if (g.isEmpty || (sayac[g] ?? 0) < 2) {
+        sonuc.add({'tip': 'tek', 'kalem': k});
+        continue;
+      }
+      if (acilanlar.contains(g)) continue; // grup zaten kuruldu
+      acilanlar.add(g);
+      final uyeler = kalemler.where((x) =>
+          x is Map && (x['combo_group_id'] ?? '').toString().trim() == g).toList();
+      double tutar = 0;
+      int adet = 0;
+      final secimler = <String>[];
+      for (final u in uyeler) {
+        final m = u as Map;
+        final q = _sayi(m['quantity']) ?? 1;
+        adet += q.toInt();
+        tutar += (_ondalik(m['unit_price']) ?? 0) * q;
+        final sec = (m['combo_pick_name'] ?? m['product_name'] ?? '').toString().trim();
+        if (sec.isNotEmpty) secimler.add(sec);
+      }
+      final ad = (uyeler.first as Map)['combo_group_name']?.toString().trim();
+      sonuc.add({
+        'tip': 'grup',
+        'ad': (ad != null && ad.isNotEmpty)
+            ? ad
+            : ((uyeler.first as Map)['product_name'] ?? '').toString(),
+        'adet': adet,
+        'tutar': tutar,
+        'secimler': secimler,
+        'uyeler': uyeler,
+      });
+    }
+    return sonuc;
+  }
+
+  num? _sayi(dynamic v) {
+    if (v is num) return v;
+    return num.tryParse('${v ?? ''}');
+  }
+
+  double? _ondalik(dynamic v) {
+    if (v is num) return v.toDouble();
+    return double.tryParse('${v ?? ''}');
+  }
+
+  /// 31 Tem 2026 — Fiste bir `extras` ogesinin satiri.
+  /// GERI UYUMLULUK MUTLAK: oge String ise ESKISI GIBI aynen basilir (eski kayitlar,
+  /// eski POS surumleri) — cikti BIREBIR degismez. Yeni POS varyant coklu secimi
+  /// {name, price} map gonderir; fiyat 0 ise tutar YAZILMAZ (anlamsiz "+0.00 TL" olmasin).
+  /// ⚠️ Bu yardimci OLMADAN map'ler fise "{name: X, price: 50}" diye HAM basardi.
+  String _extraSatiri(dynamic e) {
+    if (e is Map) {
+      var ad = (e['name'] ?? e['label'] ?? e['title'] ?? '').toString().trim();
+      if (ad.isEmpty) return '';
+      // 1 Agu 2026: CIKARILAN malzemeler '-' onekiyle gelir (icerik ekrani boyle yaziyor).
+      // Fiste onek TEMIZLENIR, yerine acik "CIKAR:" etiketi konur — mutfak "-Sogan" yerine
+      // "CIKAR: Sogan" gorsun, yanlis okuma olmasin.
+      final cikarilan = ad.startsWith('-');
+      if (cikarilan) ad = ad.substring(1).trim();
+      if (ad.isEmpty) return '';
+      final f = e['price'] ?? e['amount'];
+      final tutar = f is num ? f.toDouble() : double.tryParse('${f ?? ''}') ?? 0;
+      final onek = cikarilan ? 'CIKAR: ' : '';
+      if (tutar == 0) return onek + ad;
+      final isaret = tutar > 0 ? '+' : '-';
+      return '$onek$ad ($isaret${tutar.abs().toStringAsFixed(2)} TL)';
+    }
+    return e?.toString() ?? '';
   }
 
   String _turkishToAscii(String text) {
@@ -1308,7 +1474,50 @@ class PrinterService {
     bytes += generator.hr(ch: '=');
 
     // ===== ÜRÜNLER =====
-    for (final item in items) {
+    // 🔴 1 Agu 2026 — COMBO GRUPLAMA, MUTFAK FISI. EN SONA BIRAKILDI (fis sozlesmesi:
+    // "mutfak fisi cikmazsa siparis HAZIRLANMAZ, en riskli yol odur").
+    // Mustafa: "bu gorunumun aynisi mutfak ekraninda da olacak."
+    // Kural aynen musteri fisindeki gibi: gruplama SADECE kanit varsa (combo_group_id +
+    // ayni kimlikte >=2 kalem); kanit yoksa liste AYNEN doner -> mevcut mutfak fisleri
+    // BIREBIR degismez. Gruplama patlarsa catch ile DUZ LISTEYE donulur, fis yine basilir.
+    List<Map<String, dynamic>> _mSatirlar;
+    try {
+      _mSatirlar = _comboGrupla(items);
+    } catch (grupErr) {
+      print('[Printer] MUTFAK combo gruplama atlandi (duz listeye donuldu): $grupErr');
+      _mSatirlar = items.map((e) => {'tip': 'tek', 'kalem': e}).toList();
+    }
+
+    for (final _ms in _mSatirlar) {
+      // ---- COMBO GRUBU: ana urun BUYUK, secimler altinda kalin ----
+      // Mutfak PARAYLA ILGILENMEZ -> bu fiste hicbir yerde tutar yok, burada da yazilmaz.
+      if (_ms['tip'] == 'grup') {
+        bytes += generator.text(
+          '${_ms['adet'] ?? 1} x ${_turkishToAscii(_ms['ad'] ?? '')}',
+          styles: const PosStyles(bold: true, height: PosTextSize.size2),
+        );
+        for (final sec in (_ms['secimler'] as List)) {
+          bytes += generator.text('   - ${_turkishToAscii(sec)}',
+              styles: const PosStyles(bold: true));
+        }
+        for (final u in (_ms['uyeler'] as List)) {
+          if (u is! Map) continue;
+          final po = u['portion'];
+          if (po != null && po.toString().isNotEmpty) {
+            bytes += generator.text('   Porsiyon: ${_turkishToAscii(po)}');
+          }
+          final nt = u['notes'];
+          if (nt != null && nt.toString().trim().isNotEmpty) {
+            bytes += generator.text('   >>> ${_turkishToAscii(nt)} <<<',
+                styles: const PosStyles(bold: true));
+          }
+        }
+        bytes += generator.text(''); // Boşluk
+        continue;
+      }
+
+      // ---- TEK KALEM: eski akis, HIC DEGISMEDI ----
+      final item = _ms['kalem'];
       final name = _turkishToAscii(item['product_name'] ?? '');
       final qty = item['quantity'] ?? 1;
       final portion = item['portion'];
@@ -1327,6 +1536,33 @@ class PrinterService {
       if (portion != null && portion.toString().isNotEmpty) {
         bytes += generator.text('   Porsiyon: ${_turkishToAscii(portion)}');
       }
+
+      // 31 Tem 2026 — SECIMLER (POS varyant coklu secim). MUTFAK BUNU GORMEK ZORUNDA:
+      // "Afrodit Waffle" tek basina yetmez, HANGI dondurmalar konacak orada yaziyor.
+      // Backend print job payload'i extras'i ZATEN tasiyordu (printers.js:637 "ileriye
+      // hazir"), basan taraf eksikti.
+      // ⚠️ Mutfak fisinde TUTAR YAZILMAZ — bu fiste hicbir yerde fiyat yok, mutfak parayla
+      // ilgilenmez. Sadece ADLAR, porsiyon satiriyla ayni girintide.
+      // extras yoksa HICBIR SEY basilmaz -> mevcut fisler BIREBIR ayni kalir.
+      try {
+        final ex = item['extras'];
+        if (ex is List && ex.isNotEmpty) {
+          for (final e in ex) {
+            var ad = (e is Map)
+                ? (e['name'] ?? e['label'] ?? e['title'] ?? '').toString().trim()
+                : (e?.toString() ?? '');
+            // 1 Agu 2026: '-' onekli = CIKARILACAK malzeme. Mutfakta bu KRITIK —
+            // "+ -Sogan" diye basmak yanlis okunur; "CIKAR: Sogan" diye basiyoruz.
+            final _cikar = ad.startsWith('-');
+            if (_cikar) ad = ad.substring(1).trim();
+            if (ad.isNotEmpty) {
+              bytes += generator.text(
+                  _cikar ? '   CIKAR: ${_turkishToAscii(ad)}' : '   + ${_turkishToAscii(ad)}',
+                  styles: const PosStyles(bold: true));
+            }
+          }
+        }
+      } catch (_) {/* MUTFAK FISI ASLA DUSMEMELI — hata olursa secim satiri atlanir */}
 
       // Not varsa belirgin şekilde göster
       if (notes != null && notes.toString().isNotEmpty) {

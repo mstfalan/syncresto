@@ -88,9 +88,20 @@ class ComboCalculator {
   /// EKLENMEZ (0 sayilir). Pozitif modifier (+100 = "pakete uste ekle") toplanir.
   /// Girdi: modifiers = secilen odenen kalemlerin modifier'lari (varyant fiyati DEGIL, sadece modifier;
   /// baz bir KEZ eklenir). Doner: her kaleme yazilacak fiyat listesi.
-  static List<double> splitComboPackagePrice(List<double> modifiers, double basePrice) {
-    if (modifiers.isEmpty) return modifiers;
-    final n = modifiers.length;
+  /// [satirSayisi] verilirse paket tutarı BU KADAR kaleme bölünür (modifiers.length yerine).
+  /// 1 Ağu 2026 (Mustafa: "mutfak görmesi lazım") — `extra` hediye modunda hediye kalemi de
+  /// adisyona/mutfağa fiziksel satır olarak girer. Ama hediye BEDAVA olduğu için onun varyant
+  /// sürşarjı pakete EKLENMEZ: [modifiers] SADECE ödenen kalemlerin modifier'larıdır,
+  /// [satirSayisi] ise hediye dahil TOPLAM satır sayısı. Böylece paket tutarı eski davranışla
+  /// KURUŞU KURUŞUNA aynı kalır, sadece daha çok kaleme bölünür.
+  ///   Ör. baz 300, üç varyant da +50, N=2 G=1(extra):
+  ///     eski → ödenen mods [50,50] → paket 400, 2 kalem × 200   (hediye satırı YOK)
+  ///     yeni → ödenen mods [50,50] → paket 400, 3 kalem × 133.33/133.34  (TOPLAM YİNE 400)
+  static List<double> splitComboPackagePrice(List<double> modifiers, double basePrice,
+      {int? satirSayisi}) {
+    final n = satirSayisi ?? modifiers.length;
+    if (n <= 0) return const [];
+    if (modifiers.isEmpty && satirSayisi == null) return modifiers;
     double positiveMods = 0;
     for (final m in modifiers) {
       if (m > 0) positiveMods += m; // negatif (sifirlama niyeti) atlanir
@@ -157,17 +168,62 @@ class ComboCalculator {
 
   static bool _truthy(dynamic v) => v == true || v == 1 || v == '1' || v == 'true';
 
+  /// 1 Ağu 2026 — SQLite'ta BOOLEAN TİPİ YOK: cached_products `combo_repeat` kolonu
+  /// INTEGER (local_db_service.dart:167,833) → çevrimdışı okumada `false` DEĞİL `0` gelir.
+  /// Dart'ta `0 == false` FALSE'tur; ham karşılaştırma "katlanma kapalı" ayarını
+  /// çevrimdışında SESSİZCE açık sanıyordu → POS ekranda backend'in uygulayacağından
+  /// FAZLA indirim gösteriyordu (kanıt: combo_matris_parite_test, 235 para farkı;
+  /// en kötüsü 250 TL). JS `!(x === false)` ile aynı sonucu vermek için 0/'0'/'false'
+  /// da yanlış sayılır. null/eksik → repeat TRUE (JS varsayılanı korunur).
+  static bool _falsy(dynamic v) =>
+      v == false || v == 0 || v == '0' || v == 'false';
+
+  // ===========================================================================
+  // 1 Ağu 2026 (Mustafa: "bu veriler ortak alandan çalışsın demiştik işte sırf
+  // bu sıkıntıları önlemek için") — ÜRÜN BAYRAKLARI TEK KAYNAK.
+  //
+  // Önce aynı bayrak 4 ayrı yerde 4 farklı kuralla okunuyordu; `_comboIsActive`
+  // sadece `== true || == 1` bakıyordu ('1'/'true' metnini kaçırıyordu), repeat
+  // mantığı iki dosyada ayrı yazılmıştı ve biri SQLite INTEGER'ını ters çözüyordu
+  // (250 TL'ye varan para farkı). Artık HER ÇAĞRI BURADAN geçer.
+  //
+  // Kural: ONLINE feed PostgreSQL boolean verir, OFFLINE cache SQLite INTEGER (0/1)
+  // verir — ikisi de kabul edilmek ZORUNDA, aksi halde internet gidince ayar
+  // sessizce değişir. Yeni bir combo/varyant bayrağı eklenirse okuyucusu BURAYA yazılır.
+  // ===========================================================================
+
+  /// Combo kuralı bu üründe açık mı?
+  static bool comboAktif(Map<String, dynamic> p) => _truthy(p['combo_enabled']);
+
+  /// Set katlanması açık mı? (yok/null → AÇIK; JS `!(x === false)` varsayılanı)
+  static bool katlanmaAcik(Map<String, dynamic> p) => !_falsy(p['combo_repeat']);
+
+  /// POS'ta eksik set de indirim alsın mı? (yok/null → KAPALI)
+  static bool posLimitsiz(Map<String, dynamic> p) => _truthy(p['combo_pos_unlimited']);
+
+  /// POS'ta combo seçim ekranı zorunlu mu? (yok/null → ZORUNLU)
+  static bool posSecimZorunlu(Map<String, dynamic> p) =>
+      !_falsy(p['combo_pos_selection_required']);
+
+  /// Varyantlarda POS çoklu seçim açık mı? (yok/null → KAPALI)
+  static bool posCokluVaryant(Map<String, dynamic> p) =>
+      _truthy(p['variants_allow_multiple_pos']);
+
+  /// POS'ta varyant seçimi zorunlu mu? (yok/null → KAPALI)
+  static bool posVaryantZorunlu(Map<String, dynamic> p) =>
+      _truthy(p['variants_required_pos']);
+
   /// Bir combo ürünü için indirimi hesapla. product = combo_* alanlı satır; lines = [{unit_price, qty}].
   static ComboResult calcComboForProduct(Map<String, dynamic> product, List<Map<String, dynamic>> lines) {
     final res = ComboResult();
     // JS: product.combo_enabled !== true. DB'den bool true gelir (panel_products); esnek guard (1/'t' de kabul).
-    if (product['combo_enabled'] != true && !_truthy(product['combo_enabled'])) return res;
+    if (!comboAktif(product)) return res;
     if (lines.isEmpty) return res;
 
     final N = (_toInt(product['combo_required_qty'], 2)).clamp(1, 10);
     final G = (_toInt(product['combo_gift_qty'], 0)).clamp(0, 1 << 30);
     final giftMode = product['combo_gift_mode'] == 'extra' ? 'extra' : 'within';
-    final repeat = !(product['combo_repeat'] == false);
+    final repeat = katlanmaAcik(product); // JS: !(combo_repeat === false)
     final pct = G == 0 ? _num(product['combo_discount_percent'], 0) : 0.0;
     final amt = G == 0 ? _num(product['combo_discount_amount'], 0) : 0.0;
 
@@ -177,9 +233,28 @@ class ComboCalculator {
       final q = _toInt(l['qty'], 0);
       Q += q > 0 ? q : 0;
     }
-    if (Q < N) return res; // kural devrede değil
+    // =========================================================================
+    // 31 Tem 2026 — POS'A OZEL "LIMITSIZ SECIM" (combo_pos_unlimited).
+    // Backend karsiligi: syncresto-api routes/pos/panel-direct/comboCalculator.js
+    // (kismiSet blogu) — BU IKISI BIREBIR AYNI KALMALI, yoksa kasada gorunen indirim
+    // ile kapanista yazilan indirim TUTMAZ.
+    // ⚠️ Web/telefon kanallari bu alani OKUMAZ; orada secim her zaman zorunlu.
+    // Kural: kismi set indirimi = tam set indirimi × (Q/N).
+    //   Yuzde  : yuzde zaten secilen birimlere uygulanir → EK CARPAN YOK
+    //   Sabit  : amt × (Q/N), secilen tutari asamaz
+    //   Hediye within: ortalamaBirim × G × (Q/N)  (bedava birim sayisi kesirli olamaz)
+    //   Hediye extra : eksik sette hediye/indirim YOK (ciro korumasi)
+    // =========================================================================
+    // 31 Tem 2026: SQLite cache bool'u 0/1 INTEGER olarak dondurur (cevrimdisi yol).
+    // Sadece '== true' baksaydik internet gidince ayar SESSIZCE kapanirdi. _truthy
+    // hem bool hem 1/'1'/'true' kabul eder — combo_enabled ile ayni kural.
+    final bool posUnlimited = posLimitsiz(product);
+    final bool kismiSet = posUnlimited && Q > 0 && Q < N;
+    final double kismiOran = kismiSet ? (Q / N) : 1.0;
 
-    final sets = repeat ? (Q ~/ N) : 1;
+    if (Q < N && !kismiSet) return res; // kural devrede değil (eski davranis)
+
+    final sets = kismiSet ? 1 : (repeat ? (Q ~/ N) : 1);
     if (sets < 1) return res;
 
     res.eligible = true;
@@ -200,32 +275,50 @@ class ComboCalculator {
       final giftCount = sets * G;
       if (giftMode == 'within') {
         res.mode = 'gift-within';
-        final freeUnits = units.sublist(0, giftCount < units.length ? giftCount : units.length);
-        res.discountAmount = _round2(freeUnits.fold<double>(0, (s, p) => s + p));
-        res.giftUnits = freeUnits.length;
-        res.giftUnitPrice = freeUnits.isNotEmpty ? freeUnits[freeUnits.length - 1] : 0;
-        res.label = '$N al ${(N - G) < 1 ? 1 : (N - G)} öde';
+        if (kismiSet) {
+          final secilenToplam = units.fold<double>(0, (s, u) => s + u);
+          final ortBirim = units.isNotEmpty ? (secilenToplam / units.length) : 0.0;
+          final ham = ortBirim * G * kismiOran;
+          res.discountAmount = _round2(ham < secilenToplam ? ham : secilenToplam);
+          res.giftUnits = 0;      // fiziksel bedava birim yok (kesirli olurdu)
+          res.giftUnitPrice = 0;
+        } else {
+          final freeUnits = units.sublist(0, giftCount < units.length ? giftCount : units.length);
+          res.discountAmount = _round2(freeUnits.fold<double>(0, (s, p) => s + p));
+          res.giftUnits = freeUnits.length;
+          res.giftUnitPrice = freeUnits.isNotEmpty ? freeUnits[freeUnits.length - 1] : 0;
+        }
+        res.label = '$N al ${(N - G) < 1 ? 1 : (N - G)} öde${kismiSet ? ' (kısmi)' : ''}';
       } else {
         res.mode = 'gift-extra';
-        res.giftUnits = giftCount;
-        res.giftUnitPrice = units.isNotEmpty ? units[0] : 0;
-        res.discountAmount = 0;
+        if (kismiSet) {
+          // Yarim sete FIZIKSEL bedava urun VERILMEZ (ciro korumasi) — indirim de yok.
+          res.giftUnits = 0;
+          res.giftUnitPrice = 0;
+          res.discountAmount = 0;
+          res.eligible = false;
+        } else {
+          res.giftUnits = giftCount;
+          res.giftUnitPrice = units.isNotEmpty ? units[0] : 0;
+          res.discountAmount = 0;
+        }
         res.label = '$N al $G hediye';
       }
     } else if (pct > 0) {
       res.mode = 'percent';
       final p = pct.clamp(0, 100).toDouble();
-      final setUnits = units.sublist(0, (sets * N) < units.length ? (sets * N) : units.length);
+      // Kismi sette taban = secilen TUM birimler; yuzde zaten olceklendigi icin ek carpan YOK.
+      final setUnits = kismiSet ? units : units.sublist(0, (sets * N) < units.length ? (sets * N) : units.length);
       final setTotal = setUnits.fold<double>(0, (s, u) => s + u);
       res.discountAmount = _round2(setTotal * p / 100);
-      res.label = '%${_trimNum(p)} indirim';
+      res.label = '%${_trimNum(p)} indirim${kismiSet ? ' (kısmi)' : ''}';
     } else if (amt > 0) {
       res.mode = 'amount';
-      final setUnits = units.sublist(0, (sets * N) < units.length ? (sets * N) : units.length);
+      final setUnits = kismiSet ? units : units.sublist(0, (sets * N) < units.length ? (sets * N) : units.length);
       final setTotal = setUnits.fold<double>(0, (s, u) => s + u);
-      final byAmt = sets * amt;
+      final byAmt = kismiSet ? (amt * kismiOran) : (sets * amt);
       res.discountAmount = _round2(byAmt < setTotal ? byAmt : setTotal);
-      res.label = '₺${_trimNum(amt)} indirim';
+      res.label = '₺${_trimNum(amt)} indirim${kismiSet ? ' (kısmi)' : ''}';
     } else {
       res.eligible = false; // enabled ama indirim tanımlı değil
     }
@@ -255,7 +348,7 @@ class ComboCalculator {
     groups.forEach((pid, lines) {
       final product = productsById[pid];
       if (product == null) return;
-      if (product['combo_enabled'] != true && !_truthy(product['combo_enabled'])) return;
+      if (!comboAktif(product)) return;
       final calc = calcComboForProduct(product, lines);
       if (!calc.eligible) return;
       final pidInt = int.tryParse(pid) ?? 0;

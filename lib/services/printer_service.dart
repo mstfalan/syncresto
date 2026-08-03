@@ -794,12 +794,18 @@ class PrinterService {
         for (final sec in (_s['secimler'] as List)) {
           bytes += generator.text('   - ${_turkishToAscii(sec)}');
         }
-        // Grup uyelerinin notlari kaybolmasin
+        // Grup uyelerinin notlari kaybolmasin — AMA not, zaten ustte yazilan secim adiyla
+        // ayniysa TEKRAR BASMA. 2 Agu 2026: POS varyant adini hem combo_pick_name hem notes'a
+        // yaziyor; ikisi de basilinca her secim fiste IKI KEZ gorunuyordu ("- San Remo" + "* San Remo").
+        final _secimSeti = (_s['secimler'] as List)
+            .map((e) => e.toString().trim().toLowerCase())
+            .toSet();
         for (final u in (_s['uyeler'] as List)) {
           final n = (u is Map) ? u['notes'] : null;
-          if (n != null && n.toString().trim().isNotEmpty) {
-            bytes += generator.text('   * ${_turkishToAscii(n)}');
-          }
+          final nt = n?.toString().trim() ?? '';
+          if (nt.isEmpty) continue;
+          if (_secimSeti.contains(nt.toLowerCase())) continue; // secim adiyla ayni -> atla
+          bytes += generator.text('   * ${_turkishToAscii(nt)}');
         }
         continue;
       }
@@ -851,7 +857,33 @@ class PrinterService {
     // Totals
     final subtotal = (ticket['subtotal'] ?? ticket['total_amount'] ?? 0).toDouble();
     final discount = (ticket['discount_amount'] ?? 0).toDouble();
-    final total = subtotal - discount;
+    // 🔴 3 Agu 2026 — IKRAM FISTEN DUSULUR (denetim bulgusu 9).
+    // `subtotal` ikram DAHIL geliyordu ve `??` sirasi yuzunden `total_amount` (ikram
+    // dusulmus) ASLA okunmuyordu -> POS ekrani dogru "Kalan" gosterirken musterinin
+    // eline FAZLA tutarli fis gidiyordu. Cevrimdisinda dogru, cevrimicinde yanlisti.
+    // KANIT KAPISI: alan yoksa/0 ise cikti BIREBIR eskisi gibi (0 regresyon).
+    final _ik = ticket['ikram_total'];
+    final ikram = (_ik is num) ? _ik.toDouble() : (double.tryParse('${_ik ?? ''}') ?? 0.0);
+    final total = subtotal - discount - (ikram > 0 ? ikram : 0);
+
+    if (ikram > 0) {
+      bytes += generator.row([
+        PosColumn(text: 'Ara Toplam:', width: 8),
+        PosColumn(
+          text: '${subtotal.toStringAsFixed(2)} TL',
+          width: 4,
+          styles: const PosStyles(align: PosAlign.right),
+        ),
+      ]);
+      bytes += generator.row([
+        PosColumn(text: 'IKRAM:', width: 8),
+        PosColumn(
+          text: '-${ikram.toStringAsFixed(2)} TL',
+          width: 4,
+          styles: const PosStyles(align: PosAlign.right),
+        ),
+      ]);
+    }
 
     if (discount > 0) {
       bytes += generator.row([
@@ -1150,16 +1182,21 @@ class PrinterService {
       final uyeler = kalemler.where((x) =>
           x is Map && (x['combo_group_id'] ?? '').toString().trim() == g).toList();
       double tutar = 0;
-      int adet = 0;
       final secimler = <String>[];
+      // 2 Agu 2026 (Mustafa: "1'er tane var fiyat dogru ama 2x yaziyor") — PAKET ADEDI.
+      // ESKI: uye adetleri TOPLANIYORDU -> 2 uyeli tek paket "2 x Lezzet Partisi Menu" yaziyordu.
+      // DOGRUSU: bir combo grubu = BIR paket. Kasiyer paketi cogaltirsa TUM uyelerin adedi artar,
+      // o yuzden paket adedi = uyelerin EN KUCUK adedi (biri tek basina artmissa paket 1 kalir).
+      int? enKucukAdet;
       for (final u in uyeler) {
         final m = u as Map;
-        final q = _sayi(m['quantity']) ?? 1;
-        adet += q.toInt();
+        final q = (_sayi(m['quantity']) ?? 1).toInt();
+        if (enKucukAdet == null || q < enKucukAdet) enKucukAdet = q;
         tutar += (_ondalik(m['unit_price']) ?? 0) * q;
         final sec = (m['combo_pick_name'] ?? m['product_name'] ?? '').toString().trim();
         if (sec.isNotEmpty) secimler.add(sec);
       }
+      final adet = (enKucukAdet == null || enKucukAdet < 1) ? 1 : enKucukAdet;
       final ad = (uyeler.first as Map)['combo_group_name']?.toString().trim();
       sonuc.add({
         'tip': 'grup',
@@ -1506,9 +1543,16 @@ class PrinterService {
           if (po != null && po.toString().isNotEmpty) {
             bytes += generator.text('   Porsiyon: ${_turkishToAscii(po)}');
           }
+          // 2 Agu 2026: not, ustte yazilan secim adiyla AYNIYSA tekrar basma (musteri fisiyle
+          // ayni kural). Mutfakta gercek not (or. "az acili") YINE BASILIR — sadece varyant
+          // adinin ikinci kez yazilmasi engellenir.
+          final _msSecimSeti = (_ms['secimler'] as List)
+              .map((e) => e.toString().trim().toLowerCase())
+              .toSet();
           final nt = u['notes'];
-          if (nt != null && nt.toString().trim().isNotEmpty) {
-            bytes += generator.text('   >>> ${_turkishToAscii(nt)} <<<',
+          final _ntStr = nt?.toString().trim() ?? '';
+          if (_ntStr.isNotEmpty && !_msSecimSeti.contains(_ntStr.toLowerCase())) {
+            bytes += generator.text('   >>> ${_turkishToAscii(_ntStr)} <<<',
                 styles: const PosStyles(bold: true));
           }
         }
@@ -1777,7 +1821,14 @@ class PrinterService {
     bytes += generator.hr(ch: '=');
 
     // Toplam
-    final ticketTotal = (ticket['total'] as num?)?.toDouble() ?? 0;
+    // 3 Agu 2026: salon ozet fisi de ikrami duser (musteri fisiyle AYNI kural).
+    // ticket['total'] DB kolonu = brut (ikram dahil); ikram_total varsa cikarilir.
+    final _ikOzet = ticket['ikram_total'];
+    final _ikOzetTutar = (_ikOzet is num)
+        ? _ikOzet.toDouble()
+        : (double.tryParse('${_ikOzet ?? ''}') ?? 0.0);
+    final ticketTotal = ((ticket['total'] as num?)?.toDouble() ?? 0) -
+        (_ikOzetTutar > 0 ? _ikOzetTutar : 0);
     final total = ticketTotal > 0 ? ticketTotal : (calculatedTotal - discount.toDouble());
 
     bytes += generator.row([

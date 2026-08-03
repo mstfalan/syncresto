@@ -48,6 +48,32 @@ class TablesScreen extends StatefulWidget {
 
 class _TablesScreenState extends State<TablesScreen> {
   List<dynamic> _sections = [];
+
+  /// Garsona atanmis salon id'leri. Kaynak: login yaniti / cevrimdisi cache.
+  /// Liste BOS ise "kisit yok" demektir (atama yapilmamis).
+  Set<int> _garsonSalonIdleri() {
+    final raw = widget.waiter?['sections'];
+    final out = <int>{};
+    if (raw is List) {
+      for (final e in raw) {
+        if (e is Map) {
+          final id = _safeInt(e['id']);
+          if (id != null) out.add(id);
+        } else {
+          final id = _safeInt(e);
+          if (id != null) out.add(id);
+        }
+      }
+    }
+    return out;
+  }
+
+  /// Yetki okuma — permissions Map degilse (bozuk/eksik veri) ESKI davranis: izin ver.
+  bool _yetkiVar(String anahtar) {
+    final raw = widget.waiter?['permissions'];
+    if (raw is! Map) return true;
+    return raw[anahtar] == true;
+  }
   List<dynamic> _tables = [];
   bool _isLoading = true;
   int? _selectedSectionId;
@@ -533,11 +559,36 @@ class _TablesScreenState extends State<TablesScreen> {
 
       if (!mounted) return;
 
+      // 🔴 3 Agu 2026 (Mustafa) — GARSONUN SALONLARI ARTIK UYGULANIYOR.
+      // panel_pos_waiters.sections DOLDURULUYOR, login yaniti tasiyor, sync cache'liyor
+      // ama HICBIR YERDE FILTRE OLARAK KULLANILMIYORDU -> her garson TUM salonlari
+      // goruyordu. (Ayni desen bugun 4 kez cikti: veri akiyor, tuketen taraf yok.)
+      //
+      // KURAL:
+      //  • Garsona salon ATANMAMISSA (bos liste) -> kisit YOK (eski davranis, 0 regresyon:
+      //    bugun kimseye atama yapilmamis olabilir, kimseyi kilitlemeyelim).
+      //  • Atama VARSA -> SADECE o salonlar.
+      //
+      //  • 'view_all_tables' yetkisi VARSA -> kisit YOK, hepsini gorur (yonetici/sef).
+      //
+      // 3 Agu 2026 — Mustafa'nin KARARI: "tum masalari gor daha dogru SECILDIYSE;
+      // eger onu kaldirirsam salon 2 gozukmeyecekse problem yok." Yani yetki
+      // hiyerarsisi KORUNUR: 'view_all_tables' UST yetkidir ve salon atamasini EZER.
+      // Salon kisiti isteniyorsa o yetki garsondan KALDIRILIR (panel 8 Garson 1'de
+      // acikti, bu yuzden Salon 2 goruluyordu — hata degil, yetki hiyerarsisi).
+      final _izinliIdler = _garsonSalonIdleri();
+      final _tumunuGor = _yetkiVar('view_all_tables');
+      final _gorunur = (_tumunuGor || _izinliIdler.isEmpty)
+          ? sections
+          : sections.where((s) => _izinliIdler.contains(_safeInt(s['id']))).toList();
+
       setState(() {
-        _sections = sections;
+        _sections = _gorunur;
         _tables = tables;
-        if (sections.isNotEmpty && _selectedSectionId == null) {
-          _selectedSectionId = _safeInt(sections[0]['id']);
+        // Secili salon artik gorunmuyorsa ilk gorunur salona kay (bos ekran kalmasin).
+        final _hala = _gorunur.any((s) => _safeInt(s['id']) == _selectedSectionId);
+        if (_gorunur.isNotEmpty && (_selectedSectionId == null || !_hala)) {
+          _selectedSectionId = _safeInt(_gorunur[0]['id']);
         }
       });
 

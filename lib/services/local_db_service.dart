@@ -5,6 +5,7 @@ import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
+import 'ikram_rules.dart';
 
 class LocalDbService {
   static Database? _database;
@@ -20,6 +21,9 @@ class LocalDbService {
   // upsertServerTicket'te delivered_*'i geri EZMESIN diye kisa omurlu koruma. local_item_id -> zaman.
   static final Map<int, DateTime> _deliveryTouchedAt = {};
   static const Duration _kDeliveryTouchTtl = Duration(seconds: 15);
+  // v20 IKRAM (3 Agu 2026): ayni desen — online ikram isareti mirror'a yazilinca
+  // (sync_queue izi yok) bayat backend snapshot'i is_ikram'i geri EZMESIN. local_item_id -> zaman.
+  static final Map<int, DateTime> _ikramTouchedAt = {};
   static final LocalDbService _instance = LocalDbService._internal();
 
   factory LocalDbService() => _instance;
@@ -50,7 +54,7 @@ class LocalDbService {
 
     return await openDatabase(
       path,
-      version: 19, // v19 (1 Agu 2026): cached_products.ingredients — urun icerikleri (cikar/ekle) cevrimdisi
+      version: 20, // v20 (3 Agu 2026): IKRAM — cached_cancel_reasons + cached_ikram_reasons + local_ticket_items.is_ikram/ikram_reason
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -302,6 +306,8 @@ class LocalDbService {
         combo_group_id TEXT,
         combo_group_name TEXT,
         combo_pick_name TEXT,
+        is_ikram INTEGER DEFAULT 0,
+        ikram_reason TEXT,
         FOREIGN KEY (local_ticket_id) REFERENCES local_tickets(local_id)
       )
     ''');
@@ -355,6 +361,28 @@ class LocalDbService {
         lookup_type TEXT NOT NULL,
         category_id INTEGER,
         payload TEXT NOT NULL,
+        cached_at TEXT NOT NULL
+      )
+    ''');
+
+    // v20: Iptal + ikram sebepleri AYRI tablolarda (offline sebep listesi garantisi).
+    // cached_lookups('cancel_reasons') KORUNUR (legacy okuma fallback'i) — cift kaynak degil,
+    // dedicated tablo bos ise (ilk migration, henuz sync olmadi) legacy'den okunur.
+    await db.execute('''
+      CREATE TABLE cached_cancel_reasons (
+        id INTEGER PRIMARY KEY,
+        reason TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        cached_at TEXT NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE cached_ikram_reasons (
+        id INTEGER PRIMARY KEY,
+        reason TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -652,6 +680,42 @@ class LocalDbService {
       } catch (e) {
         print('[LocalDb] v19 ingredients zaten var: $e');
       }
+    }
+
+    // v20 (3 Agu 2026): IKRAM (Mustafa: her POS ozelligi cache+offline).
+    // (a) cached_cancel_reasons — iptal sebepleri AYRI tabloda (cached_lookups legacy'si
+    //     KORUNUR, okuma once dedicated'a bakar, bossa legacy'e duser — veri kaybi yok).
+    // (b) cached_ikram_reasons — ikram sebepleri offline'da da secilebilsin.
+    // (c) local_ticket_items.is_ikram/ikram_reason — mirror'lanan adisyonlarda ikram
+    //     isareti offline'a tasinir; cevrimdisi kapanis ikram tutarini dusebilir.
+    // TAMAMEN EKLEMELI: hicbir mevcut kolon/veri degismez; backend alan gondermezse
+    // is_ikram NULL/0 -> ikram YOK (mevcut davranis birebir korunur).
+    if (oldVersion < 20) {
+      for (final ddl in [
+        '''CREATE TABLE IF NOT EXISTS cached_cancel_reasons (
+             id INTEGER PRIMARY KEY,
+             reason TEXT NOT NULL,
+             sort_order INTEGER DEFAULT 0,
+             is_active INTEGER DEFAULT 1,
+             cached_at TEXT NOT NULL
+           )''',
+        '''CREATE TABLE IF NOT EXISTS cached_ikram_reasons (
+             id INTEGER PRIMARY KEY,
+             reason TEXT NOT NULL,
+             sort_order INTEGER DEFAULT 0,
+             is_active INTEGER DEFAULT 1,
+             cached_at TEXT NOT NULL
+           )''',
+        'ALTER TABLE local_ticket_items ADD COLUMN is_ikram INTEGER DEFAULT 0',
+        'ALTER TABLE local_ticket_items ADD COLUMN ikram_reason TEXT',
+      ]) {
+        try {
+          await db.execute(ddl);
+        } catch (e) {
+          print('[LocalDb] v20 adim zaten var: $e');
+        }
+      }
+      print('[LocalDb] v20 IKRAM tablolari/kolonlari eklendi');
     }
 
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
@@ -1188,6 +1252,117 @@ class LocalDbService {
     }
   }
 
+  // ==================== SEBEP CACHE (v20 — IKRAM + IPTAL) ====================
+  // cached_cancel_reasons / cached_ikram_reasons — {id, reason, sort_order, is_active}.
+  // Yazma: kategori/urun deseniyle ayni (delete + insert, retry'li transaction).
+  // ⚠️ SQLite BOOLEAN yok: is_active esnek guard ile 0/1'e cevrilir (IkramRules.bayrak
+  //    ile ayni mantik — bool/int/string hepsi guvenli).
+
+  Future<void> _cacheReasonTable(String table, List<Map<String, dynamic>> rows) async {
+    final db = await database;
+    final now = DateTime.now().toIso8601String();
+    await _runWithRetry(() => db.transaction((txn) async {
+      await txn.delete(table);
+      for (final r in rows) {
+        final reason = (r['reason'] ?? '').toString().trim();
+        if (reason.isEmpty) continue;
+        final act = r['is_active'];
+        await txn.insert(table, {
+          'id': r['id'] is num ? (r['id'] as num).toInt() : int.tryParse('${r['id'] ?? ''}'),
+          'reason': reason,
+          'sort_order': r['sort_order'] is num
+              ? (r['sort_order'] as num).toInt()
+              : int.tryParse('${r['sort_order'] ?? 0}') ?? 0,
+          // Alan HIC gelmezse aktif kabul (server zaten filtrelemis olabilir); gelirse
+          // esnek guard (IkramRules.bayrak — bool/int/string, testli TEK KAYNAK).
+          'is_active': (act == null || IkramRules.bayrak(act)) ? 1 : 0,
+          'cached_at': now,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    }), opName: 'cacheReasons[$table]');
+    print('[LocalDb] $table: ${rows.length} kayit');
+  }
+
+  Future<List<Map<String, dynamic>>> _getReasonTable(String table) async {
+    final db = await database;
+    try {
+      final rows = await db.query(table,
+          where: 'is_active = 1', orderBy: 'sort_order ASC, id ASC');
+      return rows.map((r) => Map<String, dynamic>.from(r)).toList();
+    } catch (e) {
+      // Tablo yoksa (eski DB, migration calismadiysa) bos don — cagiran fallback'ine duser.
+      print('[LocalDb] _getReasonTable($table): tablo yok, bos donuluyor: $e');
+      return [];
+    }
+  }
+
+  Future<void> cacheCancelReasons(List<Map<String, dynamic>> rows) =>
+      _cacheReasonTable('cached_cancel_reasons', rows);
+
+  /// Iptal sebepleri — once dedicated tablo; BOSSA legacy cached_lookups('cancel_reasons').
+  /// (Migration sonrasi ilk online sync'e kadar eski cache kaybolmasin.)
+  Future<List<Map<String, dynamic>>> getCachedCancelReasons() async {
+    final rows = await _getReasonTable('cached_cancel_reasons');
+    if (rows.isNotEmpty) return rows;
+    try {
+      return await getCachedLookups(lookupType: 'cancel_reasons');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> cacheIkramReasons(List<Map<String, dynamic>> rows) =>
+      _cacheReasonTable('cached_ikram_reasons', rows);
+
+  Future<List<Map<String, dynamic>>> getCachedIkramReasons() =>
+      _getReasonTable('cached_ikram_reasons');
+
+  /// IKRAM MIRROR (v20): online ikram isaretleme basarili olunca lokal mirror item'a
+  /// is_ikram/ikram_reason yaz — sync_queue'ya KAYIT BIRAKMADAN (backend zaten guncel;
+  /// kuyruk kaydi cift PUT atardi). Boylece internet hemen ardindan koparsa offline
+  /// kapanis ikram tutarini dusebilir. serverItemId veya localItemId'den biri yeter.
+  Future<void> markItemIkramMirror({
+    int? serverItemId,
+    int? localItemId,
+    required bool isIkram,
+    String? reason,
+  }) async {
+    if (serverItemId == null && localItemId == null) return;
+    final db = await database;
+    try {
+      final data = <String, dynamic>{
+        'is_ikram': isIkram ? 1 : 0,
+        'ikram_reason': isIkram ? reason : null,
+      };
+      int updated = 0;
+      if (localItemId != null) {
+        updated = await db.update('local_ticket_items', data,
+            where: 'local_id = ?', whereArgs: [localItemId]);
+      }
+      if (updated == 0 && serverItemId != null) {
+        updated = await db.update('local_ticket_items', data,
+            where: 'server_id = ?', whereArgs: [serverItemId]);
+      }
+      if (updated > 0) {
+        // Ticket toplamini tazele (ikram dusumu lokal subtotal'a yansisin)
+        final r = await db.query('local_ticket_items', columns: ['local_id', 'local_ticket_id'],
+            where: localItemId != null ? 'local_id = ?' : 'server_id = ?',
+            whereArgs: [localItemId ?? serverItemId], limit: 1);
+        if (r.isNotEmpty) {
+          // Bayat mirror snapshot'i bu isareti geri ezmesin (delivered_* deseniyle ayni TTL).
+          final lid = r.first['local_id'] as int?;
+          if (lid != null) _ikramTouchedAt[lid] = DateTime.now();
+          final tid = r.first['local_ticket_id'] as int?;
+          if (tid != null) await recalcTicketTotals(tid);
+        }
+      }
+      print('[LocalDb] markItemIkramMirror: server=$serverItemId local=$localItemId ikram=$isIkram (updated=$updated)');
+    } catch (e) {
+      // Mirror best-effort — online islem ZATEN basarili, lokal yansima hatasi akisi kesmesin.
+      print('[LocalDb] markItemIkramMirror hatasi (yoksayildi): $e');
+    }
+  }
+
   // ==================== YEREL ADİSYON İŞLEMLERİ ====================
 
   // Yerel adisyon aç
@@ -1419,9 +1594,14 @@ class LocalDbService {
     ticket['items'] = processedItems;
 
     // Subtotal hesapla
+    // v20 IKRAM: is_ikram=1 kalemler TAHSIL EDILMEZ -> subtotal'a girmez (backend close()
+    // ayni dusumu authoritative yapar; offline kapanis da ayni kurali uygular).
+    // Esnek guard sart: SQLite int 0/1 doner, Dart'ta 0 == false FALSE'tur.
     double subtotal = 0;
     for (final item in items) {
-      if (item['status'] != 'cancelled') {
+      final ik = item['is_ikram'];
+      final ikramMi = ik == true || ik == 1 || ik == '1';
+      if (item['status'] != 'cancelled' && !ikramMi) {
         subtotal += (item['unit_price'] as num) * (item['quantity'] as num);
       }
     }
@@ -1609,12 +1789,15 @@ class LocalDbService {
 
   /// Bir local ticket'ın subtotal/total'ını item'larından yeniden hesapla (offline tutar).
   /// Formül getLocalTicket + closeLocalTicket ile BİREBİR aynı (tutarlılık).
+  /// v20 IKRAM: is_ikram=1 kalemler tahsil edilmez -> toplama girmez (COALESCE guard:
+  /// eski satirlarda kolon NULL olabilir, NULL = ikram degil).
   Future<void> recalcTicketTotals(int localTicketId) async {
     final db = await database;
     final r = await db.rawQuery('''
       SELECT COALESCE(SUM(unit_price * quantity), 0) AS sub
         FROM local_ticket_items
        WHERE local_ticket_id = ? AND status != 'cancelled'
+         AND COALESCE(is_ikram, 0) != 1
     ''', [localTicketId]);
     final subtotal = (r.first['sub'] as num?)?.toDouble() ?? 0.0;
     final tk = await db.query('local_tickets', columns: ['discount_amount'],
@@ -2246,6 +2429,10 @@ class LocalDbService {
             'added_by': (it['waiter_id'] as num?)?.toInt(), // backend item alan adi waiter_id
             'added_by_name': it['added_by_name']?.toString(),
             'skip_pos_print': (it['skip_pos_print'] == true || it['skip_pos_print'] == 1) ? 1 : 0,
+            // v20 IKRAM: backend is_ikram/ikram_reason dondurunce mirror'a tasi -> internet
+            // koparsa offline gorunum + kapanis tutari dogru kalir. Esnek guard (bool/int/str).
+            'is_ikram': (it['is_ikram'] == true || it['is_ikram'] == 1 || it['is_ikram'] == '1') ? 1 : 0,
+            'ikram_reason': it['ikram_reason']?.toString(),
             'printed': existingPrinted, // KORUNUR
             'synced': 1,
             'synced_at': now,
@@ -2267,6 +2454,14 @@ class LocalDbService {
               itemRow.remove('delivered_at');
               itemRow.remove('delivered_by');
               itemRow.remove('delivered_by_name');
+            }
+            // v20 IKRAM PRESERVE: az once online ikram isaretlendi/geri alindi (mirror'a
+            // yazildi, sync_queue izi yok) — bayat snapshot is_ikram'i geri EZMESIN.
+            final ikramTouch = _ikramTouchedAt[exLocalId];
+            if (ikramTouch != null &&
+                DateTime.now().difference(ikramTouch) < _kDeliveryTouchTtl) {
+              itemRow.remove('is_ikram');
+              itemRow.remove('ikram_reason');
             }
             await txn.update('local_ticket_items', itemRow,
                 where: 'local_id = ?', whereArgs: [exLocalId]);

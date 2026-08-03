@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart';
+import 'ikram_rules.dart';
 import 'sync_service.dart';
 import 'lan_sync_service.dart';
 import 'log_service.dart';
@@ -1134,6 +1135,8 @@ class ApiService {
   }
 
   /// İptal sebeplerini getir — online cache update + offline cache fallback
+  /// v20 (3 Agu 2026): dedicated cached_cancel_reasons tablosuna DA yazilir; okuma once
+  /// dedicated'a, bossa legacy cached_lookups'a duser (getCachedCancelReasons icinde).
   Future<List<dynamic>> getCancelReasons() async {
     if (_connectivity.isOnline) {
       try {
@@ -1141,22 +1144,126 @@ class ApiService {
         final list = (response.data as List?) ?? [];
         // Cache update — offline icin
         try {
-          await _localDb.cacheLookups(
-            lookupType: 'cancel_reasons',
-            rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
-          );
+          final rows = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+          await _localDb.cacheLookups(lookupType: 'cancel_reasons', rows: rows);
+          await _localDb.cacheCancelReasons(rows);
         } catch (_) {}
         return list;
       } catch (e) {
         print('[API] getCancelReasons hatası, cache fallback: $e');
         // Network hatasinda cache fallback
-        return await _localDb.getCachedLookups(lookupType: 'cancel_reasons');
+        return await _localDb.getCachedCancelReasons();
       }
     }
     // Offline: direkt cache
-    final cached = await _localDb.getCachedLookups(lookupType: 'cancel_reasons');
+    final cached = await _localDb.getCachedCancelReasons();
     print('[API] getCancelReasons offline cache: ${cached.length} kayit');
     return cached;
+  }
+
+  // =============================================
+  // IKRAM (3 Agu 2026)
+  // =============================================
+
+  /// Ikram sebeplerini getir — online: panel ucu + cache update; offline: cache.
+  /// Donen liste is_active filtreli + sort_order sirali (IkramRules.aktifSebepler).
+  Future<List<Map<String, dynamic>>> getIkramReasons() async {
+    if (_connectivity.isOnline) {
+      try {
+        final response = await _dio.get('/api/pos/settings-extra/ikram-reasons');
+        final data = response.data;
+        final list = data is List
+            ? data
+            : (data is Map ? ((data['reasons'] as List?) ?? (data['data'] as List?) ?? []) : []);
+        final rows = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        try {
+          await _localDb.cacheIkramReasons(rows);
+        } catch (_) {}
+        return IkramRules.aktifSebepler(rows);
+      } catch (e) {
+        print('[API] getIkramReasons hatası, cache fallback: $e');
+        return IkramRules.aktifSebepler(await _localDb.getCachedIkramReasons());
+      }
+    }
+    final cached = await _localDb.getCachedIkramReasons();
+    print('[API] getIkramReasons offline cache: ${cached.length} kayit');
+    return IkramRules.aktifSebepler(cached);
+  }
+
+  /// `ikram_reason_required` ayari — /api/pos/settings'ten (mevcut ayar akisi; yeni uc YOK).
+  /// Online: taze settings cek + cache'le; hata/offline: cached_settings. Deger hic
+  /// BILINMIYORSA ZORUNLU (IkramRules.sebepZorunluMu null -> true, guvenli taraf).
+  Future<bool> isIkramReasonRequired() async {
+    if (_connectivity.isOnline) {
+      try {
+        final settings = await getSettings();
+        try {
+          await _localDb.cacheSettings(Map<String, dynamic>.from(settings));
+        } catch (_) {}
+        return IkramRules.sebepZorunluMu(settings['ikram_reason_required']);
+      } catch (e) {
+        print('[API] isIkramReasonRequired hatası, cache fallback: $e');
+      }
+    }
+    final cached = await _localDb.getCachedSettings();
+    return IkramRules.sebepZorunluMu(cached['ikram_reason_required']);
+  }
+
+  /// Kalemi IKRAM isaretle / geri al (iptal:true) — SADECE ONLINE.
+  /// Backend: PUT /api/pos/tickets/:ticketId/items/:itemId/ikram
+  ///   body {ikram_reason, waiter_id, iptal} — iptal edilmis/odenmis kalemi 400 ile reddeder.
+  /// Basarida lokal mirror'a da yazilir (markItemIkramMirror, sync_queue izi YOK) ->
+  /// internet hemen ardindan koparsa offline kapanis tutari dogru kalir.
+  Future<Map<String, dynamic>> setItemIkram({
+    required int ticketId,
+    required int itemId,
+    String? ikramReason,
+    int? waiterId,
+    bool iptal = false,
+  }) async {
+    if (!_connectivity.isOnline) {
+      // Yetki katmani offline'da zaten reddediyor (_hasPermission katı listesi);
+      // bu guard ikinci savunma hattı — offline kuyruklama BILEREK yok (backend
+      // odenmis/iptal kalemi reddeder; cevrimdisi dogrulanamaz).
+      return {'success': false, 'offline': true, 'error': 'İkram için internet bağlantısı gerekli'};
+    }
+    try {
+      final response = await _dio.put('/api/pos/tickets/$ticketId/items/$itemId/ikram', data: {
+        'ikram_reason': ikramReason,
+        if (waiterId != null) 'waiter_id': waiterId,
+        'iptal': iptal,
+      });
+      final data = response.data is Map
+          ? Map<String, dynamic>.from(response.data)
+          : <String, dynamic>{'success': true};
+      if (data['success'] != false) {
+        _logService.logAction(iptal ? 'Ikram geri alindi' : 'Ikram yapildi', details: {
+          'ticket_id': ticketId,
+          'item_id': itemId,
+          if (ikramReason != null && ikramReason.isNotEmpty) 'ikram_reason': ikramReason,
+        });
+        // Lokal mirror — kalem hangi id uzayindaysa coz (online UI server id verir).
+        try {
+          final resolved = await _resolveLocalTicketAndItem(ticketId, itemId);
+          await _localDb.markItemIkramMirror(
+            serverItemId: resolved.itemServerId ?? itemId,
+            localItemId: resolved.itemLocalId,
+            isIkram: !iptal,
+            reason: ikramReason,
+          );
+        } catch (_) {}
+      }
+      return data;
+    } on DioException catch (e) {
+      // 400 = backend reddi (odenmis/iptal kalem) — mesaji kullaniciya tasi.
+      final msg = e.response?.data is Map
+          ? ((e.response!.data as Map)['error']?.toString() ?? e.message)
+          : e.message;
+      print('[API] setItemIkram hatasi: $msg');
+      _logService.error(LogType.error, 'Ikram isaretleme hatasi',
+          error: e, details: {'ticket_id': ticketId, 'item_id': itemId, 'iptal': iptal});
+      return {'success': false, 'error': msg};
+    }
   }
 
   /// Ürün notlarını getir — online cache update + offline cache fallback

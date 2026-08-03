@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
+import '../services/ikram_rules.dart';
 import '../services/printer_service.dart';
 import '../services/log_service.dart';
 import '../services/image_cache_service.dart';
@@ -11,6 +12,23 @@ import '../services/storage_service.dart';
 import '../services/combo_calculator.dart';
 import '../providers/theme_provider.dart';
 import 'kitchen_print_retry_modal.dart';
+
+/// 3 Agu 2026 — YENI KALEM OTO-SECIM kurallari (saf; test/pos_oto_secim_test.dart dogrular).
+/// Mustafa: liste ters sirali (en yeni ustte) — o kalem ayni anda SECILI de gelsin.
+class PosOtoSecim {
+  PosOtoSecim._(); // instance yok
+
+  /// Ekleme aninda secim: [secilsin]=true ise yeni kalemin (gecici, negatif) id'si
+  /// secilir — kullanici baska kalem secmis olsa bile secim yeni urune gecer (beklenen).
+  /// false ise mevcut secim korunur (combo paketinin 2..N kalemleri: ILK kalem secili).
+  static int? eklemede({required int? mevcut, required int tempId, required bool secilsin}) =>
+      secilsin ? tempId : mevcut;
+
+  /// Sync sonrasi gecici id gercek id'ye donusur: secim gecici id'deyse KAYBOLMADAN
+  /// gercek id'ye tasinir; kullanici bu arada BASKA kalem sectiyse dokunulmaz.
+  static int? syncSonrasi({required int? mevcut, required int tempId, required int realId}) =>
+      mevcut == tempId ? realId : mevcut;
+}
 
 class AddItemModal extends StatefulWidget {
   final ApiService apiService;
@@ -132,7 +150,17 @@ class _AddItemModalState extends State<AddItemModal> {
     }
     // permissions Map beklenir ama offline cache'te List ([]) gelebilir (crash koruması).
     final raw = widget.waiter?['permissions'];
-    if (raw is! Map) return true; // List/null -> yetki bilgisi yok say, izin ver (eski davranış)
+    // 🔴 2 Agu 2026 — GUVENLIK ACIGI KAPATILDI (Mustafa: "su acigi duzelt").
+    // ESKIDEN: yetki verisi Map degilse (List/null) TUM yetkilere izin veriliyordu.
+    // Rutin islemler icin bu bilincli bir kolayliktı (veri gelmezse kasa kilitlenmesin),
+    // AMA para/mal kaybina yol acan yetkiler icin KABUL EDILEMEZ: yetki verisi eksik gelen
+    // bir kasa bedava urun dagitabilir, fiyat degistirebilirdi.
+    // ARTIK: asagidaki yetkiler ASLA varsayilan olarak ACILMAZ — veri yoksa REDDEDILIR.
+    const katiYetkiler = ['ikram', 'edit_prices'];
+    if (raw is! Map) return !katiYetkiler.contains(permission);
+    // 3 Agu 2026: ikram karari TEK KAYNAK IkramRules.yetkiVarMi (dogrudan testli).
+    // Ayni katilik: Map degilse yukarida zaten RED; Map ise SADECE ikram==true kabul.
+    if (permission == 'ikram') return IkramRules.yetkiVarMi(raw);
     return raw[permission] == true;
   }
 
@@ -539,12 +567,191 @@ class _AddItemModalState extends State<AddItemModal> {
   /// Varyant BUTONU (adisyondaki secili kaleme) ayri bir dialog kullaniyordu ve yeni POS
   /// ayarlarini (coklu secim / secim zorunlu) HIC OKUMUYORDU. Artik iki giris noktasi da
   /// BU fonksiyondan besleniyor; tek kod, tek davranis.
+  // ==========================================================================
+  // 3 Agu 2026 (Mustafa: "hazir varyant popda not ekleme alani da koysana, tek
+  // yerde cozelim isi. menude yine kalsin ama. AYNI KAPIYI kullansinlar.")
+  //
+  // TEK KAPI: not metni her yerde ayni kanaldan gider —
+  //   • yeni kalem  -> _addProductWithPrice(variantNote:) -> addTicketItem(notes:)
+  //   • mevcut kalem-> updateTicketItem(notes:)
+  // Hazir notlar da menudeki "Not Ekle" ile AYNI kaynaktan: apiService.getProductNotes()
+  // (cevrimdisinda cached_lookups 'product_notes' fallback'i var).
+  // Menudeki buton KALDIRILMADI — Mustafa "menude yine kalsin" dedi.
+  // ==========================================================================
+
+  /// Iki varyant penceresinin de kullandigi not alani. `ctrl` cagiranin
+  /// controller'i; hazir not cipine basmak metne ekler/cikarir.
+  Widget _notAlani(TextEditingController ctrl, void Function(void Function()) setSt) {
+    // Cache bossa arka planda cek — pencere BEKLEMEZ, cipler gelince belirir.
+    _notlariYukle(setSt);
+    final List hazirNotlar = _hazirNotCache;
+    // Metinde hazir notun secili olup olmadigini, virgullu listeyi parcalayarak anlar
+    // (serbest metin kullanicinin kendi yazdigi seydir, dokunulmaz).
+    List<String> parcala() => ctrl.text
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+
+    void degistir(String not) {
+      final list = parcala();
+      final i = list.indexWhere((e) => e.toLowerCase() == not.toLowerCase());
+      if (i >= 0) {
+        list.removeAt(i);
+      } else {
+        list.add(not);
+      }
+      final yeni = list.join(', ');
+      setSt(() {
+        ctrl.text = yeni;
+        ctrl.selection = TextSelection.collapsed(offset: yeni.length);
+      });
+    }
+
+    final secilenler = parcala().map((e) => e.toLowerCase()).toSet();
+
+    return Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Icon(Icons.sticky_note_2_outlined, size: 15, color: Colors.grey[600]),
+        const SizedBox(width: 5),
+        Text('Not', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.grey[700])),
+      ]),
+      const SizedBox(height: 6),
+      if (hazirNotlar.isNotEmpty) ...[
+        Wrap(spacing: 5, runSpacing: 5, children: [
+          for (final n in hazirNotlar)
+            if ((n['note']?.toString() ?? '').trim().isNotEmpty)
+              _notCipi(n['note'].toString().trim(),
+                  secilenler.contains(n['note'].toString().trim().toLowerCase()),
+                  () => degistir(n['note'].toString().trim())),
+        ]),
+        const SizedBox(height: 6),
+      ],
+      TextField(
+        controller: ctrl,
+        style: const TextStyle(fontSize: 13),
+        minLines: 1,
+        maxLines: 2,
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Serbest not (az pisisin, sogansiz...)',
+          hintStyle: TextStyle(fontSize: 12, color: Colors.grey[500]),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _notCipi(String etiket, bool secili, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: secili ? Colors.indigo[600] : Colors.grey[100],
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: secili ? Colors.indigo[700]! : Colors.grey[300]!),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (secili) ...[const Icon(Icons.check, size: 12, color: Colors.white), const SizedBox(width: 3)],
+          Text(etiket,
+              style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: secili ? Colors.white : Colors.grey[800])),
+        ]),
+      ),
+    );
+  }
+
+  // 🔴 3 Agu 2026 PERFORMANS (Mustafa: "flutter biraz yavasladi, ust uste urun
+  // ekledim butona hizli bastim geriden geldi") — SEBEP BUYDU: hazir notlar
+  // varyant penceresi acilmadan ONCE await ediliyordu. Olculen: /product-notes
+  // ~250 ms; yani HER varyant acilisinda 250 ms bekleme, ust uste eklemede birikti.
+  //
+  // COZUM: agdan cekme SICAK YOLDAN CIKTI.
+  //  • Notlar bir kez cekilip _hazirNotCache'te tutulur (her acilista tekrar YOK).
+  //  • Pencere ANINDA acilir; cache bossa yukleme ARKA PLANDA baslar ve veri
+  //    gelince pencerenin kendi setSt'i ile cipler belirir.
+  //  • Cevrimdisinda getProductNotes zaten SQLite cache'ine duser (yine engellemez).
+  List _hazirNotCache = const [];
+  bool _notlarYukleniyor = false;
+  // 3 Agu 2026 (dogrulama denetimi B3): ACIK pencerenin tazeleyicisi. Yukleme
+  // pencereden ONCE basladigi icin dialog'un setSt'i kaydedilemiyordu; parent
+  // setState ayri route'taki StatefulBuilder'i CIZMEZ -> cipler ilk acilista
+  // ancak kullanici bir seye dokununca beliriyordu. Artik son acik pencerenin
+  // tazeleyicisi burada tutulur ve veri gelince o cagrilir.
+  void Function(void Function())? _notYenileyici;
+
+  /// Engellemeyen yukleyici. `setSt` verilirse (acik pencere) veri gelince tazeler.
+  void _notlariYukle([void Function(void Function())? setSt]) {
+    // Yukleme SURSE BILE en son pencerenin tazeleyicisini kaydet (B3).
+    if (setSt != null) _notYenileyici = setSt;
+    if (_hazirNotCache.isNotEmpty || _notlarYukleniyor) return;
+    _notlarYukleniyor = true;
+    widget.apiService.getProductNotes().then((liste) {
+      _hazirNotCache = liste;
+      _notlarYukleniyor = false;
+      if (!mounted) return;
+      final yenile = _notYenileyici ?? setSt;
+      if (yenile != null) {
+        // Pencere bu arada kapandiysa setSt disposed element'e dokunabilir —
+        // yut, cache zaten dolu, bir sonraki acilista aninda gorunur.
+        try { yenile(() {}); } catch (_) { setState(() {}); }
+      } else {
+        setState(() {});
+      }
+    }).catchError((_) {
+      // 3 Agu 2026 (dogrulama denetimi B2): burada DEGER DONULMEZ. Zincir Future<void>;
+      // List donmek hata yolunda TypeError uretip "unhandled async error" gurultusu
+      // yapiyordu (analyzer: invalid_return_type_for_catch_error).
+      _notlarYukleniyor = false;
+    });
+  }
+
   Future<void> _openMultiVariantDialog(Map<String, dynamic> product, List variants,
       {Map<String, dynamic>? guncellenecekKalem}) async {
     final basePrice = _restaurantBasePrice(product);
     final productName = product['name']?.toString() ?? '';
     final zorunlu = _posVaryantZorunlu(product);
     final secili = <Map<String, dynamic>>[];
+
+    // 🔴 3 Agu 2026 (denetim bulgusu) — GUNCELLEME MODUNDA ON-SECIM.
+    // Pencere mevcut kalemi duzenlemek icin acildiginda secimler BOS geliyordu.
+    // Zorunlu degilse "Ekle" bos secimle AKTIF oldugu icin, kullanici hicbir seye
+    // dokunmadan Ekle'ye basinca extras=[] + fiyat=baz gonderiliyor ve kalemin
+    // VARYANTI, FIYAT FARKI ve nottaki varyant adi SESSIZCE SILINIYORDU.
+    // Artik kalemin mevcut secimleri (extras) varyant listesiyle ADIYLA eslestirilip
+    // isaretli gelir; kullanici dokunmazsa hicbir sey degismez.
+    if (guncellenecekKalem != null) {
+      dynamic _ex = guncellenecekKalem['extras'];
+      // extras iki sekilde gelir: backend jsonb -> List, cevrimdisi mirror -> JSON METIN.
+      if (_ex is String && _ex.trim().isNotEmpty) {
+        try { _ex = jsonDecode(_ex); } catch (_) { _ex = null; }
+      }
+      if (_ex is List) {
+        for (final e in _ex) {
+          if (e is! Map) continue;
+          final ad = (e['name']?.toString() ?? '').trim().toLowerCase();
+          if (ad.isEmpty || ad.startsWith('-')) continue; // '-' onekli = CIKARILAN malzeme
+          for (final raw in variants) {
+            if (raw is! Map) continue;
+            final v = Map<String, dynamic>.from(raw);
+            if ((v['name']?.toString() ?? '').trim().toLowerCase() != ad) continue;
+            final zatenVar = secili.any((x) => x['id'] == v['id'] && x['name'] == v['name']);
+            if (!zatenVar) secili.add(v);
+            break;
+          }
+        }
+      }
+    }
+
+    // 3 Agu 2026 — not alani (menudeki "Not Ekle" ile AYNI kaynak/kanal).
+    final notCtrl = TextEditingController(
+        text: guncellenecekKalem == null ? '' : _mevcutSerbestNot(guncellenecekKalem));
+    _notlariYukle(); // engellemez: pencere ANINDA acilir
 
     final onay = await showDialog<bool>(
       context: context,
@@ -611,6 +818,8 @@ class _AddItemModalState extends State<AddItemModal> {
               ]),
               const SizedBox(height: 8),
             ],
+            _notAlani(notCtrl, setSt),
+            const SizedBox(height: 10),
             Row(children: [
               Expanded(
                 child: Text(
@@ -657,9 +866,9 @@ class _AddItemModalState extends State<AddItemModal> {
           itemId: gItemId,
           // Not alanina fiyat YAZILMAZ (backend unit_price safety-net'i notlardaki
           // '+NTL' desenine bakiyor — cift sayim riski). Secimler extras'ta.
-          notes: secili.isEmpty
-              ? null
-              : secili.map((v) => v['name']?.toString() ?? '').join(', '),
+          // 3 Agu 2026 — varyant adlari + kullanicinin serbest notu AYNI alanda.
+          notes: _notuBirlestir(
+              secili.map((v) => v['name']?.toString() ?? '').toList(), notCtrl.text),
           unitPrice: basePrice + toplamFark,
           waiterId: widget.waiterId,
           extras: gExtras,
@@ -681,7 +890,9 @@ class _AddItemModalState extends State<AddItemModal> {
     final extras = secili
         .map((v) => {'name': v['name']?.toString() ?? '', 'price': _variantModifier(v)})
         .toList();
-    await _addProductWithPrice(product, productName, basePrice + toplamFark, extras: extras);
+    final _not = notCtrl.text.trim();
+    await _addProductWithPrice(product, productName, basePrice + toplamFark,
+        extras: extras, variantNote: _not.isEmpty ? null : _not);
   }
 
   // ============================================================================
@@ -756,6 +967,10 @@ class _AddItemModalState extends State<AddItemModal> {
     // 1 Agu 2026 (Mustafa: "ekle cikari da mevcut pencerede TAB olarak eklesene,
     // bosa tik yapmasin sonucta ayni urune ait") — ayri secim ekrani yerine AYNI pencerede
     // sekme. Secimler sekme degisince KAYBOLMAZ (ayni StatefulBuilder durumu).
+    // 3 Agu 2026 — not alani (AYNI kapi: _notAlani + variantNote kanali).
+    final notCtrl = TextEditingController();
+    _notlariYukle(); // engellemez: pencere ANINDA acilir
+
     int sekme = 0; // 0 = Varyant, 1 = Ekle/Cikar, 2 = Combo
     // 1 Agu 2026: Combo sekmesinden cikilirsa bu bayrak dolar ve pencere kapandiktan
     // SONRA combo secim ekrani acilir (combo'nun kendi N-secim/paket-bolme mantigi var).
@@ -1041,6 +1256,12 @@ class _AddItemModalState extends State<AddItemModal> {
               const SizedBox(height: 12),
               const Divider(height: 1),
               const SizedBox(height: 12),
+              // 3 Agu 2026 — not alani (Combo sekmesinde GIZLI: orada kalem
+              // combo ekraninda olusur, not oraya ait degil).
+              if (sekme != 2) ...[
+                _notAlani(notCtrl, setSt),
+                const SizedBox(height: 12),
+              ],
               Row(children: [
                 Expanded(child: Text(
                   hazir ? '${toplam.toStringAsFixed(2)} TL' : 'Zorunlu seçim bekleniyor',
@@ -1089,7 +1310,54 @@ class _AddItemModalState extends State<AddItemModal> {
     for (final c in cikarilan) toplam += _icerikFiyati(c);
     for (final e in eklenen) toplam += _icerikFiyati(e);
 
-    await _addProductWithPrice(product, productName, toplam, extras: extras);
+    final _not2 = notCtrl.text.trim();
+    await _addProductWithPrice(product, productName, toplam,
+        extras: extras, variantNote: _not2.isEmpty ? null : _not2);
+  }
+
+  /// Varyant adlari + serbest not -> tek `notes` metni. Bos ise null
+  /// (backend'de notes NULL kalir, eski davranisla ayni).
+  String? _notuBirlestir(List<String> varyantAdlari, String serbest) {
+    final parts = <String>[];
+    for (final v in varyantAdlari) {
+      if (v.trim().isNotEmpty) parts.add(v.trim());
+    }
+    final sn = serbest.trim();
+    if (sn.isNotEmpty) parts.add(sn);
+    return parts.isEmpty ? null : parts.join(', ');
+  }
+
+  /// Guncelleme modunda kalemin notundan VARYANT ADLARINI ayiklayip geriye
+  /// kalan serbest metni dondurur — pencere acilinca kullanicinin kendi notu
+  /// kutuda durur, varyant adlari tekrar yazilmaz (cift yazim olmaz).
+  String _mevcutSerbestNot(Map<String, dynamic> kalem) {
+    final ham = kalem['notes']?.toString().trim() ?? '';
+    if (ham.isEmpty) return '';
+    // 🔴 3 Agu 2026 — extras IKI SEKILDE gelir: backend jsonb -> List,
+    // cevrimdisi SQLite mirror -> JSON METIN. Sadece List islenirse mirror'dan
+    // yuklenen kalemde varyant adlari ayiklanamaz ve her duzenlemede NOTA TEKRAR
+    // eklenir ("Buyuk Boy, Buyuk Boy, az pissin") — birikir, mutfak fisine basar.
+    // Dosyanin kendi deseni (_secimAltSatirlari) ikisini de cozuyor; ayni kural.
+    dynamic extras = kalem['extras'];
+    if (extras is String && extras.trim().isNotEmpty) {
+      try { extras = jsonDecode(extras); } catch (_) { extras = null; }
+    }
+    final adlar = <String>{};
+    if (extras is List) {
+      for (final e in extras) {
+        if (e is Map) {
+          final n = e['name']?.toString().trim() ?? '';
+          if (n.isNotEmpty) adlar.add(n.toLowerCase());
+        }
+      }
+    }
+    if (adlar.isEmpty) return ham;
+    final kalan = ham
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty && !adlar.contains(e.toLowerCase()))
+        .toList();
+    return kalan.join(', ');
   }
 
   /// Kalem alt satiri: secilen varyant / eklenen malzeme / CIKARILAN malzeme.
@@ -1225,14 +1493,24 @@ class _AddItemModalState extends State<AddItemModal> {
     required VoidCallback onTap,
     int rozet = 0,
   }) {
+    // 2 Agu 2026: SADECE GORSEL — secili sekme hafif golgeli koyu hap, secili
+    // olmayan beyaz + ince cerceve (eski duz gri dolgudan daha net hiyerarsi).
     return Material(
-      color: secili ? const Color(0xFF1F2937) : Colors.grey[100],
+      color: secili ? const Color(0xFF1F2937) : Colors.white,
       borderRadius: BorderRadius.circular(10),
+      elevation: secili ? 2 : 0,
+      shadowColor: Colors.black26,
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
         onTap: onTap,
-        child: Padding(
+        child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: secili ? Colors.transparent : const Color(0xFFE2E8F0),
+            ),
+          ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
             Icon(ikon, size: 16, color: secili ? Colors.white : Colors.grey[700]),
             const SizedBox(width: 6),
@@ -1634,7 +1912,9 @@ class _AddItemModalState extends State<AddItemModal> {
         variantNote: note,
         comboGroupId: comboGid,
         comboGroupName: productName,          // ANA urun adi → fiste ust satir
-        comboPickName: note ?? productName);  // secilen varyant → fiste alt satir
+        comboPickName: note ?? productName,   // secilen varyant → fiste alt satir
+        // 3 Agu 2026: combo paketinde SADECE ILK kalem secili gelir (hepsi degil)
+        selectItem: i == 0);
     }
   }
 
@@ -1693,11 +1973,18 @@ class _AddItemModalState extends State<AddItemModal> {
     // Combo paketinin fiyatı seçilen N kaleme BÖLÜNEREK yazılır
     // (splitComboPackagePrice). Kalem tek başına varyantla değiştirilirse bölünmüş
     // fiyat ile yeni varyant modifier'ı tutmaz → adisyon tutarı YANLIŞ olur.
-    if (_comboIsActive(Map<String, dynamic>.from(prod))) {
-      final ad = prod['name']?.toString() ?? 'Bu ürün';
-      _showError('$ad combo ürünü — varyant sonradan değiştirilemez. '
-          'Combo paketinin fiyatı seçilen ürünlere bölündüğü için kalemi iptal edip '
-          'combo seçimini yeniden yapmanız gerekir.');
+    // 2 Agu 2026 DUZELTME (Mustafa yakaladi): kilit ARTIK KALEM SEVIYESINDE.
+    // ESKI: urun combo_enabled ise TUM kalemleri kilitliyordu -> ayni urunu combo DISI,
+    // duz varyantla eklediginde onun da varyanti degistirilemiyordu (yanlis engelleme).
+    // DOGRUSU: sadece bir combo PAKETINE ait kalem korunur (combo_group_id DOLU), cunku
+    // paket fiyati uyelere bolunmustur; tek uye degisirse tutar bozulur. Duz eklenen
+    // kalemin bolunmus fiyati YOKTUR, serbestce degistirilebilir.
+    final _kalemGid = (item['combo_group_id'] ?? '').toString().trim();
+    if (_kalemGid.isNotEmpty) {
+      final ad = (item['combo_group_name'] ?? prod['name'] ?? 'Bu ürün').toString();
+      _showError('$ad combo paketinin parçası — varyant sonradan değiştirilemez. '
+          'Paketin fiyatı ürünlere bölündüğü için kalemi iptal edip combo seçimini '
+          'yeniden yapmanız gerekir.');
       return;
     }
 
@@ -1920,9 +2207,14 @@ class _AddItemModalState extends State<AddItemModal> {
   /// adisyon ekrani bunlari ANA URUN altinda gruplayabilir. Alan adlari panel_orders.items[]
   /// icindeki WEB STANDARDIYLA AYNI (api/kitchen.js + admin/kitchen.html gruplama UI'i HAZIR).
   /// Combo DISI eklemelerde null gecilir → hicbir davranis degismez (geri uyumlu).
+  /// 3 Agu 2026 (Mustafa): yeni eklenen kalem OTOMATIK SECILI gelsin (liste ters sirali,
+  /// en yeni ustte — o kalem ayni anda secili de olur). [selectItem]=false SADECE combo
+  /// paketinin 2..N kalemlerinde kullanilir (paketin ILK kalemi secili gelir, hepsi degil).
+  /// Gecici id secimi guvenli: asagida `if (_selectedItemId == tempId) _selectedItemId = realId`
+  /// eslemesi sync sonrasi secimi gercek id'ye tasir (kaybolmaz).
   Future<void> _addProductWithPrice(Map<String, dynamic> product, String displayName, double price,
       {String? variantNote, String? comboGroupId, String? comboGroupName, String? comboPickName,
-      List<Map<String, dynamic>>? extras}) async {
+      List<Map<String, dynamic>>? extras, bool selectItem = true}) async {
     try {
       final productId = _safeInt(product['id']);
       if (productId == null) return;
@@ -1953,6 +2245,11 @@ class _AddItemModalState extends State<AddItemModal> {
           'combo_group_name': comboGroupName,
           'combo_pick_name': comboPickName,
         });
+        // 3 Agu 2026: yeni kalem otomatik secili (kullanici baska kalem secmis olsa bile
+        // secim yeni urune gecer — beklenen davranis). Sync olunca tempId->realId eslemesi
+        // asagida secimi korur. Kural saf ve testli: PosOtoSecim.eklemede.
+        _selectedItemId = PosOtoSecim.eklemede(
+            mevcut: _selectedItemId, tempId: tempId, secilsin: selectItem);
       });
 
       double basePrice = 0;
@@ -1996,12 +2293,15 @@ class _AddItemModalState extends State<AddItemModal> {
           }
         }
         if (realId == null || realId <= 0) return;
+        final rid = realId; // closure icinde null-promotion kaybolmasin
         setState(() {
           final idx = _ticketItems.indexWhere((i) => _safeInt(i['id']) == tempId);
           if (idx >= 0) {
             _ticketItems[idx] = Map<String, dynamic>.from(_ticketItems[idx])..['id'] = realId;
           }
-          if (_selectedItemId == tempId) _selectedItemId = realId;
+          // 3 Agu 2026: gecici id seciliyken sync olursa secim KAYBOLMAZ (PosOtoSecim, testli)
+          _selectedItemId = PosOtoSecim.syncSonrasi(
+              mevcut: _selectedItemId, tempId: tempId, realId: rid);
         });
       }).catchError((e) {
         _showError('Sunucu hatasi: $e');
@@ -2014,24 +2314,42 @@ class _AddItemModalState extends State<AddItemModal> {
 
   /// Seçili ürüne not ekle popup — hazır notlar + serbest yazı
   Future<void> _openNoteDialog() async {
-    final item = _findSelectedItem();
-    if (item == null) return;
+    var item = _findSelectedItem();
+    // 🔴 3 Agu 2026 (Mustafa: "not ekle calismiyor varyant ekledigim uründe").
+    // SEBEP: buton `_selectedItemId != null` ile aktif oluyordu ama varyant/icerik ekrani
+    // YENI KALEM ekliyor; secim eski ya da gecici (client_temp_id) kimlikte kalirsa
+    // _findSelectedItem() null doner ve fonksiyon SESSIZCE return ederdi -> buton
+    // tiklaniyor, hicbir sey olmuyordu. Artik: bir kez tazele, yine bulunamazsa SOYLE.
+    if (item == null && _selectedItemId != null) {
+      await _loadTicketItems();
+      if (!mounted) return;
+      item = _findSelectedItem();
+    }
+    if (item == null) {
+      if (_selectedItemId != null) {
+        _showError('Seçili ürün bulunamadı — lütfen ürüne tekrar dokunup deneyin.');
+        if (mounted) setState(() => _selectedItemId = null);
+      }
+      return;
+    }
+    // Buradan sonrasi null OLAMAZ; asagidaki mevcut kod non-null bekliyor (tip daraltma).
+    final Map<String, dynamic> secili = item;
     // 12 May 2026 debug: yanlis ürüne not yazma bug'i tracker
     LogService().logAction('Not dialog acildi', details: {
       'selected_item_id': _selectedItemId,
-      'item_id': item['id'],
-      'item_product_id': item['product_id'],
-      'item_product_name': item['product_name'],
+      'item_id': secili['id'],
+      'item_product_id': secili['product_id'],
+      'item_product_name': secili['product_name'],
       'ticket_items_count': _ticketItems.length,
       'all_items': _ticketItems.map((i) => '${i['id']}:${i['product_name']}').toList(),
     });
-    final currentNote = item['notes']?.toString() ?? '';
+    final currentNote = secili['notes']?.toString() ?? '';
     final controller = TextEditingController(text: currentNote);
 
     // Ürünün category_id'sini bul + MUTLAK FIYAT modeli icin urun kaydini sakla
     // (kayitta baz fiyat urun kaydindan okunur: restaurant_price ?? price —
     // item.unit_price'tan TURETILMEZ, o eski ekstralarla kirlenmis olabilir)
-    final productId = item['product_id'];
+    final productId = secili['product_id'];
     int? categoryId;
     dynamic dialogProd;
     if (productId != null) {
@@ -2154,9 +2472,9 @@ class _AddItemModalState extends State<AddItemModal> {
           return Wrap(
             spacing: 8, runSpacing: 8,
             children: items.map<Widget>((item) {
-              final id = item['id'] as int;
-              final name = item[nameKey]?.toString() ?? '';
-              final price = _safeDouble(item['price']);
+              final id = secili['id'] as int;
+              final name = secili[nameKey]?.toString() ?? '';
+              final price = _safeDouble(secili['price']);
               final isSelected = selectedIds.contains(id);
               // 22 May 2026: Dokunmatik POS — InkWell + min 52
               return Material(
@@ -2209,7 +2527,7 @@ class _AddItemModalState extends State<AddItemModal> {
                     children: [
                       Row(
                         children: [
-                          Expanded(child: Text('${item['product_name']}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+                          Expanded(child: Text('${secili['product_name']}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
                           if (extraPrice > 0) Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(color: Colors.green[50], borderRadius: BorderRadius.circular(8)),
@@ -2328,7 +2646,7 @@ class _AddItemModalState extends State<AddItemModal> {
     if (result == null) return;
 
     try {
-      final itemId = _safeInt(item['id']);
+      final itemId = _safeInt(secili['id']);
       final ticketId = widget.ticketId;
       if (itemId == null) return;
 
@@ -2337,7 +2655,7 @@ class _AddItemModalState extends State<AddItemModal> {
       final freeSum = result['freeSum'] as double? ?? 0;
       final priceDirty = result['priceDirty'] as bool? ?? true;
 
-      final currentUnitPrice = _safeDouble(item['unit_price']);
+      final currentUnitPrice = _safeDouble(secili['unit_price']);
 
       // 12 Haz 2026 — MUTLAK FIYAT modeli (F1/F2 fix, Web POS ticket.js ile ayni):
       // - Fiyat ogesi DEGISMEDIYSE unit_price gonderilmez → backend COALESCE
@@ -2377,11 +2695,37 @@ class _AddItemModalState extends State<AddItemModal> {
         'new_unit_price': newUnitPrice,
       });
 
+      // 🔴 3 Agu 2026 — YAZDIRILMIS / COMBO KALEMDE FIYAT GONDERILMEZ.
+      // Denetim bulgusu: varyant butonuna koydugumuz kilit BURADA YOKTU; "Not Ekle"
+      // penceresindeki global varyant/ekstra cipleri fiyati degistirip gonderiyordu,
+      // yani mutfaga GITMIS urunun fiyati bu yoldan degistirilebiliyordu.
+      // Mustafa kurali: "bir kanaldaki bugi TUM kanallarda ara."
+      //
+      // KAPSAM: NOT yazma SERBEST kalir (bugune kadar calisan akis bozulmaz) —
+      // sadece FIYAT gonderimi durdurulur ve kullaniciya sebebi soylenir.
+      // Sunucuda da ayni kilit var (panel-direct/tickets.js updateItem); burasi
+      // kullaniciya ACIKLAMA veren on kapi, orasi son savunma hatti.
+      final _kalemK = _findSelectedItem() ?? _ticketItems.where((i) => _safeInt(i['id']) == itemId).firstOrNull;
+      final bool _fisCiktiK = _kalemK != null && (_kalemK['printed'] == 1 || _kalemK['printed'] == true);
+      final bool _comboK = _kalemK != null &&
+          (_kalemK['combo_group_id']?.toString().trim().isNotEmpty ?? false);
+      // newUnitPrice nullable — null ise zaten fiyat gonderilmiyor demektir.
+      final double? _yeniFiyat = newUnitPrice;
+      final bool _fiyatDegisti = _kalemK != null && _yeniFiyat != null &&
+          (_safeDouble(_kalemK['unit_price']) - _yeniFiyat).abs() > 0.005;
+
+      if ((_fisCiktiK || _comboK) && _fiyatDegisti) {
+        _showError(_fisCiktiK
+            ? 'Bu ürünün fişi mutfağa gitti — fiyatı değiştiren seçim uygulanamaz. Not yazabilirsiniz.'
+            : 'Bu ürün bir combo paketinin parçası — fiyatı değiştiren seçim uygulanamaz. Not yazabilirsiniz.');
+      }
+
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         notes: note,
-        unitPrice: newUnitPrice,
+        // Kilit aktifse fiyat GONDERILMEZ -> backend COALESCE ile mevcut fiyati korur.
+        unitPrice: ((_fisCiktiK || _comboK) && _fiyatDegisti) ? null : newUnitPrice,
       );
 
       await _loadTicketItems();
@@ -2971,7 +3315,12 @@ class _AddItemModalState extends State<AddItemModal> {
     // Ödenmemiş ürünleri bul
     await _loadTicketItems();
     final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
-    final unpaidItems = activeItems.where((i) => i['payment_status'] != 'paid').toList();
+    // 3 Agu 2026 IKRAM: ikram kalemler payItems'a GONDERILMEZ (parasi alinmayacak) —
+    // backend close() ikram dusumunu kendisi authoritative yapar. Ikram haric tum
+    // kalemler odendiyse dogrudan close'a duser (asagidaki unpaidIds.isEmpty dali).
+    final unpaidItems = activeItems
+        .where((i) => i['payment_status'] != 'paid' && !IkramRules.kalemIkramMi(i))
+        .toList();
     final unpaidIds = unpaidItems.map((i) => (i['id'] as num).toInt()).toList();
 
     if (unpaidIds.isEmpty) {
@@ -3425,6 +3774,73 @@ class _AddItemModalState extends State<AddItemModal> {
         onClose: () => Navigator.pop(ctx),
       ),
     );
+  }
+
+  // ==========================================================================
+  // 3 Agu 2026 — IKRAM AKISI (Mustafa onayli): SADECE ISARETLEME, ayri odeme yolu YOK.
+  // Kalem sec -> sebep (ikram_reason_required ayarina gore zorunlu/opsiyonel) -> onay.
+  // Backend: PUT /tickets/:id/items/:itemId/ikram (iptal:true geri alir).
+  // Kapanis MEVCUT odeme butonlariyla yapilir; backend close() ikram'i tahsilattan duser.
+  // Yetki: _hasPermission('ikram') KATI (veri yoksa RED) — buton zaten pasif, burada
+  // ikinci savunma hatti var. SADECE ONLINE (parcali odeme deseniyle ayni server-id sarti).
+  // ==========================================================================
+  Future<void> _openIkramFlow({Future<void> Function()? sonrasindaYenile}) async {
+    if (!_hasPermission('ikram')) {
+      _showError('İkram yetkiniz bulunmamaktadır.');
+      return;
+    }
+    if (!widget.apiService.isOnline) {
+      _showError('İkram için internet bağlantısı gerekli.');
+      return;
+    }
+
+    await _loadTicketItems();
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    if (activeItems.isEmpty) return;
+
+    // Parcali odeme kalibi: ticket'in server'a sync oldugunu dogrula, gercek server ID al.
+    int? serverTicketId;
+    try {
+      final ticketData = await widget.apiService.getTableTicket(widget.tableId);
+      final serverTicket = ticketData?['ticket'] as Map<String, dynamic>?;
+      if (serverTicket != null && serverTicket['offline'] != true) {
+        final id = serverTicket['id'];
+        serverTicketId = id is int ? id : int.tryParse(id?.toString() ?? '');
+      }
+    } catch (_) {}
+    if (serverTicketId == null) {
+      _showError('Adisyon henuz sunucuya senkronize edilmedi. Lutfen birkac saniye bekleyip tekrar deneyin.');
+      return;
+    }
+
+    // Sebep listesi (cache'li) + zorunluluk ayari (bilinmiyorsa ZORUNLU — guvenli taraf).
+    List<Map<String, dynamic>> sebepler = const [];
+    bool sebepZorunlu = true;
+    try { sebepler = await widget.apiService.getIkramReasons(); } catch (_) {}
+    try { sebepZorunlu = await widget.apiService.isIkramReasonRequired(); } catch (_) {}
+
+    if (!mounted) return;
+    final degisti = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _IkramDialog(
+        items: activeItems,
+        ticketId: serverTicketId!,
+        waiterId: widget.waiterId,
+        apiService: widget.apiService,
+        sebepler: sebepler,
+        sebepZorunlu: sebepZorunlu,
+        onClose: () => Navigator.pop(ctx, false),
+        onDone: () => Navigator.pop(ctx, true),
+      ),
+    );
+
+    if (degisti == true) {
+      await _loadTicketItems();
+      widget.onItemAdded();
+      // "Tumunu Gor" pop-up'i acik kaldi — icerigini tazele (Mustafa akis 3).
+      if (sonrasindaYenile != null) await sonrasindaYenile();
+    }
   }
 
   /// Adisyon iptal
@@ -4419,12 +4835,19 @@ class _AddItemModalState extends State<AddItemModal> {
     double total = 0;
     for (var item in _ticketItems) {
       if (item['status'] == 'cancelled') continue;
+      // 3 Agu 2026 IKRAM: ikram kalemin parasi ALINMAZ -> "Kalan"a girmez
+      if (IkramRules.kalemIkramMi(item)) continue;
       if (item['payment_status'] != 'paid') {
         total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
       }
     }
     return total;
   }
+
+  /// 3 Agu 2026 IKRAM: aktif kalemlerdeki ikram toplami (tahsilattan dusulecek miktar).
+  /// Online'da backend close() ayni dusumu authoritative yapar; bu POS onizlemesi +
+  /// offline kapanis tutaridir. is_ikram esnek guard (SQLite 0/1) IkramRules'ta.
+  double get _ikramTotal => IkramRules.ikramToplami(_ticketItems);
 
   double get _ticketSubtotal {
     double total = 0;
@@ -4472,7 +4895,8 @@ class _AddItemModalState extends State<AddItemModal> {
     // Combo indirimi manuel indirimle CAKISMAZ: combo aktif urunlerde combo, digerlerinde manuel.
     // Basit ve guvenli: toplam = subtotal - manuel_indirim - combo_indirim (combo zaten sadece
     // combo urunlerin set tutarina uygulanir; backend authoritative kesin hesabi kapanista yapar).
-    final t = _ticketSubtotal - _ticketDiscount - _comboDiscount;
+    // 3 Agu 2026 IKRAM: ikram kalemler de tahsilattan duser (backend close() ile ayni kural).
+    final t = _ticketSubtotal - _ticketDiscount - _comboDiscount - _ikramTotal;
     return t < 0 ? 0 : t;
   }
 
@@ -4599,7 +5023,7 @@ class _AddItemModalState extends State<AddItemModal> {
           // "Tümü" butonu - tam genişlik
           Padding(
             padding: const EdgeInsets.fromLTRB(6, 6, 6, 0),
-            child: _buildCategoryButton(theme, null, 'Tümü', Icons.apps),
+            child: _buildCategoryButton(theme, null, 'Tümü', Icons.apps, yatay: true),
           ),
           Expanded(
             child: GridView.builder(
@@ -4628,7 +5052,10 @@ class _AddItemModalState extends State<AddItemModal> {
     );
   }
 
-  Widget _buildCategoryButton(ThemeProvider theme, int? categoryId, String label, IconData? icon, {String emoji = ''}) {
+  // 2 Agu 2026 (Mustafa: "solda tumu butonu asagi dogru cok uzun, genislemesine uzun olsun"):
+  // [yatay]=true -> ikon ve etiket YAN YANA, alcak yukseklik. Tam genislikteki "Tumu"
+  // butonu icin kullanilir; 2 sutunlu kategori izgarasi ESKISI GIBI dikey kalir.
+  Widget _buildCategoryButton(ThemeProvider theme, int? categoryId, String label, IconData? icon, {String emoji = '', bool yatay = false}) {
     // 22 May 2026: Dokunmatik POS — InkWell ile ripple + min 64 yukseklik
     final isSelected = _selectedCategoryId == categoryId;
     return Material(
@@ -4642,7 +5069,7 @@ class _AddItemModalState extends State<AddItemModal> {
         splashColor: theme.primaryColor.withOpacity(0.3),
         highlightColor: theme.primaryColor.withOpacity(0.15),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 68),
+          constraints: BoxConstraints(minHeight: yatay ? 44 : 68),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
@@ -4650,7 +5077,32 @@ class _AddItemModalState extends State<AddItemModal> {
               width: isSelected ? 2 : 1,
             ),
           ),
-          child: Column(
+          child: yatay
+            // YATAY: ikon solda, etiket saginda — dokunma hedefi 44px, genislik tam.
+            ? Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (emoji.isNotEmpty)
+                    Text(emoji, style: const TextStyle(fontSize: 18))
+                  else if (icon != null)
+                    Icon(icon, color: isSelected ? Colors.white : Colors.grey[700], size: 19),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isSelected ? Colors.white : Colors.grey[800],
+                        fontSize: 13,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.w600,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            : Column(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -4795,7 +5247,11 @@ class _AddItemModalState extends State<AddItemModal> {
 
   // SAĞ: Adisyon paneli + aksiyon butonları
   Widget _buildTicketPanel(ThemeProvider theme) {
-    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    // 2 Agu 2026 (Mustafa: "adisyonda en son eklenen urun en basa gelsin"):
+    // SADECE EKRAN SIRASI ters cevrilir (en yeni ustte). Secim itemId uzerinden
+    // yapildigi icin etkilenmez; odeme/yazdirma/fis akislarindaki DIGER activeItems
+    // listelerine (satir ~2983 ve ~3395) DOKUNULMADI -> fis sirasi KRONOLOJIK kalir.
+    final activeItems = _ticketItems.where((i) => i['status'] != 'cancelled').toList().reversed.toList();
     final hasItems = activeItems.isNotEmpty;
 
     return Container(
@@ -4819,6 +5275,29 @@ class _AddItemModalState extends State<AddItemModal> {
                 Icon(Icons.receipt_long, size: 16, color: theme.primaryColor),
                 const SizedBox(width: 6),
                 Text('Adisyon', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey[800])),
+                const SizedBox(width: 8),
+                // 2 Agu 2026 (Mustafa): "Tumunu Gor" rozeti — masadaki TUM urunleri
+                // ADETLERI BIRLESTIRILMIS halde gosterir (4 ayri "Cay" yerine "4x Cay").
+                // SALT OKUNUR pop-up: hicbir kalem/tutar/akis degismez, garsona kolaylik.
+                if (activeItems.isNotEmpty)
+                  Material(
+                    color: theme.primaryColor.withOpacity(0.10),
+                    borderRadius: BorderRadius.circular(20),
+                    child: InkWell(
+                      onTap: () => _tumunuGorDialog(theme),
+                      borderRadius: BorderRadius.circular(20),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.list_alt_rounded, size: 13, color: theme.primaryColor),
+                          const SizedBox(width: 4),
+                          Text('Tümünü Gör',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                                  color: theme.primaryColor, letterSpacing: 0.2)),
+                        ]),
+                      ),
+                    ),
+                  ),
                 const Spacer(),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -4926,6 +5405,26 @@ class _AddItemModalState extends State<AddItemModal> {
                       )),
                   const SizedBox(height: 4),
                 ],
+                // 3 Agu 2026 IKRAM: ikram dusumu satiri (indirim/combo yoksa Ara Toplam da goster)
+                if (_ikramTotal > 0) ...[
+                  if (_ticketDiscount <= 0 && _comboDiscount <= 0)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Ara Toplam', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                        Text('${_ticketSubtotal.toStringAsFixed(2)} TL', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                      ],
+                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('İkram', style: TextStyle(fontSize: 11, color: const Color(0xFFEA580C))),
+                      Text('-${_ikramTotal.toStringAsFixed(2)} TL',
+                          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFFEA580C))),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                ],
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -4950,44 +5449,60 @@ class _AddItemModalState extends State<AddItemModal> {
 
     // Buton liste yapisini bir kerede tanimla (group: 1-4)
     final btnGroup1 = <Widget>[
-      _buildActionBtnVertical(icon: Icons.edit_note, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null),
+      _buildActionBtnVertical(icon: Icons.edit_note_rounded, label: 'Not Ekle', color: Colors.blueGrey, onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null),
       _buildActionBtnVertical(
-        icon: Icons.tune,
+        icon: Icons.tune_rounded,
         label: 'Varyant',
         color: const Color(0xFFF59E0B),
         onTap: hasItems && _selectedItemId != null && _variantsForSelectedItem().isNotEmpty
             ? _openVariantDialogForSelected
             : null,
       ),
-      _buildActionBtnVertical(icon: Icons.close, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && (_hasPermission('cancel_item') || _hasPermission('cancel_item_unprinted')) ? _cancelSelectedItem : null),
+      _buildActionBtnVertical(icon: Icons.close_rounded, label: 'Ürün İptal', color: Colors.red[400]!, onTap: hasItems && _selectedItemId != null && (_hasPermission('cancel_item') || _hasPermission('cancel_item_unprinted')) ? _cancelSelectedItem : null),
       _buildActionBtnVertical(
-        icon: Icons.drive_file_move,
+        icon: Icons.drive_file_move_rounded,
         label: 'Ürün Taşı',
         color: const Color(0xFF7C3AED),
         onTap: hasItems && _selectedItemId != null && _hasPermission('move_item') ? _moveSelectedItem : null,
       ),
-      _buildActionBtnVertical(icon: Icons.restaurant, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
-      _buildActionBtnVertical(icon: Icons.print, label: 'Yazdır', color: Colors.blueGrey, onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null),
+      _buildActionBtnVertical(icon: Icons.restaurant_rounded, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
+      _buildActionBtnVertical(icon: Icons.print_rounded, label: 'Yazdır', color: Colors.blueGrey, onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null),
     ];
 
     final btnGroup2 = <Widget>[
       if (_hasPermission('apply_discount'))
-        _buildActionBtnVertical(icon: Icons.percent, label: 'İndirim', color: const Color(0xFFE11D48), onTap: hasItems ? _openDiscountDialog : null),
+        _buildActionBtnVertical(icon: Icons.percent_rounded, label: 'İndirim', color: const Color(0xFFE11D48), onTap: hasItems ? _openDiscountDialog : null),
       if (_hasPermission('transfer_table'))
-        _buildActionBtnVertical(icon: Icons.swap_horiz, label: 'Masa Değiştir', color: const Color(0xFF0EA5E9), onTap: hasItems ? _transferTable : null),
-      _buildActionBtnVertical(icon: Icons.splitscreen, label: 'Parçalı Ödeme', color: const Color(0xFF7C3AED), onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null),
+        _buildActionBtnVertical(icon: Icons.swap_horiz_rounded, label: 'Masa Değiştir', color: const Color(0xFF0EA5E9), onTap: hasItems ? _transferTable : null),
+      _buildActionBtnVertical(icon: Icons.splitscreen_rounded, label: 'Parçalı Ödeme', color: const Color(0xFF7C3AED), onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null),
+      // 3 Agu 2026 (Mustafa: "parcali odeme yaninda yok buton halen") — IKRAM'i once
+      // sadece "Tumunu Gor" pop-up'ina koymustum; Mustafa'nin baktigi yer SAGDAKI ANA
+      // MENU. Parcali Odeme'nin HEMEN YANINA buraya da eklendi. Ayni akis, ayni
+      // fonksiyon (_openIkramFlow) — AYRI bir odeme yolu DEGIL, sadece isaretleme.
+      // Yetki yoksa GIZLI (komsulari Indirim/Masa Degistir ile ayni desen).
+      // 3 Agu 2026 DUZELTME (yorum-kod uyumsuzlugu): _hasPermission('ikram')
+      // cevrimdisinda da false doner, yani buton cevrimdisinda "pasif" DEGIL
+      // TAMAMEN GIZLI olur. Asagidaki isOnline guard'i yalnizca "build online
+      // yapildi, sonra baglanti koptu" yarisini korur (ikram server-authoritative).
+      if (_hasPermission('ikram'))
+        _buildActionBtnVertical(
+          icon: Icons.card_giftcard_rounded,
+          label: 'İkram',
+          color: const Color(0xFFEA580C),
+          onTap: hasItems && widget.apiService.isOnline ? () => _openIkramFlow() : null,
+        ),
     ];
 
     final btnGroup3 = <Widget>[
-      _buildActionBtnVertical(icon: Icons.payments, label: 'Nakit Kapat', color: theme.primaryColor, onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null),
-      _buildActionBtnVertical(icon: Icons.credit_card, label: 'Kart Kapat', color: const Color(0xFF3B82F6), onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null),
-      _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Nakit', color: const Color(0xFF059669), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('cash') : null),
-      _buildActionBtnVertical(icon: Icons.receipt_long, label: 'Yaz+Kart', color: const Color(0xFF2563EB), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('credit_card') : null),
+      _buildActionBtnVertical(icon: Icons.payments_rounded, label: 'Nakit Kapat', color: theme.primaryColor, onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null),
+      _buildActionBtnVertical(icon: Icons.credit_card_rounded, label: 'Kart Kapat', color: const Color(0xFF3B82F6), onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null),
+      _buildActionBtnVertical(icon: Icons.receipt_long_rounded, label: 'Yaz+Nakit', color: const Color(0xFF059669), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('cash') : null),
+      _buildActionBtnVertical(icon: Icons.receipt_long_rounded, label: 'Yaz+Kart', color: const Color(0xFF2563EB), onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt') ? () => _printAndCloseTicket('credit_card') : null),
       // 15 Tem 2026: Panelden gelen DİNAMİK ödeme yöntemleri (nakit/kart hariç). Her biri "X Kapat".
       // Kod (code) backend'e payment_method olarak gider; display_name fiş/dialog etiketinde kullanılır.
       for (final pm in _dynamicPaymentMethods)
         _buildActionBtnVertical(
-          icon: Icons.account_balance_wallet,
+          icon: Icons.account_balance_wallet_rounded,
           label: '${pm['display_name']} Kapat',
           color: const Color(0xFF7C3AED),
           onTap: hasItems && _hasPermission('close_ticket')
@@ -4998,39 +5513,62 @@ class _AddItemModalState extends State<AddItemModal> {
 
     final btnGroup4 = <Widget>[
       if (_hasPermission('void_ticket'))
-        _buildActionBtnVertical(icon: Icons.delete_outline, label: 'Adisyon İptal', color: const Color(0xFFDC2626), onTap: _voidTicket),
+        _buildActionBtnVertical(icon: Icons.delete_outline_rounded, label: 'Adisyon İptal', color: const Color(0xFFDC2626), onTap: _voidTicket),
     ];
 
+    // 2 Agu 2026: SADECE GORSEL — grup ayraci yerine kucuk baslikli boluculer
+    // (URUN / ADISYON / ODEME). Buton listesi, kosullar ve onTap'ler BIREBIR aynidir.
     return Container(
       width: 240,
-      decoration: BoxDecoration(
-        color: Colors.grey[50],
-        border: Border(left: BorderSide(color: Colors.grey[200]!)),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF8FAFC),
+        border: Border(left: BorderSide(color: Color(0xFFE2E8F0))),
       ),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            _buildActionGroupHeader('ÜRÜN İŞLEMLERİ'),
             _buildActionGrid(btnGroup1),
             if (btnGroup2.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Divider(color: Colors.grey[300], height: 1),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
+              _buildActionGroupHeader('ADİSYON'),
               _buildActionGrid(btnGroup2),
             ],
-            const SizedBox(height: 10),
-            Divider(color: Colors.grey[300], height: 1),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
+            _buildActionGroupHeader('ÖDEME'),
             _buildActionGrid(btnGroup3),
             if (btnGroup4.isNotEmpty) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 14),
               Divider(color: Colors.grey[300], height: 1),
               const SizedBox(height: 10),
               _buildActionGrid(btnGroup4),
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  /// 2 Agu 2026: Aksiyon paneli grup basligi (sadece gorsel ayrac; davranis yok).
+  Widget _buildActionGroupHeader(String metin) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 2, bottom: 6),
+      child: Row(
+        children: [
+          Text(
+            metin,
+            style: const TextStyle(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.8,
+              color: Color(0xFF94A3B8),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Container(height: 1, color: const Color(0xFFE2E8F0))),
+        ],
       ),
     );
   }
@@ -5052,49 +5590,91 @@ class _AddItemModalState extends State<AddItemModal> {
   }
 
   Widget _buildActionBtnVertical({required IconData icon, required String label, required Color color, VoidCallback? onTap}) {
-    // 22 May 2026: Dokunmatik POS icin iyilestirme.
-    // - GestureDetector → InkWell (ripple feedback verir, kullanici tikladigini anlar)
-    // - Min yukseklik 60 (eski ~32) — parmakla daha kolay isabet
-    // - Icon 22 (eski 18), font 11 (eski 9) — okunabilirligi artirir
-    // - Material wrapper ile ink ripple animasyonu calisir
+    // 22 May 2026: Dokunmatik POS icin iyilestirme (InkWell ripple + min 60 yukseklik).
+    // 2 Agu 2026: SADECE GORSEL yenileme (Mustafa: "daha pro"). Davranis AYNEN korundu.
+    // - Beyaz kart yuzeyi + yumusak golge (derinlik) — eski %10 tint dolgu yerine
+    // - Ikon, renk degradeli (color → koyusu) yuvarlatilmis rozet icinde beyaz cizilir
+    //   (vektorel/SVG rozet gorunumu; ekstra paket YOK, Material ikonlar vektoreldir)
+    // - Etiket notr koyu renkte (okunabilirlik); disabled durum mat gri + golgesiz = NET ayirt edilir
     final isDisabled = onTap == null;
-    return Material(
-      color: isDisabled ? Colors.grey[200] : color.withOpacity(0.1),
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        onTap: isDisabled ? null : onTap,
-        borderRadius: BorderRadius.circular(10),
-        splashColor: isDisabled ? null : color.withOpacity(0.3),
-        highlightColor: isDisabled ? null : color.withOpacity(0.2),
-        child: Container(
-          width: double.infinity,
-          constraints: const BoxConstraints(minHeight: 60),
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: isDisabled ? Colors.grey[300]! : color.withOpacity(0.4),
-              width: 1.5,
-            ),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 22, color: isDisabled ? Colors.grey[400] : color),
-              const SizedBox(height: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: isDisabled ? Colors.grey[400] : color,
+    final Color koyu = Color.lerp(color, Colors.black, 0.22)!;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: isDisabled
+            ? null
+            : [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.06),
+                  blurRadius: 6,
+                  offset: const Offset(0, 2),
                 ),
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+              ],
+      ),
+      child: Material(
+        color: isDisabled ? const Color(0xFFF1F5F9) : Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: isDisabled ? null : onTap,
+          borderRadius: BorderRadius.circular(12),
+          splashColor: isDisabled ? null : color.withOpacity(0.22),
+          highlightColor: isDisabled ? null : color.withOpacity(0.08),
+          child: Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(minHeight: 62),
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isDisabled ? const Color(0xFFE2E8F0) : color.withOpacity(0.30),
+                width: 1,
               ),
-            ],
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    gradient: isDisabled
+                        ? null
+                        : LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [color, koyu],
+                          ),
+                    color: isDisabled ? const Color(0xFFCBD5E1) : null,
+                    borderRadius: BorderRadius.circular(9),
+                    boxShadow: isDisabled
+                        ? null
+                        : [
+                            BoxShadow(
+                              color: color.withOpacity(0.32),
+                              blurRadius: 5,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                  ),
+                  child: Icon(icon, size: 17, color: Colors.white),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    height: 1.15,
+                    letterSpacing: 0.1,
+                    color: isDisabled ? const Color(0xFF94A3B8) : const Color(0xFF334155),
+                  ),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -5155,6 +5735,375 @@ class _AddItemModalState extends State<AddItemModal> {
     };
   }
 
+  /// 2 Ağu 2026 — ÖDEME SEÇENEKLERİ kısayolu (adisyon başlığındaki rozet).
+  /// ⚠️ YENİ AKIŞ YOK: sağ paneldeki butonların çağırdığı AYNI fonksiyonlar ve AYNI
+  /// yetki kontrolleri kullanılır (_closeTicket / _printAndCloseTicket / _openPartialPayment).
+  /// Dinamik ödeme yöntemleri (_dynamicPaymentMethods) da panelden geldiği gibi listelenir.
+  /// Odeme secenekleri LISTESI — "Tumunu Gor" pop-up'inin SAG sutununda gosterilir.
+  /// [kapat] secenek calistirilmadan once pop-up'i kapatir.
+  /// [ikramYenile] 3 Agu 2026: İkram akisi bittikten sonra "Tumunu Gor" pop-up'i
+  /// KAPANMAZ — bu callback listeyi/toplami tazeler (StatefulBuilder setState).
+  Widget _odemeSecenekleriListesi(ThemeProvider theme, VoidCallback kapat,
+      {Future<void> Function()? ikramYenile}) {
+    final aktif = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+    final hasItems = aktif.isNotEmpty;
+    final kapatabilir = hasItems && _hasPermission('close_ticket');
+    final yazdirabilir = kapatabilir && _hasPermission('print_receipt');
+
+    // 2 Agu 2026 (Mustafa): "odeme seceneklerini 2'serli yap, dinamik oldugu icin
+    // ilerde cok eklenebilir" -> tam genislik satir yerine KOMPAKT KART, 2 sutunlu izgara.
+    Widget satir({required IconData ikon, required String etiket, required Color renk,
+        String? altYazi, VoidCallback? onTap}) {
+      final aktifMi = onTap != null;
+      return Material(
+        color: aktifMi ? Colors.white : Colors.grey[100],
+        borderRadius: BorderRadius.circular(12),
+        elevation: aktifMi ? 1.5 : 0,
+        shadowColor: Colors.black26,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 86),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: aktifMi ? Colors.grey[200]! : Colors.grey[300]!),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(
+                  width: 32, height: 32,
+                  decoration: BoxDecoration(
+                    gradient: aktifMi
+                        ? LinearGradient(colors: [renk, Color.lerp(renk, Colors.black, 0.22)!],
+                            begin: Alignment.topLeft, end: Alignment.bottomRight)
+                        : null,
+                    color: aktifMi ? null : Colors.grey[350],
+                    borderRadius: BorderRadius.circular(9),
+                    boxShadow: aktifMi
+                        ? [BoxShadow(color: renk.withOpacity(0.28), blurRadius: 5, offset: const Offset(0, 2))]
+                        : null,
+                  ),
+                  child: Icon(ikon, color: Colors.white, size: 18),
+                ),
+                const SizedBox(height: 7),
+                Text(etiket,
+                    textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, height: 1.15,
+                        color: aktifMi ? const Color(0xFF334155) : Colors.grey[500])),
+                if (altYazi != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(altYazi,
+                        textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 10.5, color: Colors.grey[600])),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    VoidCallback? sar(VoidCallback? f) => f == null ? null : () { kapat(); f(); };
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(colors: [Color(0xFF059669), Color(0xFF047857)],
+                begin: Alignment.topLeft, end: Alignment.bottomRight),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Icon(Icons.payments_rounded, color: Colors.white, size: 15),
+        ),
+        const SizedBox(width: 8),
+        const Text('Ödeme Seçenekleri',
+            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold)),
+      ]),
+      const SizedBox(height: 12),
+      Flexible(
+        child: SingleChildScrollView(
+          child: LayoutBuilder(builder: (_, kis) {
+            // 2 sutun: bosluk 10px, kalan genislik ikiye bolunur.
+            final w = (kis.maxWidth - 10) / 2;
+            Widget k(Widget c) => SizedBox(width: w, child: c);
+            return Wrap(spacing: 10, runSpacing: 10, children: [
+              k(satir(ikon: Icons.payments_rounded, etiket: 'Nakit Kapat', renk: theme.primaryColor,
+                  onTap: sar(kapatabilir ? () => _closeTicket('cash') : null))),
+              k(satir(ikon: Icons.credit_card_rounded, etiket: 'Kart Kapat', renk: const Color(0xFF3B82F6),
+                  onTap: sar(kapatabilir ? () => _closeTicket('credit_card') : null))),
+              k(satir(ikon: Icons.receipt_long_rounded, etiket: 'Yazdır + Nakit',
+                  altYazi: 'fiş bas', renk: const Color(0xFF059669),
+                  onTap: sar(yazdirabilir ? () => _printAndCloseTicket('cash') : null))),
+              k(satir(ikon: Icons.receipt_long_rounded, etiket: 'Yazdır + Kart',
+                  altYazi: 'fiş bas', renk: const Color(0xFF2563EB),
+                  onTap: sar(yazdirabilir ? () => _printAndCloseTicket('credit_card') : null))),
+              // Panelden gelen DINAMIK yontemler — kac tane olursa olsun izgaraya akar.
+              for (final pm in _dynamicPaymentMethods)
+                k(satir(ikon: Icons.account_balance_wallet_rounded,
+                    etiket: '${pm['display_name']} Kapat', renk: const Color(0xFF7C3AED),
+                    onTap: sar(kapatabilir
+                        ? () => _closeTicket(pm['code'] as String,
+                            methodLabel: pm['display_name'] as String?)
+                        : null))),
+              // 3 Agu 2026 (Mustafa: "flutterda ikram butonu yok? parcali odemenin
+              // YANINDA olmasi lazimdi") — sorun buton EKSIKLIGI degildi, IZGARA KAYMASIYDI:
+              // dinamik odeme yontemi sayisi TEK olunca Wrap Parcali'yi bir satirin sonuna,
+              // Ikram'i BIR ALT satira atiyordu. Artik ikisi Wrap'in icinde AYNI SATIRDA
+              // sabit bir cift olarak duruyor — dinamik yontem kac tane olursa olsun.
+              SizedBox(
+                width: kis.maxWidth,
+                child: Row(children: [
+                  Expanded(
+                      child: satir(ikon: Icons.splitscreen_rounded, etiket: 'Parçalı Ödeme',
+                          altYazi: 'seçili ürünler', renk: const Color(0xFF7C3AED),
+                          onTap: sar(kapatabilir ? _openPartialPayment : null))),
+                  const SizedBox(width: 10),
+                  // IKRAM: SADECE ISARETLEME — ayri odeme yolu YOK. Kalem sec -> sebep
+                  // (ayara gore zorunlu) -> onay; pop-up KAPANMAZ, liste tazelenir. Kalan
+                  // tutar MEVCUT odeme butonlariyla kapatilir (backend close ikram'i duser).
+                  // Yetki KATI (_hasPermission('ikram')): veri yoksa/offline'da PASIF —
+                  // pasifken alt yazi NEDENINI soyler, sessizce olu buton olarak durmaz.
+                  Expanded(
+                      child: satir(ikon: Icons.card_giftcard_rounded, etiket: 'İkram',
+                          // 3 Agu 2026 DUZELTME: SIRA onemli. _hasPermission('ikram')
+                          // cevrimdisinda ZATEN false doner (offline beyaz listesinde
+                          // 'ikram' yok) — yetki kontrolu once yazilinca cevrimdisi
+                          // YETKILI garsona da "yetki yok" diyordu, 'cevrimici gerekli'
+                          // dali ULASILAMAZ olu koddu. Once baglantiyi soyle.
+                          altYazi: !widget.apiService.isOnline
+                              ? 'çevrimiçi gerekli'
+                              : (!_hasPermission('ikram') ? 'yetki yok' : 'kalem seç'),
+                          renk: const Color(0xFFEA580C),
+                          onTap: (hasItems && _hasPermission('ikram') && widget.apiService.isOnline)
+                              ? () => _openIkramFlow(sonrasindaYenile: ikramYenile)
+                              : null)),
+                ]),
+              ),
+            ]);
+          }),
+        ),
+      ),
+    ]);
+  }
+
+  /// 2 Ağu 2026 — "TÜMÜNÜ GÖR": masadaki aktif ürünleri ADET BAZLI BİRLEŞTİRİP gösterir.
+  /// Aynı ürün + aynı not + aynı seçimler tek satırda "4x Çay" olarak toplanır.
+  /// ⚠️ SALT OKUNUR — hiçbir kalem, tutar, sıra veya akış değişmez. Sadece görüntüleme.
+  /// 3 Agu 2026 IKRAM: pop-up StatefulBuilder oldu — ikram akisi bitince KAPANMADAN
+  /// tazelenir (Mustafa akis 3). Ikramli gruplar rozet + ustu cizili; TOPLAM ikram
+  /// dusulmus gosterilir + vurgulu "Kalan" satiri. Ikramli ile ikramsiz AYNI urun
+  /// BIRLESTIRILMEZ (anahtara ikram bayragi eklendi) — rozet yanlis satira yapismasin.
+  void _tumunuGorDialog(ThemeProvider theme) {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(builder: (ctx, setDialogState) {
+        final aktif = _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+
+        // Birlestirme anahtari: urun adi + not + secimler + ikram bayragi
+        // (varyant/ekstra farkli olan AYRI satir kalir)
+        String anahtar(Map i) {
+          final ad = (i['product_name'] ?? '').toString().trim();
+          final not = (i['notes'] ?? '').toString().trim();
+          var ex = i['extras'];
+          if (ex is String) { try { ex = jsonDecode(ex); } catch (_) { ex = null; } }
+          final exAd = (ex is List)
+              ? ex.map((e) => e is Map ? (e['name'] ?? '').toString() : e.toString()).join('|')
+              : '';
+          final ik = IkramRules.kalemIkramMi(i) ? '1' : '0';
+          return '$ad##$not##$exAd##ik$ik';
+        }
+
+        final gruplar = <String, Map<String, dynamic>>{};
+        for (final i in aktif) {
+          final k = anahtar(i as Map);
+          final adet = (_safeInt(i['quantity']) ?? 1);
+          final tutar = _safeDouble(i['unit_price']) * adet;
+          if (gruplar.containsKey(k)) {
+            gruplar[k]!['adet'] = (gruplar[k]!['adet'] as int) + adet;
+            gruplar[k]!['tutar'] = (gruplar[k]!['tutar'] as double) + tutar;
+          } else {
+            gruplar[k] = {
+              'ad': (i['product_name'] ?? '').toString(),
+              'not': (i['notes'] ?? '').toString().trim(),
+              'adet': adet,
+              'tutar': tutar,
+              'ikram': IkramRules.kalemIkramMi(i),
+            };
+          }
+        }
+        final liste = gruplar.values.toList()
+          ..sort((a, b) => (b['adet'] as int).compareTo(a['adet'] as int));
+        final toplamAdet = liste.fold<int>(0, (t, g) => t + (g['adet'] as int));
+        // TOPLAM = brut - ikram (Mustafa: "TOPLAM ikram dusulmus haliyle").
+        final brutToplam = liste.fold<double>(0, (t, g) => t + (g['tutar'] as double));
+        final ikramTutari = _ikramTotal;
+        final toplamTutar = (brutToplam - ikramTutari) < 0 ? 0.0 : (brutToplam - ikramTutari);
+        // Kalan = odenmemis + ikram olmayan kalemler (tahsil edilecek gercek miktar)
+        final kalanTutar = _unpaidTotal;
+
+        return Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: Container(
+          // 2 Agu 2026 (Mustafa): "odeme secenekleri butonunu tumunu gor pop'una SAGINA ekle".
+          // Ayri buton YOK; tek pop-up iki sutun: SOL birlesik urun listesi, SAG odeme.
+          width: 930,
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.86),
+          padding: const EdgeInsets.all(18),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [theme.primaryColor, theme.primaryColor.withOpacity(0.78)],
+                      begin: Alignment.topLeft, end: Alignment.bottomRight),
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                child: const Icon(Icons.list_alt_rounded, color: Colors.white, size: 17),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(child: Text('Masadaki Ürünler',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+              IconButton(icon: const Icon(Icons.close_rounded), onPressed: () => Navigator.pop(ctx)),
+            ]),
+            const SizedBox(height: 4),
+            Text('$toplamAdet ürün · ${liste.length} çeşit',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+            const Divider(height: 18),
+            Flexible(
+              child: liste.isEmpty
+                  ? Padding(padding: const EdgeInsets.all(24),
+                      child: Text('Masada ürün yok', style: TextStyle(color: Colors.grey[500])))
+                  : ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: liste.length,
+                      separatorBuilder: (_, __) => Divider(height: 1, color: Colors.grey[200]),
+                      itemBuilder: (_, idx) {
+                        final g = liste[idx];
+                        final not = (g['not'] as String);
+                        // 3 Agu 2026 IKRAM: rozet + tutar ustu cizili (parasi alinmayacak)
+                        final ikramMi = g['ikram'] == true;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Container(
+                              constraints: const BoxConstraints(minWidth: 38),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: ikramMi
+                                    ? const Color(0xFFEA580C).withOpacity(0.12)
+                                    : theme.primaryColor.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text('${g['adet']}x',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: ikramMi ? const Color(0xFFEA580C) : theme.primaryColor,
+                                      fontWeight: FontWeight.bold, fontSize: 14)),
+                            ),
+                            const SizedBox(width: 11),
+                            Expanded(
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Row(children: [
+                                  Flexible(
+                                    child: Text(g['ad'] as String,
+                                        style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600)),
+                                  ),
+                                  if (ikramMi) ...[
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFEA580C),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: const Text('İKRAM',
+                                          style: TextStyle(color: Colors.white, fontSize: 9.5,
+                                              fontWeight: FontWeight.bold)),
+                                    ),
+                                  ],
+                                ]),
+                                if (not.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Text(not,
+                                        style: TextStyle(fontSize: 11.5, color: Colors.grey[600])),
+                                  ),
+                              ]),
+                            ),
+                            const SizedBox(width: 8),
+                            Text('₺${(g['tutar'] as double).toStringAsFixed(2)}',
+                                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600,
+                                    color: ikramMi ? Colors.grey[500] : Colors.grey[800],
+                                    decoration: ikramMi ? TextDecoration.lineThrough : null,
+                                    decorationColor: Colors.grey[600])),
+                          ]),
+                        );
+                      },
+                    ),
+            ),
+            const Divider(height: 18),
+            // 3 Agu 2026 IKRAM: ikram varsa dusum satiri, TOPLAM ikram dusulmus.
+            if (ikramTutari > 0)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  const Text('İkram', style: TextStyle(fontSize: 12, color: Color(0xFFEA580C))),
+                  Text('-₺${ikramTutari.toStringAsFixed(2)}',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold,
+                          color: Color(0xFFEA580C))),
+                ]),
+              ),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              const Text('TOPLAM', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+              Text('₺${toplamTutar.toStringAsFixed(2)}',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: theme.primaryColor)),
+            ]),
+            // Vurgulu KALAN satiri (Mustafa: gorsel kolaylik — tahsil edilecek miktar)
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFF059669).withOpacity(0.10),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF059669).withOpacity(0.35)),
+              ),
+              child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                const Text('Kalan',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF047857))),
+                Text('₺${kalanTutar.toStringAsFixed(2)}',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                        color: Color(0xFF047857))),
+              ]),
+            ),
+            ]),
+          ),
+          // --- AYRAC ---
+          Container(width: 1, margin: const EdgeInsets.symmetric(horizontal: 16),
+              color: Colors.grey[200]),
+          // --- SAG: odeme secenekleri (ayni fonksiyonlar, yeni akis YOK) ---
+          SizedBox(
+            width: 360,
+            child: _odemeSecenekleriListesi(theme, () => Navigator.pop(ctx),
+                // 3 Agu 2026: ikram sonrasi pop-up KAPANMAZ — liste/toplam tazelenir.
+                ikramYenile: () async {
+                  await _loadTicketItems();
+                  if (ctx.mounted) setDialogState(() {});
+                }),
+          ),
+          ]),
+        ),
+        );
+      }),
+    );
+  }
+
   Widget _buildTicketItemRow(Map<String, dynamic> item, ThemeProvider theme, int index, bool isSelected) {
     final quantity = _safeInt(item['quantity']) ?? 1;
     final unitPrice = _safeDouble(item['unit_price']);
@@ -5171,6 +6120,10 @@ class _AddItemModalState extends State<AddItemModal> {
     // restoran yazıcısına gönderilmeyen, garson elden getiren ürünler).
     final skipRaw = item['skip_pos_print'];
     final isSkipPrint = skipRaw == true || skipRaw == 1 || skipRaw == '1' || skipRaw == 'true' || skipRaw == 't';
+    // 3 Agu 2026 IKRAM (Mustafa: adisyona bakan HERKES gormeli, pop-up acmak zorunda kalmasin):
+    // rozet + tutar ustu cizili/soluk. SADECE gorsel — tutar hesabi getter'larda (_ikramTotal).
+    final isIkram = IkramRules.kalemIkramMi(item);
+    final ikramReason = (item['ikram_reason'] ?? '').toString().trim();
     // Combo gruplu gorunum bilgisi (hata olursa gruplama YOK -> eski gorunum).
     Map<String, dynamic> _grupBilgi;
     try {
@@ -5292,6 +6245,36 @@ class _AddItemModalState extends State<AddItemModal> {
                         ],
                       ]),
                     ),
+                  // 3 Agu 2026 IKRAM rozeti — TESLIM (yesil) / IPTAL (kirmizi) / MUTFAKTA (amber)
+                  // ile karismasin diye TURUNCU (0xFFEA580C). Sebep varsa kucuk punto ile yaninda.
+                  if (isIkram)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFEA580C),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'İKRAM',
+                            style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        if (ikramReason.isNotEmpty) ...[
+                          const SizedBox(width: 5),
+                          Flexible(
+                            child: Text(
+                              ikramReason,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 10.5, color: Colors.orange[800], fontStyle: FontStyle.italic),
+                            ),
+                          ),
+                        ],
+                      ]),
+                    ),
                   if (isPaid)
                     Container(
                       margin: const EdgeInsets.only(top: 4),
@@ -5318,7 +6301,13 @@ class _AddItemModalState extends State<AddItemModal> {
                   style: TextStyle(
                     fontSize: 16.5,
                     fontWeight: FontWeight.bold,
-                    color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
+                    // 3 Agu 2026 IKRAM: tutar ustu cizili + soluk — "parasi alinmayacak"
+                    // bir bakista anlasilir. Hesap zaten getter'larda dusuluyor (gorsel).
+                    color: isIkram
+                        ? Colors.grey[500]
+                        : (isPaid ? Colors.green[700] : const Color(0xFF1F2937)),
+                    decoration: isIkram ? TextDecoration.lineThrough : null,
+                    decorationColor: isIkram ? Colors.grey[600] : null,
                   ),
                 ),
                 const SizedBox(height: 2),
@@ -5374,7 +6363,7 @@ class _AddItemModalState extends State<AddItemModal> {
             children: [
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.edit_note,
+                  icon: Icons.edit_note_rounded,
                   label: 'Not Ekle',
                   color: Colors.blueGrey,
                   onTap: hasItems && _selectedItemId != null ? _openNoteDialog : null,
@@ -5383,7 +6372,7 @@ class _AddItemModalState extends State<AddItemModal> {
               const SizedBox(width: 6),
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.tune,
+                  icon: Icons.tune_rounded,
                   label: 'Varyant',
                   color: const Color(0xFFF59E0B),
                   onTap: hasItems && _selectedItemId != null && _variantsForSelectedItem().isNotEmpty
@@ -5394,7 +6383,7 @@ class _AddItemModalState extends State<AddItemModal> {
               const SizedBox(width: 6),
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.close,
+                  icon: Icons.close_rounded,
                   label: 'Ürün İptal',
                   color: Colors.red[400]!,
                   onTap: hasItems && _selectedItemId != null
@@ -5430,7 +6419,7 @@ class _AddItemModalState extends State<AddItemModal> {
             children: [
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.restaurant,
+                  icon: Icons.restaurant_rounded,
                   label: 'Mutfak',
                   color: const Color(0xFFF59E0B),
                   onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null,
@@ -5439,7 +6428,7 @@ class _AddItemModalState extends State<AddItemModal> {
               const SizedBox(width: 6),
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.print,
+                  icon: Icons.print_rounded,
                   label: 'Yazdır',
                   color: Colors.blueGrey,
                   onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null,
@@ -5452,7 +6441,7 @@ class _AddItemModalState extends State<AddItemModal> {
           SizedBox(
             width: double.infinity,
             child: _buildActionBtn(
-              icon: Icons.splitscreen,
+              icon: Icons.splitscreen_rounded,
               label: 'Parçalı Ödeme',
               color: const Color(0xFF7C3AED),
               onTap: hasItems && _hasPermission('close_ticket') ? _openPartialPayment : null,
@@ -5464,7 +6453,7 @@ class _AddItemModalState extends State<AddItemModal> {
             children: [
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.payments,
+                  icon: Icons.payments_rounded,
                   label: 'Nakit',
                   color: theme.primaryColor,
                   onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('cash') : null,
@@ -5473,7 +6462,7 @@ class _AddItemModalState extends State<AddItemModal> {
               const SizedBox(width: 6),
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.credit_card,
+                  icon: Icons.credit_card_rounded,
                   label: 'Kredi Kartı',
                   color: const Color(0xFF3B82F6),
                   onTap: hasItems && _hasPermission('close_ticket') ? () => _closeTicket('credit_card') : null,
@@ -5487,7 +6476,7 @@ class _AddItemModalState extends State<AddItemModal> {
             children: [
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.receipt_long,
+                  icon: Icons.receipt_long_rounded,
                   label: 'Yaz+Nakit',
                   color: const Color(0xFF059669),
                   onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt')
@@ -5498,7 +6487,7 @@ class _AddItemModalState extends State<AddItemModal> {
               const SizedBox(width: 6),
               Expanded(
                 child: _buildActionBtn(
-                  icon: Icons.receipt_long,
+                  icon: Icons.receipt_long_rounded,
                   label: 'Yaz+Kart',
                   color: const Color(0xFF2563EB),
                   onTap: hasItems && _hasPermission('close_ticket') && _hasPermission('print_receipt')
@@ -5515,7 +6504,7 @@ class _AddItemModalState extends State<AddItemModal> {
               if (_hasPermission('transfer_table'))
                 Expanded(
                   child: _buildActionBtn(
-                    icon: Icons.swap_horiz,
+                    icon: Icons.swap_horiz_rounded,
                     label: 'Masa Değiştir',
                     color: const Color(0xFF0EA5E9),
                     onTap: hasItems ? _transferTable : null,
@@ -5525,7 +6514,7 @@ class _AddItemModalState extends State<AddItemModal> {
               if (_hasPermission('apply_discount'))
                 Expanded(
                   child: _buildActionBtn(
-                    icon: Icons.percent,
+                    icon: Icons.percent_rounded,
                     label: 'İndirim',
                     color: const Color(0xFFE11D48),
                     onTap: hasItems ? _openDiscountDialog : null,
@@ -5539,7 +6528,7 @@ class _AddItemModalState extends State<AddItemModal> {
             SizedBox(
               width: double.infinity,
               child: _buildActionBtn(
-                icon: Icons.delete_outline,
+                icon: Icons.delete_outline_rounded,
                 label: 'Adisyon İptal',
                 color: const Color(0xFFDC2626),
                 onTap: _voidTicket,
@@ -5557,35 +6546,61 @@ class _AddItemModalState extends State<AddItemModal> {
     VoidCallback? onTap,
   }) {
     // 22 May 2026: Dokunmatik POS — InkWell + min 64 yukseklik + ripple feedback
+    // 2 Agu 2026: SADECE GORSEL yenileme — dikey degrade dolgu (color → koyusu),
+    // yumusak renkli golge, radius 12; disabled = mat gri, golgesiz (net ayrim).
     final isDisabled = onTap == null;
-    return Material(
-      color: isDisabled ? Colors.grey[200] : color,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        onTap: isDisabled ? null : () => onTap(),
-        borderRadius: BorderRadius.circular(10),
-        splashColor: Colors.white.withOpacity(0.35),
-        highlightColor: Colors.white.withOpacity(0.18),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 64),
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 22),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    color: isDisabled ? Colors.grey[400] : Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
+    final Color koyu = Color.lerp(color, Colors.black, 0.18)!;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        gradient: isDisabled
+            ? null
+            : LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [color, koyu],
               ),
-            ],
+        color: isDisabled ? const Color(0xFFE2E8F0) : null,
+        boxShadow: isDisabled
+            ? null
+            : [
+                BoxShadow(
+                  color: color.withOpacity(0.30),
+                  blurRadius: 6,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: isDisabled ? null : () => onTap(),
+          borderRadius: BorderRadius.circular(12),
+          splashColor: Colors.white.withOpacity(0.35),
+          highlightColor: Colors.white.withOpacity(0.18),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 64),
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: isDisabled ? const Color(0xFF94A3B8) : Colors.white, size: 22),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: isDisabled ? const Color(0xFF94A3B8) : Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.2,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -5764,6 +6779,8 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
   double get _totalAmount {
     double total = 0;
     for (var item in _items) {
+      // 3 Agu 2026 IKRAM: ikram kalemin parasi ALINMAZ -> "Kalan"a girmez
+      if (IkramRules.kalemIkramMi(item)) continue;
       if (item['payment_status'] != 'paid') {
         total += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
       }
@@ -5784,6 +6801,8 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
   void _selectAll() {
     setState(() {
       for (var item in _items) {
+        // 3 Agu 2026 IKRAM: ikram kalem SECILEMEZ (parasi alinmayacak) — toplu secime girmez
+        if (IkramRules.kalemIkramMi(item)) continue;
         if (item['payment_status'] != 'paid') {
           final id = item['id'] as int?;
           if (id != null) _selectedIds.add(id);
@@ -5819,7 +6838,10 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
         _selectedIds.clear();
 
         // Tüm ürünler ödendi mi? Evet ise ticket'i de kapat (masa bossun)
-        final allPaid = _items.every((i) => i['payment_status'] == 'paid');
+        // 3 Agu 2026 IKRAM: ikram kalemler odenmez ama adisyon kapanisini ENGELLEMEZ —
+        // "odenmis VEYA ikram" ise tamam say (backend close ikram'i tahsilattan zaten duser).
+        final allPaid = _items.every(
+            (i) => i['payment_status'] == 'paid' || IkramRules.kalemIkramMi(i));
         if (allPaid) {
           try {
             await widget.apiService.closeTicket(
@@ -5846,8 +6868,9 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
   Future<void> _closeAll(String paymentMethod) async {
     if (_isProcessing) return;
 
+    // 3 Agu 2026 IKRAM: ikram kalemler payItems'a gitmez (parasi alinmayacak)
     final unpaidIds = _items
-        .where((i) => i['payment_status'] != 'paid')
+        .where((i) => i['payment_status'] != 'paid' && !IkramRules.kalemIkramMi(i))
         .map((i) => i['id'] as int)
         .toList();
 
@@ -5856,6 +6879,7 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     // Toplam tutarı hesapla
     double unpaidTotal = 0;
     for (var item in _items) {
+      if (IkramRules.kalemIkramMi(item)) continue;
       if (item['payment_status'] != 'paid') {
         unpaidTotal += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
       }
@@ -5920,7 +6944,15 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Provider.of<ThemeProvider>(context, listen: false);
-    final unpaidItems = _items.where((i) => i['payment_status'] != 'paid').toList();
+    // 3 Agu 2026 IKRAM KARARI: ikram kalemler listede GORUNUR ama SECILEMEZ (kilitli).
+    // Gizlenirse kasiyer "urun kayboldu" sanir; kilitli+rozetli gosterim durumu anlatir
+    // (odenmis kalemlerin kilitli gosterimiyle ayni desen).
+    final ikramItems = _items
+        .where((i) => i['payment_status'] != 'paid' && IkramRules.kalemIkramMi(i))
+        .toList();
+    final unpaidItems = _items
+        .where((i) => i['payment_status'] != 'paid' && !IkramRules.kalemIkramMi(i))
+        .toList();
     final paidItems = _items.where((i) => i['payment_status'] == 'paid').toList();
 
     return Dialog(
@@ -6020,6 +7052,16 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                             ),
                             ...unpaidItems.map((item) => _buildPaymentItem(item, theme, false)),
                           ],
+                          // 3 Agu 2026 IKRAM: kilitli bolum — tahsil edilmez, secilemez
+                          if (ikramItems.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text('İkram Ürünler (tahsil edilmez)',
+                                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange[800])),
+                            ),
+                            ...ikramItems.map((item) => _buildPaymentItem(item, theme, false)),
+                          ],
                           if (paidItems.isNotEmpty) ...[
                             const SizedBox(height: 16),
                             Padding(
@@ -6114,9 +7156,12 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     final qty = item['quantity'] ?? 1;
     final price = _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
     final paymentMethod = item['payment_method']?.toString().toUpperCase() ?? '';
+    // 3 Agu 2026 IKRAM: kilitli gorunum — secilemez, tutari ustu cizili, turuncu rozet
+    final isIkram = !isPaid && IkramRules.kalemIkramMi(item);
 
     // Renk şeması:
     //   Ödenmiş → yeşil
+    //   İkram → turuncu (kilitli)
     //   Seçili (ödenmemiş) → mor (purple seçim rengi)
     //   Ödenmemiş (seçilmemiş) → kırmızı/uyarı
     final unpaidBg = const Color(0xFFFEE2E2);  // red-100
@@ -6132,6 +7177,11 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
       borderColor = Colors.green[300]!;
       textColor = Colors.green[700]!;
       qtyBg = Colors.green;
+    } else if (isIkram) {
+      bgColor = const Color(0xFFFFF7ED);            // orange-50
+      borderColor = const Color(0xFFFDBA74);        // orange-300
+      textColor = const Color(0xFF9A3412);          // orange-800
+      qtyBg = const Color(0xFFEA580C);              // orange-600
     } else if (isSelected) {
       bgColor = const Color(0xFF7C3AED).withOpacity(0.10);
       borderColor = const Color(0xFF7C3AED);
@@ -6147,7 +7197,8 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: isPaid ? null : () { if (itemId != null) _toggleItem(itemId); },
+        // 3 Agu 2026 IKRAM: kilitli — tiklanamaz (odenmis gibi)
+        onTap: (isPaid || isIkram) ? null : () { if (itemId != null) _toggleItem(itemId); },
         borderRadius: BorderRadius.circular(10),
         child: Container(
           margin: const EdgeInsets.only(bottom: 6),
@@ -6162,8 +7213,8 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
           ),
           child: Row(
             children: [
-              // Checkbox
-              if (!isPaid)
+              // Checkbox (ikram kaleminde checkbox YOK — secilemez)
+              if (!isPaid && !isIkram)
                 Container(
                   width: 24, height: 24,
                   margin: const EdgeInsets.only(right: 10),
@@ -6194,7 +7245,7 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                   ),
                 ),
               ),
-              // Badge (ödenmişse — yeşil/mavi; ödenmemişse — kırmızı "ÖDENMEDİ")
+              // Badge (ödenmişse — yeşil/mavi; ikramsa — turuncu İKRAM; ödenmemişse — kırmızı)
               if (isPaid)
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -6206,6 +7257,19 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                   child: Text(
                     paymentMethod == 'CASH' ? 'NAKİT' : 'KART',
                     style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                )
+              else if (isIkram)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEA580C),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    'İKRAM',
+                    style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
                   ),
                 )
               else if (!isSelected)
@@ -6221,12 +7285,14 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                     style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
                   ),
                 ),
-              // Fiyat
+              // Fiyat (ikramda ustu cizili — tahsil edilmez)
               Text(
                 '${price.toStringAsFixed(2)} TL',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
                   color: textColor,
+                  decoration: isIkram ? TextDecoration.lineThrough : null,
+                  decorationColor: textColor,
                 ),
               ),
             ],
@@ -6263,6 +7329,613 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                 child: Text(
                   label,
                   style: TextStyle(color: isDisabled ? Colors.grey[400] : Colors.white, fontSize: 14, fontWeight: FontWeight.w700),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 3 Agu 2026 — IKRAM Dialog (Parcali Odeme kalibiyla ayni iskelet: kalem sec -> onayla).
+/// SADECE ISARETLEME yapar (PUT .../ikram) — odeme almaz. Basarida kapanir, cagiran
+/// "Tumunu Gor" gorunumune doner ve tazelenir. Geri alma: ikramli kalem sec -> Geri Al
+/// (iptal:true) -> rozet kalkar, tutar geri eklenir.
+class _IkramDialog extends StatefulWidget {
+  final List<dynamic> items;
+  final int ticketId;
+  final int? waiterId;
+  final ApiService apiService;
+  final List<Map<String, dynamic>> sebepler;
+  final bool sebepZorunlu;
+  final VoidCallback onClose;
+  final VoidCallback onDone;
+
+  const _IkramDialog({
+    required this.items,
+    required this.ticketId,
+    required this.apiService,
+    required this.sebepler,
+    required this.sebepZorunlu,
+    required this.onClose,
+    required this.onDone,
+    this.waiterId,
+  });
+
+  @override
+  State<_IkramDialog> createState() => _IkramDialogState();
+}
+
+class _IkramDialogState extends State<_IkramDialog> {
+  static const _turuncu = Color(0xFFEA580C);
+  late List<Map<String, dynamic>> _items;
+  final Set<int> _selectedIds = {};
+  bool _isProcessing = false; // async guard — cift tiklama kilidi
+
+  double _safeDouble(dynamic value, [double defaultValue = 0]) {
+    if (value == null) return defaultValue;
+    if (value is double) return value;
+    if (value is num) return value.toDouble();
+    return double.tryParse(value.toString()) ?? defaultValue;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _items = widget.items.whereType<Map>().map((i) => Map<String, dynamic>.from(i)).toList();
+  }
+
+  bool _secilebilir(Map<String, dynamic> item) =>
+      item['payment_status'] != 'paid'; // odenmis kalem backend'de zaten reddedilir
+
+  List<Map<String, dynamic>> get _secili =>
+      _items.where((i) => _selectedIds.contains(i['id'])).toList();
+
+  bool get _seciliHepsiNormal =>
+      _secili.isNotEmpty && _secili.every((i) => !IkramRules.kalemIkramMi(i));
+  bool get _seciliHepsiIkram =>
+      _secili.isNotEmpty && _secili.every((i) => IkramRules.kalemIkramMi(i));
+
+  double get _seciliTutar {
+    double t = 0;
+    for (final i in _secili) {
+      t += _safeDouble(i['unit_price']) * _safeDouble(i['quantity'], 1);
+    }
+    return t;
+  }
+
+  void _toggle(int itemId) {
+    setState(() {
+      if (_selectedIds.contains(itemId)) {
+        _selectedIds.remove(itemId);
+      } else {
+        _selectedIds.add(itemId);
+      }
+    });
+  }
+
+  /// Sebep sor: listeden chip secimi; liste BOSSA serbest metin. Zorunluluk ayara gore:
+  /// zorunluysa sebepsiz onay PASIF; degilse "Sebepsiz Devam" ile bos gecilebilir.
+  /// Doner: null = vazgec, String = sebep ('' = sebepsiz, sadece zorunlu DEGILKEN mumkun).
+  Future<String?> _sebepSor() async {
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        String? secilen;
+        return StatefulBuilder(builder: (ctx, setDlg) {
+          final listeVar = widget.sebepler.isNotEmpty;
+          // 3 Agu 2026 — liste BOSSA serbest metin YOK: girilen daima bos kalir.
+          // Zorunluysa onay butonu PASIF olur (veri girisi ZORUNLU), opsiyonelse
+          // "Sebepsiz Devam" ile gecilebilir.
+          final girilen = listeVar ? (secilen ?? '') : '';
+          // Zorunluluk karari saf ve testli: IkramRules.onaylanabilirMi
+          // (zorunluysa sebepsiz onay PASIF; opsiyonelse gecilebilir).
+          final onaylanabilir =
+              IkramRules.onaylanabilirMi(girilen: girilen, zorunlu: widget.sebepZorunlu);
+          return Material(
+            type: MaterialType.transparency,
+            child: Center(
+              child: Container(
+                width: 460,
+                constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 20)],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: const [
+                      Icon(Icons.card_giftcard_rounded, color: _turuncu, size: 24),
+                      SizedBox(width: 8),
+                      Expanded(child: Text('İkram Sebebi',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+                    ]),
+                    const SizedBox(height: 4),
+                    Text(
+                      widget.sebepZorunlu
+                          ? 'Lütfen ikram sebebini seçin (zorunlu)'
+                          : 'İkram sebebi seçebilirsiniz (opsiyonel)',
+                      style: TextStyle(color: Colors.grey[600], fontSize: 13),
+                    ),
+                    const SizedBox(height: 16),
+                    if (listeVar)
+                      Flexible(
+                        child: SingleChildScrollView(
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: widget.sebepler.map<Widget>((r) {
+                              final sebep = (r['reason'] ?? '').toString();
+                              final isSelected = secilen == sebep;
+                              return Material(
+                                color: isSelected ? _turuncu : Colors.grey[100],
+                                borderRadius: BorderRadius.circular(8),
+                                child: InkWell(
+                                  onTap: () => setDlg(() => secilen = isSelected ? null : sebep),
+                                  borderRadius: BorderRadius.circular(8),
+                                  splashColor: _turuncu.withOpacity(0.3),
+                                  child: Container(
+                                    constraints: const BoxConstraints(minHeight: 48),
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                          color: isSelected ? _turuncu : Colors.grey[300]!,
+                                          width: isSelected ? 2 : 1),
+                                    ),
+                                    child: Text(sebep,
+                                        style: TextStyle(
+                                            color: isSelected ? Colors.white : Colors.grey[800],
+                                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                            fontSize: 13)),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      )
+                    else
+                      // 3 Agu 2026 (Mustafa: "eger ikram sebebi adminden girilmediyse
+                      // iptaldeki gibi YOLUNU ANLAT, veri girisine ZORUNLU hale getir")
+                      // — onceki surumde serbest metin kabul ediliyordu; artik sebep
+                      // listesi BOSSA kullanici serbest yazamaz, panelde tanimlamaya
+                      // yonlendirilir. Sebep OPSIYONEL isaretliyse "Sebepsiz Devam"
+                      // yine calisir (panelin kendi ayari ezilmez).
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFFBEB),
+                          border: Border.all(color: const Color(0xFFFDE68A)),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Row(children: [
+                              const Icon(Icons.info_outline_rounded, size: 18, color: Color(0xFFB45309)),
+                              const SizedBox(width: 7),
+                              const Expanded(child: Text('Tanımlı ikram sebebi yok',
+                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13.5,
+                                      color: Color(0xFF92400E)))),
+                            ]),
+                            const SizedBox(height: 8),
+                            Text(
+                              widget.sebepZorunlu
+                                  ? 'İkram yapabilmek için önce sebep listesi tanımlanmalı.'
+                                  : 'Sebep listesi tanımlanmamış. Sebepsiz devam edebilirsiniz.',
+                              style: const TextStyle(fontSize: 12.5, color: Color(0xFF78350F)),
+                            ),
+                            const SizedBox(height: 10),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(7),
+                                border: Border.all(color: const Color(0xFFFDE68A)),
+                              ),
+                              child: const Text(
+                                'Panel → Mağaza Merkezi → İkram Sebepleri\n'
+                                '→ "+ Yeni Sebep" ile ekleyin.',
+                                style: TextStyle(fontSize: 12, height: 1.45,
+                                    fontWeight: FontWeight.w600, color: Color(0xFF92400E)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Vazgeç')),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: onaylanabilir
+                              ? () => Navigator.pop(ctx, listeVar ? (secilen ?? '') : '')
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _turuncu,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: Colors.grey[300],
+                            disabledForegroundColor: Colors.grey[500],
+                          ),
+                          child: Text(
+                            girilen.isEmpty && !widget.sebepZorunlu ? 'Sebepsiz Devam' : 'Onayla',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        });
+      },
+    );
+  }
+
+  /// Secili NORMAL kalemleri ikram isaretle (sebep akisiyla).
+  Future<void> _ikramYap() async {
+    if (_isProcessing || !_seciliHepsiNormal) return;
+    final sebep = await _sebepSor();
+    if (sebep == null) return; // vazgecti
+    await _islet(iptal: false, sebep: sebep.isEmpty ? null : sebep);
+  }
+
+  /// Secili IKRAMLI kalemlerin ikramini geri al (iptal:true).
+  Future<void> _geriAl() async {
+    if (_isProcessing || !_seciliHepsiIkram) return;
+    await _islet(iptal: true, sebep: null);
+  }
+
+  Future<void> _islet({required bool iptal, String? sebep}) async {
+    final idler = _selectedIds.toList();
+    if (idler.isEmpty) return;
+    setState(() => _isProcessing = true);
+    var basarili = 0;
+    String? ilkHata;
+    try {
+      for (final id in idler) {
+        final r = await widget.apiService.setItemIkram(
+          ticketId: widget.ticketId,
+          itemId: id,
+          ikramReason: sebep,
+          waiterId: widget.waiterId,
+          iptal: iptal,
+        );
+        if (r['success'] == false) {
+          ilkHata ??= r['error']?.toString() ?? 'bilinmeyen hata';
+          continue; // kalanlari denemeye devam — yarim birakma
+        }
+        basarili++;
+        final idx = _items.indexWhere((i) => i['id'] == id);
+        if (idx >= 0) {
+          _items[idx]['is_ikram'] = iptal ? 0 : 1;
+          _items[idx]['ikram_reason'] = iptal ? null : sebep;
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+
+    if (!mounted) return;
+    if (basarili == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(iptal
+            ? 'İkram geri alınamadı: ${ilkHata ?? ''}'
+            : 'İkram yapılamadı: ${ilkHata ?? ''}'),
+        backgroundColor: Colors.red,
+      ));
+      return;
+    }
+    if (ilkHata != null) {
+      // Kismi basari — kasiyer MUTLAKA gormeli (kalan kalemler isaretlenmedi).
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('DİKKAT: $basarili/${idler.length} kalem işlendi, kalanı '
+            'işlenemedi: $ilkHata'),
+        backgroundColor: Colors.orange[800],
+      ));
+    }
+    // Basari (tam veya kismi) -> dialog kapanir, "Tumunu Gor" tazelenmis halde gorunur.
+    widget.onDone();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final secilebilirler = _items.where(_secilebilir).toList();
+    final odenmisler = _items.where((i) => !_secilebilir(i)).toList();
+    final karisikSecim = _selectedIds.isNotEmpty && !_seciliHepsiNormal && !_seciliHepsiIkram;
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      insetPadding: const EdgeInsets.all(16),
+      child: Center(
+        child: Container(
+          width: MediaQuery.of(context).size.width * 0.7,
+          height: MediaQuery.of(context).size.height * 0.75,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 24, offset: const Offset(0, 8)),
+            ],
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              // Header
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                decoration: const BoxDecoration(
+                  color: _turuncu,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    topRight: Radius.circular(16),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.card_giftcard_rounded, color: Colors.white, size: 22),
+                    const SizedBox(width: 10),
+                    const Text('İkram', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    Material(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(8),
+                      child: InkWell(
+                        onTap: _isProcessing ? null : widget.onClose,
+                        borderRadius: BorderRadius.circular(8),
+                        splashColor: Colors.white.withOpacity(0.3),
+                        child: Container(
+                          constraints: const BoxConstraints(minHeight: 44, minWidth: 44),
+                          padding: const EdgeInsets.all(10),
+                          child: const Icon(Icons.close, color: Colors.white, size: 22),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Kalem listesi + ozet/butonlar
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: ListView(
+                        padding: const EdgeInsets.all(12),
+                        children: [
+                          if (secilebilirler.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text('İkram edilecek / geri alınacak kalemi seçin',
+                                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey[700])),
+                            ),
+                          ...secilebilirler.map((item) => _kalemSatiri(item, kilitli: false)),
+                          if (odenmisler.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text('Ödenmiş kalemler (ikram edilemez)',
+                                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green[700])),
+                            ),
+                            ...odenmisler.map((item) => _kalemSatiri(item, kilitli: true)),
+                          ],
+                        ],
+                      ),
+                    ),
+                    Container(
+                      width: 230,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[50],
+                        border: Border(left: BorderSide(color: Colors.grey[200]!)),
+                      ),
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text('Seçili: ${_selectedIds.length} kalem',
+                                      style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                                  const SizedBox(height: 8),
+                                  Text('${_seciliTutar.toStringAsFixed(2)} TL',
+                                      style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: _turuncu)),
+                                  const Divider(),
+                                  Text(
+                                    widget.sebepZorunlu
+                                        ? 'Sebep seçimi ZORUNLU'
+                                        : 'Sebep seçimi opsiyonel',
+                                    style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                                  ),
+                                  if (karisikSecim)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: Text(
+                                        'İkramlı ve normal kalemleri aynı anda seçmeyin.',
+                                        style: TextStyle(color: Colors.red[700], fontSize: 12, fontWeight: FontWeight.w600),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              children: [
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: _ikramBtn(
+                                    icon: Icons.card_giftcard_rounded,
+                                    label: 'İkram Yap',
+                                    color: _turuncu,
+                                    onTap: !_isProcessing && _seciliHepsiNormal ? _ikramYap : null,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: _ikramBtn(
+                                    icon: Icons.undo_rounded,
+                                    label: 'İkramı Geri Al',
+                                    color: Colors.blueGrey,
+                                    onTap: !_isProcessing && _seciliHepsiIkram ? _geriAl : null,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              if (_isProcessing) const LinearProgressIndicator(color: _turuncu),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _kalemSatiri(Map<String, dynamic> item, {required bool kilitli}) {
+    final itemId = item['id'] is num ? (item['id'] as num).toInt() : null;
+    final isSelected = itemId != null && _selectedIds.contains(itemId);
+    final isIkram = IkramRules.kalemIkramMi(item);
+    final qty = item['quantity'] ?? 1;
+    final price = _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+
+    final Color borderColor = kilitli
+        ? Colors.green[300]!
+        : (isSelected ? _turuncu : (isIkram ? _turuncu.withOpacity(0.5) : Colors.grey[300]!));
+    final Color bgColor = kilitli
+        ? Colors.green[50]!
+        : (isSelected ? _turuncu.withOpacity(0.10) : (isIkram ? _turuncu.withOpacity(0.05) : Colors.white));
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: (kilitli || _isProcessing || itemId == null) ? null : () => _toggle(itemId),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: borderColor, width: isSelected ? 2 : 1),
+          ),
+          child: Row(
+            children: [
+              if (!kilitli)
+                Container(
+                  width: 24, height: 24,
+                  margin: const EdgeInsets.only(right: 10),
+                  decoration: BoxDecoration(
+                    color: isSelected ? _turuncu : Colors.white,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: isSelected ? _turuncu : Colors.grey[400]!, width: 2),
+                  ),
+                  child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 16) : null,
+                ),
+              Container(
+                width: 28, height: 28,
+                decoration: BoxDecoration(
+                  color: kilitli ? Colors.green : (isIkram ? _turuncu : Colors.grey[600]),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Center(child: Text('$qty',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12))),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(item['product_name']?.toString() ?? '',
+                        style: const TextStyle(fontWeight: FontWeight.w500, color: Color(0xFF1F2937))),
+                    if (isIkram && (item['ikram_reason'] ?? '').toString().trim().isNotEmpty)
+                      Text((item['ikram_reason'] ?? '').toString(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 11, color: Colors.orange[800], fontStyle: FontStyle.italic)),
+                  ],
+                ),
+              ),
+              if (isIkram)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: _turuncu,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text('İKRAM',
+                      style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                ),
+              Text(
+                '${price.toStringAsFixed(2)} TL',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isIkram ? Colors.grey[500] : const Color(0xFF1F2937),
+                  decoration: isIkram ? TextDecoration.lineThrough : null,
+                  decorationColor: Colors.grey[600],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _ikramBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    VoidCallback? onTap,
+  }) {
+    final isDisabled = onTap == null;
+    return Material(
+      color: isDisabled ? Colors.grey[200] : color,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        splashColor: Colors.white.withOpacity(0.35),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 56),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: isDisabled ? Colors.grey[400] : Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                      color: isDisabled ? Colors.grey[400] : Colors.white,
+                      fontSize: 14, fontWeight: FontWeight.w700),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),

@@ -225,17 +225,29 @@ class SyncService {
         print('[Sync] Yazicilar alinamadi (opsiyonel): $e');
       }
 
-      // 7b. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
-      // Offline'da iptal popup, urun notu, varyant, ekstra calismasi icin
+      // 7b. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras,
+      //     ikram_reasons). Offline'da iptal popup, urun notu, varyant, ekstra, ikram calismasi icin
       _reportProgress('Tanimlamalar indiriliyor...', 0.85);
       try {
         await Future.wait([
           _dio!.get('/api/pos/cancel-reasons').then((r) async {
             final list = (r.data as List?) ?? [];
-            await _localDb.cacheLookups(
-              lookupType: 'cancel_reasons',
-              rows: list.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            final rows = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+            await _localDb.cacheLookups(lookupType: 'cancel_reasons', rows: rows);
+            // v20: dedicated tablo (offline iptal sebep garantisi) — cift kaynak degil,
+            // okuma once dedicated'a bakar (getCachedCancelReasons).
+            await _localDb.cacheCancelReasons(rows);
+          }),
+          // v20 IKRAM: sebep listesi offline'da da secilebilsin
+          _dio!.get('/api/pos/settings-extra/ikram-reasons').then((r) async {
+            final data = r.data;
+            final list = data is List ? data : (data is Map ? ((data['reasons'] as List?) ?? []) : []);
+            await _localDb.cacheIkramReasons(
+              list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(),
             );
+          }).catchError((e) {
+            // Uc eski backend'de olmayabilir — ikram cache atlanir, DIGER lookuplar etkilenmez
+            print('[Sync] ikram-reasons alinamadi (opsiyonel): $e');
           }),
           _dio!.get('/api/pos/product-notes').then((r) async {
             final list = (r.data as List?) ?? [];
@@ -518,14 +530,24 @@ class SyncService {
         print('[Sync] Yazici cache update hatasi: $e');
       }
 
-      // 7. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras)
+      // 7. Lookup verileri (cancel_reasons, product_notes, global_variants, global_extras,
+      //    ikram_reasons)
       try {
         await Future.wait([
           _dio!.get('/api/pos/cancel-reasons').then((r) async {
-            await _localDb.cacheLookups(
-              lookupType: 'cancel_reasons',
-              rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+            final rows = ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+            await _localDb.cacheLookups(lookupType: 'cancel_reasons', rows: rows);
+            await _localDb.cacheCancelReasons(rows); // v20 dedicated tablo
+          }),
+          // v20 IKRAM: sebep listesi cache guncelle (uc yoksa opsiyonel — digerleri etkilenmez)
+          _dio!.get('/api/pos/settings-extra/ikram-reasons').then((r) async {
+            final data = r.data;
+            final list = data is List ? data : (data is Map ? ((data['reasons'] as List?) ?? []) : []);
+            await _localDb.cacheIkramReasons(
+              list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(),
             );
+          }).catchError((e) {
+            print('[Sync] ikram-reasons cache update hatasi (opsiyonel): $e');
           }),
           _dio!.get('/api/pos/product-notes').then((r) async {
             await _localDb.cacheLookups(
@@ -1524,7 +1546,8 @@ class SyncService {
   // anlik refresh eder. 30dk poll bekleme olmadan fiyat/yazici/menu degisikligi
   // saniyeler icinde POS'a yansir. Multi-tenant: panel_id event'te.
   // Type listesi: products, categories, sections, tables, waiters, printers,
-  //                cancel_reasons, product_notes, global_variants, global_extras, settings
+  //                cancel_reasons, ikram_reasons, product_notes, global_variants,
+  //                global_extras, settings
 
   Future<void> refreshCacheType(String type) async {
     if (!_connectivity.isOnline || _dio == null) {
@@ -1592,9 +1615,17 @@ class SyncService {
           break;
         case 'cancel_reasons':
           final r = await _dio!.get('/api/pos/cancel-reasons');
-          await _localDb.cacheLookups(
-            lookupType: 'cancel_reasons',
-            rows: ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList(),
+          final crRows = ((r.data as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+          await _localDb.cacheLookups(lookupType: 'cancel_reasons', rows: crRows);
+          await _localDb.cacheCancelReasons(crRows); // v20 dedicated tablo
+          break;
+        case 'ikram_reasons':
+          // v20 IKRAM: panel Ikram Sebepleri degisince push ile anlik yenile
+          final r = await _dio!.get('/api/pos/settings-extra/ikram-reasons');
+          final data = r.data;
+          final list = data is List ? data : (data is Map ? ((data['reasons'] as List?) ?? []) : []);
+          await _localDb.cacheIkramReasons(
+            list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList(),
           );
           break;
         case 'product_notes':
@@ -1727,12 +1758,21 @@ class SyncService {
       );
       if (existing.isNotEmpty && (existing.first['pin'] as String?)?.isNotEmpty == true) {
         // Mevcut PIN'i koru, sadece diğer alanları güncelle
+        // 🔴 3 Agu 2026 — SALON KISITI SESSIZ SILINIYORDU.
+        // GET /api/pos/waiters (liste ucu) `sections`/`permissions` DONDURMUYOR.
+        // _cacheAllWaiters bu listeyi her senkronda basdigi icin login'in dogru
+        // cache'ledigi salon atamasi '[]' ile EZILIYOR, sonraki cevrimdisi PIN
+        // girisinde "atama yok" sanilip garson TUM salonlari goruyordu (sessiz).
+        // ARTIK: gelen kayitta alan YOKSA cache'teki deger KORUNUR.
+        // (Alan VARSA — login yanitinda oldugu gibi — normal sekilde guncellenir.)
         await db.update(
           'cached_waiters',
           {
             'name': waiter['name'],
-            'permissions': jsonEncode(waiter['permissions'] is Map ? waiter['permissions'] : {}),
-            'sections': jsonEncode(waiter['sections'] ?? []),
+            if (waiter.containsKey('permissions'))
+              'permissions': jsonEncode(waiter['permissions'] is Map ? waiter['permissions'] : {}),
+            if (waiter.containsKey('sections'))
+              'sections': jsonEncode(waiter['sections'] ?? []),
             'cached_at': now,
           },
           where: 'id = ?',
@@ -1743,14 +1783,31 @@ class SyncService {
       }
     }
 
+    // 3 Agu 2026 — REPLACE insert TUM satiri siler/yeniden yazar; gelen kayitta
+    // sections/permissions yoksa (liste ucu) cache'teki degeri ELDE TASI, yoksa
+    // yukaridaki update dalindaki ayni sessiz silinme buradan gerceklesirdi.
+    Map<String, dynamic> _eskiler = {};
+    try {
+      final onceki = await db.query('cached_waiters',
+          columns: ['permissions', 'sections'], where: 'id = ?', whereArgs: [waiter['id']], limit: 1);
+      if (onceki.isNotEmpty) _eskiler = Map<String, dynamic>.from(onceki.first);
+    } catch (_) {}
+
+    final _perm = waiter.containsKey('permissions')
+        ? jsonEncode(waiter['permissions'] ?? [])
+        : (_eskiler['permissions']?.toString() ?? jsonEncode([]));
+    final _sect = waiter.containsKey('sections')
+        ? jsonEncode(waiter['sections'] ?? [])
+        : (_eskiler['sections']?.toString() ?? jsonEncode([]));
+
     await db.insert(
       'cached_waiters',
       {
         'id': waiter['id'],
         'name': waiter['name'],
         'pin': _hashPin(pinValue),
-        'permissions': jsonEncode(waiter['permissions'] ?? []),
-        'sections': jsonEncode(waiter['sections'] ?? []),
+        'permissions': _perm,
+        'sections': _sect,
         'cached_at': now,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,

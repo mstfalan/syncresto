@@ -141,6 +141,42 @@ class _AddItemModalState extends State<AddItemModal> {
     return total;
   }
 
+  /// 🔴 6 Agu 2026 — KALEMIN `extras` FIYAT TOPLAMI.
+  ///
+  /// Varyant/coklu secim farklari SADECE `extras`'ta durur, notlara ASLA fiyat
+  /// yazilmaz (bkz. satir 868-869 ve 889-890: backend'in unit_price safety-net'i
+  /// nottaki '+NTL' desenine bakar, oraya fiyat yazmak cift sayim yaratir).
+  /// Bu yuzden `_sumExtraPriceTokens` (nottaki tokenlar) ile bu fonksiyon
+  /// (extras'taki fiyatlar) BIRBIRINDEN AYRIK kumeleri toplar — ikisini birden
+  /// eklemek cift sayim DEGILDIR.
+  ///
+  /// Bicim toleransi: online jsonb dizi, cevrimdisi SQLite'ta JSON metin.
+  ///
+  /// `amount` anahtari UYDURMA DEGIL: fis tarafindaki `_extraSatiri`
+  /// (printer_service.dart) 31 Tem 2026'dan beri `e['price'] ?? e['amount']`
+  /// okuyor — ayni veriyi iki yerde farkli toleransla okumamak icin birebir
+  /// esleniyor. Canlida bugun `amount` kullanan kayit YOK (6 Agu taramasi);
+  /// fis kodu degisirse burasi da degismeli.
+  double _sumExtrasPrices(dynamic extrasRaw) {
+    if (extrasRaw == null) return 0;
+    dynamic veri = extrasRaw;
+    if (veri is String) {
+      final s = veri.trim();
+      if (s.isEmpty) return 0;
+      try {
+        veri = jsonDecode(s);
+      } catch (_) {
+        return 0;
+      }
+    }
+    if (veri is! List) return 0;
+    double t = 0;
+    for (final e in veri) {
+      if (e is Map) t += _safeDouble(e['price'] ?? e['amount']);
+    }
+    return t;
+  }
+
   bool _hasPermission(String permission) {
     if (!widget.apiService.isOnline) {
       // 8 Tem 2026: 'print_receipt' EKLENDI. Offline'da mutfak yazicisi TCP ile dogrudan basar
@@ -861,16 +897,26 @@ class _AddItemModalState extends State<AddItemModal> {
       final gExtras = secili
           .map((v) => {'name': v['name']?.toString() ?? '', 'price': _variantModifier(v)})
           .toList();
+      // 3 Agu 2026 — varyant adlari + kullanicinin serbest notu AYNI alanda.
+      final gNotlar = _notuBirlestir(
+          secili.map((v) => v['name']?.toString() ?? '').toList(), notCtrl.text);
+      // 🔴 6 Agu 2026 — NOTTAKI FIYAT TOKEN'I FIYATTAN DUSUYORDU.
+      // `_notuBirlestir` kullanicinin serbest notunu AYNEN korur; o notta eski
+      // genel-varyant doneminden kalma "(+10TL)" gibi tokenlar olabilir (canlida
+      // 6.512 not tasiyor). Eskiden burada SADECE `basePrice + toplamFark`
+      // yaziliyordu -> not hala "+10TL" derken fiyattan 10 TL DUSUYORDU
+      // (iz birakmayan eksik tahsilat). Tekli varyant yolu (asagida ~2098)
+      // bunu `existingExtrasTotal` ile ZATEN ekliyordu; iki yol tutarsizdi.
+      // Yeni secimlerin farki `toplamFark`ta, nottaki tokenlar ayrik kume.
+      final gNotTokenlari = _sumExtraPriceTokens(gNotlar ?? '');
       try {
         final res = await widget.apiService.updateTicketItem(
           ticketId: widget.ticketId,
           itemId: gItemId,
           // Not alanina fiyat YAZILMAZ (backend unit_price safety-net'i notlardaki
           // '+NTL' desenine bakiyor — cift sayim riski). Secimler extras'ta.
-          // 3 Agu 2026 — varyant adlari + kullanicinin serbest notu AYNI alanda.
-          notes: _notuBirlestir(
-              secili.map((v) => v['name']?.toString() ?? '').toList(), notCtrl.text),
-          unitPrice: basePrice + toplamFark,
+          notes: gNotlar,
+          unitPrice: basePrice + toplamFark + gNotTokenlari,
           waiterId: widget.waiterId,
           extras: gExtras,
         );
@@ -2351,23 +2397,34 @@ class _AddItemModalState extends State<AddItemModal> {
     // (kayitta baz fiyat urun kaydindan okunur: restaurant_price ?? price —
     // item.unit_price'tan TURETILMEZ, o eski ekstralarla kirlenmis olabilir)
     final productId = secili['product_id'];
-    int? categoryId;
     dynamic dialogProd;
     if (productId != null) {
       final allProducts = await widget.apiService.getProducts();
       dialogProd = (allProducts as List).where((p) => p['id'] == productId).firstOrNull;
-      if (dialogProd != null) categoryId = dialogProd['category_id'] as int?;
     }
 
-    // Paralel API çağrıları
-    final results = await Future.wait([
-      widget.apiService.getProductNotes(),
-      widget.apiService.getGlobalVariants(categoryId: categoryId),
-      widget.apiService.getGlobalExtras(categoryId: categoryId),
-    ]);
-    final predefinedNotes = results[0] as List;
-    final globalVariants = results[1] as List;
-    final globalExtras = results[2] as List;
+    // Hazir notlar (tek cagri — genel varyant/ekstra cagrilari kaldirildi, asagiya bak)
+    final List predefinedNotes = await widget.apiService.getProductNotes();
+
+    // 🔴 6 Agu 2026 — GENEL VARYANT / GENEL EKSTRA HER YERDE GIZLENDI.
+    // Mustafa: "genel varyant diye bir sey olmasin artik, sadece varyantlardan
+    // ilerleyecegiz. Notlara tiklandiginda sadece notlar gorunecek."
+    // Gerekce: varyantlar artik URUN BAZLI gosteriliyor (varyant + coklu secim +
+    // icerik ekle/cikar), notun icindeki ikinci varyant sistemi gereksiz kaldi.
+    // Panel (store-hub karti) ve Web POS (ticket.js) ayni gun ayni sekilde gizlendi.
+    //
+    // SILME YOK: API ucu, tablo, lisans modulu ve panel sayfasi yerinde duruyor.
+    // Listeler bos oldugu icin sekme butonlari cizilmez, chip secilemez, nota
+    // hicbir sey eklenmez. ESKI NOTLAR KAYBOLMAZ: chip'e eslenmeyen tokenlar
+    // computeFreeText() ile serbest metne duser ve aynen geri yazilir.
+    //
+    // ISTEK TASARRUFU: iki /active cagrisi da kaldirildi (Flutter gunde ~461 istek
+    // atiyordu) — [[feedback_istek_tasariminda_minimum_is]].
+    // GERI ALMA: asagidaki iki const listeyi silip Future.wait'e
+    // getGlobalVariants(categoryId: ...) / getGlobalExtras(categoryId: ...)
+    // cagrilarini geri ekle (categoryId = dialogProd['category_id']).
+    final List globalVariants = const [];
+    final List globalExtras = const [];
 
     if (!mounted) return;
 
@@ -2473,9 +2530,20 @@ class _AddItemModalState extends State<AddItemModal> {
           return Wrap(
             spacing: 8, runSpacing: 8,
             children: items.map<Widget>((item) {
-              final id = secili['id'] as int;
-              final name = secili[nameKey]?.toString() ?? '';
-              final price = _safeDouble(secili['price']);
+              // 🔴 6 Agu 2026 HATA DUZELTMESI (Mustafa: "genel ekstralar ve genel
+              // varyantlar nota tiklandiginda ICERIKLERIYLE BERABER gozukmuyor").
+              // SEBEP: 3 Agu'daki `item` -> `secili` yeniden adlandirmasi bu lambdanin
+              // ICINE de sizmisti. `secili` = SECILI ADISYON KALEMI, `item` = cizilen
+              // chip. Sonuc: her chip kalemin id'siyle ciziliyordu -> ad bos (kalemde
+              // 'name' yok, 'product_name' var), fiyat 0, hepsi ayni id oldugu icin
+              // biri secilince HEPSI isaretli gorunuyordu. Para kaybi YOK: rebuildNote
+              // bu id'yi globalVariants'ta bulamadigi icin nota/fiyata hicbir sey
+              // yazilmiyordu — sadece sekme kullanilamaz haldeydi.
+              // Sekmeler artik gizli (asagiya bak); bu duzeltme, ozellik geri gelirse
+              // kodun calisir halde olmasi icin.
+              final id = item['id'] as int;
+              final name = item[nameKey]?.toString() ?? '';
+              final price = _safeDouble(item['price']);
               final isSelected = selectedIds.contains(id);
               // 22 May 2026: Dokunmatik POS — InkWell + min 52
               return Material(
@@ -2667,21 +2735,34 @@ class _AddItemModalState extends State<AddItemModal> {
       //   kayitta cift sayim yapiyordu (350→360→370) — kaldirildi. Ekstra
       //   kaldirilinca da fiyat artik DUSER (eskiden COALESCE eski fiyati
       //   tutuyordu, iz birakmayan fazla tahsilat).
+      // 🔴 6 Agu 2026 — VARYANT FARKI YUTULUYORDU (para kaybi, iz birakmayan).
+      // `base` urun kaydinin HAM fiyati; kalemin varyant/coklu secim farki ise
+      // `extras`'ta durur ve unit_price'in icindedir. Eskiden fiyat sifirdan
+      // kurulurken extras HIC eklenmiyordu:
+      //   baz 200 + "Buyuk" +50 = 250 TL kalem. Kasiyer nota "(+20TL)" yazinca
+      //   -> 200 + 0 + 20 = 220 TL. Varyantin 50 TL'si UCUYORDU.
+      // Not: extras fiyatlari ile nottaki '(+N TL)' tokenlari AYRIK kumeler
+      // (varyant akisi nota fiyat yazmaz) — ikisini toplamak cift sayim degil.
       double? newUnitPrice;
       if (priceDirty) {
+        final kalemExtras = _sumExtrasPrices(secili['extras']);
         double base = 0;
         if (dialogProd != null) {
           base = _safeDouble(dialogProd['restaurant_price'] ?? dialogProd['price']);
         }
-        if (base <= 0) {
+        if (base > 0) {
+          newUnitPrice = base + kalemExtras + chipsPrice + freeSum;
+        } else {
           // Urun kaydi bulunamadiysa baz'i mevcut fiyattan turet:
           // acilista bilinen fiyat ogelerini (chip + serbest token) dus.
+          // ⚠️ Bu dalda `extras` EKLENMEZ: currentUnitPrice zaten iceriyor,
+          // tekrar eklemek cift sayim olurdu.
           final initialChipsPrice = result['initialChipsPrice'] as double? ?? 0;
           final initialFreeSum = result['initialFreeSum'] as double? ?? 0;
           base = currentUnitPrice - initialChipsPrice - initialFreeSum;
           if (base < 0) base = currentUnitPrice;
+          newUnitPrice = base + chipsPrice + freeSum;
         }
-        newUnitPrice = base + chipsPrice + freeSum;
       }
 
       // 12 May 2026 debug: hangi item'a not yazildi

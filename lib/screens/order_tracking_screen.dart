@@ -801,6 +801,11 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(it['product_name']?.toString() ?? '', style: const TextStyle(fontSize: 13)),
+                      // 6 Agu 2026 — varyant / coklu secim / eklenen-cikarilan icerikler.
+                      // Bu liste ItemCard kullanmiyor, ayni yardimciyi cagirir (tek kaynak).
+                      if (takipDetayOzet(it['extras']).isNotEmpty)
+                        Text(takipDetayOzet(it['extras']),
+                            style: TextStyle(fontSize: 11, color: Colors.indigo[700], fontWeight: FontWeight.w600)),
                       if ((it['notes']?.toString() ?? '').isNotEmpty)
                         Text(it['notes'].toString(), style: TextStyle(fontSize: 11, color: Colors.grey[600], fontStyle: FontStyle.italic)),
                     ],

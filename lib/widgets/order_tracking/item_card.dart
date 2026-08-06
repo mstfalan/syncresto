@@ -1,6 +1,66 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../providers/theme_provider.dart';
+
+/// 🔴 6 Agu 2026 — MASA TAKIP URUN DETAYI (Mustafa: "masa takip kisminda bunun
+/// detaylari gozukmuyor maalesef ... flutter ve garson webde de").
+///
+/// Takip ekrani yalnizca `product_name` + `notes` gosteriyordu. Varyant secimi,
+/// coklu secim ve eklenen/cikarilan icerikler `extras` alaninda durur ve backend
+/// sorgusunda HIC SECILMIYORDU. Ornek: "Citir Tavuk 4'lu" kaleminde notes NULL,
+/// extras `[{"name":"Acisiz"}]` -> garson "Acisiz" bilgisini HIC goremiyordu.
+///
+/// BICIM (fis ile ayni kural, printer_service._extraSatiri esleniği):
+///   - Oge Map ise `name` okunur; String ise aynen kullanilir (eski kayitlar).
+///     `label`/`title` yedekleri UYDURMA DEGIL — fis tarafi 31 Tem 2026'dan beri
+///     `e['name'] ?? e['label'] ?? e['title']` okuyor, ayni veri iki ekranda
+///     farkli tolere edilmesin diye birebir eslendi. Canlida bugun ikisi de
+///     kullanilmiyor (6 Agu taramasi: 150.915 kaydin hepsi `name`'li).
+///   - Ad '-' ile basliyorsa CIKARILAN demektir -> onek temizlenir, cagiran taraf
+///     kirmizi/uzeri-cizili gosterir. Fiste bu "CIKAR: Sogan" olarak basiliyor.
+///   - Fiyat EKRANDA GOSTERILMEZ: takip ekrani mutfak/servis icindir, tutar degil
+///     icerik onemlidir; satir zaten dar.
+/// Ayni ad birden fazla gecebilir (2 porsiyon patates = iki kayit) — BIRLESTIRILMEZ,
+/// canli veride boyle duruyor ve adet bilgisi bundan okunuyor.
+List<({String ad, bool cikarilan})> takipDetayParcalari(dynamic extrasRaw) {
+  if (extrasRaw == null) return const [];
+  dynamic veri = extrasRaw;
+  // Cevrimdisi SQLite'ta jsonb metin olarak saklanir -> once coz.
+  if (veri is String) {
+    final s = veri.trim();
+    if (s.isEmpty) return const [];
+    try {
+      veri = jsonDecode(s);
+    } catch (_) {
+      return const [];
+    }
+  }
+  if (veri is! List) return const [];
+  final out = <({String ad, bool cikarilan})>[];
+  for (final e in veri) {
+    var ad = '';
+    if (e is Map) {
+      ad = (e['name'] ?? e['label'] ?? e['title'] ?? '').toString().trim();
+    } else {
+      ad = e?.toString().trim() ?? '';
+    }
+    if (ad.isEmpty) continue;
+    final cikarilan = ad.startsWith('-');
+    if (cikarilan) ad = ad.substring(1).trim();
+    if (ad.isEmpty) continue;
+    out.add((ad: ad, cikarilan: cikarilan));
+  }
+  return out;
+}
+
+/// Detay parcalarini tek satirlik ozete cevirir: "Acisiz · 4'lu · Sogan yok"
+String takipDetayOzet(dynamic extrasRaw) {
+  final p = takipDetayParcalari(extrasRaw);
+  if (p.isEmpty) return '';
+  return p.map((x) => x.cikarilan ? '${x.ad} yok' : x.ad).join(' · ');
+}
 
 class ItemCard extends StatelessWidget {
   final Map<String, dynamic> item;
@@ -26,6 +86,8 @@ class ItemCard extends StatelessWidget {
     final qty = item['quantity']?.toString() ?? '1';
     final name = item['product_name']?.toString() ?? '';
     final notes = item['notes']?.toString();
+    // Varyant / coklu secim / eklenen-cikarilan icerikler (backend `extras`)
+    final detay = takipDetayOzet(item['extras']);
     final printed = item['printed'] == 1 || item['printed'] == true;
     final addedTime = _formatTime(item['item_created_at']);
     final addedBy = item['added_by_name']?.toString() ?? '';
@@ -123,18 +185,42 @@ class ItemCard extends StatelessWidget {
                     color: isDelivered ? Colors.grey[700] : Colors.black87,
                   ),
                 ),
-                if (!compact && notes != null && notes.isNotEmpty)
+                // 6 Agu 2026 — DETAY + NOT ayni satirda. Kart yuksekligi SABIT
+                // (h = 56/72) oldugu icin yeni satir eklemek tasma yaratirdi;
+                // bu yuzden detay mevcut not satirina alindi. Sira bilincli:
+                // DETAY ONCE gelir (varyant/icerik mutfak icin kritik, uzun
+                // metinde ellipsis'e once serbest not kurban edilir).
+                if (!compact && (detay.isNotEmpty || (notes != null && notes.isNotEmpty)))
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      notes,
+                    child: RichText(
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey[600],
-                        fontStyle: FontStyle.italic,
-                      ),
+                      text: TextSpan(children: [
+                        if (detay.isNotEmpty)
+                          TextSpan(
+                            text: detay,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.indigo[700],
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        if (detay.isNotEmpty && notes != null && notes.isNotEmpty)
+                          TextSpan(
+                            text: '  •  ',
+                            style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                          ),
+                        if (notes != null && notes.isNotEmpty)
+                          TextSpan(
+                            text: notes,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                      ]),
                     ),
                   ),
                 // META: ekleyen + saat (isDelivered ise teslim eden + saat)

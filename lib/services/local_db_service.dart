@@ -3554,6 +3554,15 @@ class LocalDbService {
         i.product_name AS product_name,
         i.quantity AS quantity,
         i.notes AS notes,
+        -- 6 Agu 2026: masa takipte varyant/coklu secim/eklenen-cikarilan icerik.
+        -- Online sorguya eslenik — AMA SART: panel-direct/tickets.js getPendingOrders
+        -- SELECT'ine `i.extras` 6 Agu 2026 sunucu guncellemesiyle eklendi. O guncelleme
+        -- geri alinirsa online tarafta detay KAYBOLUR, burasi calismaya devam eder
+        -- (tarihsiz "eslenik" iddiasina guvenme, sunucuyu dogrula).
+        -- Katı kural: her POS ozelligi CEVRIMDISI da calisir [[feedback_pos_cache_offline_zorunlu]].
+        -- Burada JSON METIN doner (SQLite), online tarafta jsonb dizi gelir —
+        -- takipDetayParcalari() iki bicimi de kabul eder.
+        i.extras AS extras,
         i.delivered_at AS delivered_at,
         COALESCE(wd.name, i.delivered_by_name) AS delivered_by_name,
         COALESCE(wa.name, i.added_by_name) AS added_by_name,

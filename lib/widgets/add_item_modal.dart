@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:dio/dio.dart';   // 6 Agu 2026 — icerik kilidi (400) hatasini kullaniciya anlamli gostermek icin
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -2701,37 +2702,61 @@ class _AddItemModalState extends State<AddItemModal> {
       // yani mutfaga GITMIS urunun fiyati bu yoldan degistirilebiliyordu.
       // Mustafa kurali: "bir kanaldaki bugi TUM kanallarda ara."
       //
-      // KAPSAM: NOT yazma SERBEST kalir (bugune kadar calisan akis bozulmaz) —
-      // sadece FIYAT gonderimi durdurulur ve kullaniciya sebebi soylenir.
-      // Sunucuda da ayni kilit var (panel-direct/tickets.js updateItem); burasi
-      // kullaniciya ACIKLAMA veren on kapi, orasi son savunma hatti.
+      // KAPSAM (6 Agu 2026 GUNCELLENDI): eskiden "not yazma serbest, sadece fiyat
+      // engellenir" idi. Mustafa yeni kural koydu — yazdirilmis kalemde NOT DA
+      // degistirilemez (asagidaki bloga bak). Fiyat farki hesabina artik gerek yok:
+      // fis ciktiysa istek zaten hic gonderilmiyor.
       final _kalemK = _findSelectedItem() ?? _ticketItems.where((i) => _safeInt(i['id']) == itemId).firstOrNull;
       final bool _fisCiktiK = _kalemK != null && (_kalemK['printed'] == 1 || _kalemK['printed'] == true);
       final bool _comboK = _kalemK != null &&
           (_kalemK['combo_group_id']?.toString().trim().isNotEmpty ?? false);
-      // newUnitPrice nullable — null ise zaten fiyat gonderilmiyor demektir.
-      final double? _yeniFiyat = newUnitPrice;
-      final bool _fiyatDegisti = _kalemK != null && _yeniFiyat != null &&
-          (_safeDouble(_kalemK['unit_price']) - _yeniFiyat).abs() > 0.005;
 
-      if ((_fisCiktiK || _comboK) && _fiyatDegisti) {
+      // 🔴 6 Agu 2026 — YAZDIRILMIS KALEMDE HICBIR DEGISIKLIK KABUL EDILMEZ (NOT DAHIL).
+      // Mustafa kurali: "notu degistirirsen 'ben bunu girdim baska cikti' derler."
+      // Mutfaga BASILI fis gitti; kayittaki not ile mutfagin elindeki fis AYNI kalmali.
+      // Notu sonradan degistirmek kaydi fisten AYIRIR -> tartisma cikar.
+      // Bu yuzden istek HIC GONDERILMEZ; kullaniciya ne yapacagi soylenir.
+      //
+      // ⚠️ Onceki hali sadece FIYATI engelliyordu, notu kaydediyordu. Ayrica sunucu
+      // (panel-direct/tickets.js:424) not-only degisikligi HALA kabul ediyor — burasi
+      // kullanici kapisi. Baska bir istemci ayni seyi yaparsa sunucu izin verir;
+      // istenirse orasi da kapatilmali (ayri karar).
+      if (_fisCiktiK || _comboK) {
         _showError(_fisCiktiK
-            ? 'Bu ürünün fişi mutfağa gitti — fiyatı değiştiren seçim uygulanamaz. Not yazabilirsiniz.'
-            : 'Bu ürün bir combo paketinin parçası — fiyatı değiştiren seçim uygulanamaz. Not yazabilirsiniz.');
+            ? 'Yazdırılan ürünün içeriği düzeltilemez. Ürünü iptal ederek tekrar girebilirsiniz.'
+            : 'Bu ürün bir combo paketinin parçası — içeriği tek başına düzeltilemez. '
+              'Paketi iptal ederek tekrar oluşturabilirsiniz.');
+        return;
       }
 
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         notes: note,
-        // Kilit aktifse fiyat GONDERILMEZ -> backend COALESCE ile mevcut fiyati korur.
-        unitPrice: ((_fisCiktiK || _comboK) && _fiyatDegisti) ? null : newUnitPrice,
+        unitPrice: newUnitPrice,
       );
 
       await _loadTicketItems();
       widget.onItemAdded();
     } catch (e) {
-      _showError('Not eklenemedi: $e');
+      // 6 Agu 2026 — SON SAVUNMA: sunucunun icerik kilidi (400) kullaniciya HAM
+      // DioException olarak yansiyordu ("Not eklenemedi: DioException [bad response]...").
+      // Yukaridaki on kapi bu durumu artik onluyor ama bir yol daha acilirsa (baska
+      // ekran, eski surum, yaris) kullanici anlamli uyari gormeli — teknik cop degil.
+      final bool _icerikKilidi = e is DioException &&
+          e.response?.statusCode == 400 &&
+          (e.response?.data is Map) &&
+          ((e.response!.data as Map)['kilit'] == 'printed' ||
+           (e.response!.data as Map)['kilit'] == 'combo');
+      if (_icerikKilidi) {
+        final bool _printed = (e as DioException).response!.data['kilit'] == 'printed';
+        _showError(_printed
+            ? 'Yazdırılan ürünün içeriği düzeltilemez. Ürünü iptal ederek tekrar girebilirsiniz.'
+            : 'Bu ürün bir combo paketinin parçası — içeriği tek başına düzeltilemez. '
+              'Paketi iptal ederek tekrar oluşturabilirsiniz.');
+      } else {
+        _showError('Not eklenemedi: $e');
+      }
     }
   }
 

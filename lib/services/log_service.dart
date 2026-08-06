@@ -283,16 +283,31 @@ class LogService {
         },
       );
 
+      // 🔴 6 Agu 2026 — LOG TEKRARI (REPLAY) FIX.
+      // ESKI DAVRANIS: _pendingLogs.removeRange (satir ~255) SADECE BELLEKTEN siliyordu;
+      // disk (pending_logs.json) yalnizca BASARISIZLIK yollarinda guncelleniyordu.
+      // Basarili gonderimden sonra dosya ESKI HALIYLE kaliyor -> her acilista
+      // _loadPendingLogs onu tekrar kuyruga koyup TEKRAR gonderiyordu. Sunucuda dedupe yok
+      // ve backend created_at'i NOW() ile bastigi icin onlarca eski kayit AYNI SANIYEYE
+      // dusuyordu. Sonuc: pos_logs %57 tekrar (151.870 ham -> 65.395 tekil), redirect-loop
+      // hatasi 26 gercek olay 29.337 satir gorunuyordu (1128x sisme) ve teshisler yaniltiyordu.
+      // FIX: kuyrugu KUCULTEN her yolda diski de senkronla. Kuyruk bosaldiysa dosya "[]" olur.
+      // NOT: _clearPendingLogs() (satir ~448) bu is icin UYGUN DEGIL — o yalnizca legacy
+      // SharedPreferences anahtarini siliyor, dosyaya DOKUNMUYOR. Olu ama silinmedi
+      // ([[feedback_fix_dead_code_check]]: kullanim testi yapilmadan silme yok).
       if (response.statusCode == 200) {
         debugPrint('[LogService] ${logsToSend.length} log gönderildi');
+        await _savePendingLogs();
       } else if (response.statusCode == 413) {
         // Payload Too Large — bu log'lari DROP et, geri pending'e ekleme.
         // Sonsuz dongu engelleyici. Sahada sunucu limiti ayarlanana kadar
         // log telemetrisi kismi olur ama POS yasamaya devam eder.
         debugPrint('[LogService] 413 Payload Too Large — ${logsToSend.length} log atildi (sonsuz dongu engellendi)');
+        await _savePendingLogs();
       } else if (response.statusCode == 401 || response.statusCode == 403) {
         // Auth hatasi — kucuk batch tekrar denemenin anlami yok, drop
         debugPrint('[LogService] Auth hatasi (${response.statusCode}) — ${logsToSend.length} log atildi');
+        await _savePendingLogs();
       } else {
         // Diger hatalar (5xx vs) — geri pending'e ekle, sonra retry
         _pendingLogs.insertAll(0, logsToSend);

@@ -1255,6 +1255,35 @@ class PrinterService {
     for (int i = 0; i < turkishChars.length; i++) {
       result = result.replaceAll(turkishChars[i], asciiChars[i]);
     }
+
+    // 🔴 6 Agu 2026 — FIS OLDUREN KARAKTERLER.
+    // Bu fonksiyon SADECE 12 Turkce harfi ceviriyordu; ₺ ve emoji gibi ASCII disi
+    // karakterler ESC/POS encoder'a ulasip "Invalid argument (string): Contains invalid
+    // characters" ile PATLATIYORDU. Ornekler: "1 x Ilave 15₺", "termosta pls 😊".
+    // Retry KURTARAMIYORDU: kitchen_print_retry_modal ayni veriyle TCP retransmit yapar,
+    // encoder ayni hatayi verir -> fis ASLA cikmaz. Guvenlik aginin delindigi TEK yer buydu
+    // (3 fis kayboldu, 2 farkli panelde).
+    //
+    // ⚠️ SIRA ONEMLI: Turkce donusum ONCE bitmeli. Ters olsaydi s/g/i harfleri de silinirdi.
+    // ⚠️ Mevcut fisleri DEGISTIRMEZ: Turkce donusumden sonra normal icerik zaten saf ASCII,
+    //    bu blok orada NO-OP'tur. Sadece daha once PATLAYAN karakterlere dokunur.
+    result = result.replaceAll('₺', 'TL');   // Mustafa: "TL yazsin"
+
+    // Aksanli LATIN harfleri: ASCII karsiligina cevrilir, ATILMAZ.
+    // Bunlar encoder'i patlatMIYORdu (latin1 araligindalar) — koru-cevir, yoksa
+    // "Hilâl" -> "Hill", "yâda" -> "yda" gibi HARF DUSER, bu bir regresyon olurdu.
+    // Canli veride gorulenler: â û î ò · (7 metin).
+    // ⚠️ Iki dizinin uzunlugu BIREBIR ayni olmali (indeks eslesmesi).
+    const latinChars = 'àáâãäåèéêëìíîïòóôõöùúûüñýÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜÑÝ·';
+    const latinAscii = 'aaaaaaeeeeiiiiooooouuuunyAAAAAAEEEEIIIIOOOOOUUUUNY.';
+    for (int i = 0; i < latinChars.length; i++) {
+      result = result.replaceAll(latinChars[i], latinAscii[i]);
+    }
+
+    // Geri kalan ASCII disi her sey (emoji, diger para birimleri, yabanci alfabeler)
+    // ATILIR — bunlar zaten fisi patlatiyordu, basilamiyorlardi.
+    // \n \r \t korunur — ESC/POS satir sonu icin sart.
+    result = result.replaceAll(RegExp(r'[^\x09\x0A\x0D\x20-\x7E]'), '');
     return result;
   }
 

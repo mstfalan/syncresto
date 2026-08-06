@@ -1535,8 +1535,24 @@ class PrinterService {
     if (waiterName.isNotEmpty) {
       bytes += generator.text('Garson: $waiterName', styles: const PosStyles(bold: true));
     }
+    // 🔴 6 Agu 2026 — MUTFAK IKI FISI AYIRT EDEMIYORDU (Mustafa fis fotografi, masa 17).
+    // Tek "Saat" satiri vardi ve ADISYONUN ACILIS saatini basiyordu, fisin basildigi ani
+    // DEGIL. Ayni adisyona farkli zamanlarda gelen siparisler BIREBIR AYNI gorunuyordu:
+    //   20:48 Hira 2 cay  -> "Adisyon 260806-9694 ... Saat: 20:08"
+    //   20:55 Merve 2 cay -> "Adisyon 260806-9694 ... Saat: 20:08"
+    // Ayirt edilebilen tek alan garson adiydi, mutfak oraya bakmaz. RISK: ikinci fis
+    // "bu zaten geldi" diye atilirsa 4 cay yerine 2 cay cikar (ya da tereddutle 2 kez yapilir).
+    // Artik IKI satir: masanin acilisi + BU girisin saati. Bilgi kaybi YOK.
+    //
+    // ⚠️ ETIKETLER ASCII: bu dosyada Turkce->ASCII cevirisi HER DEGERE AYRI uygulanir
+    // (_turkishToAscii), genel bir sarmalayici YOKTUR. Literalde "Açılış"/"Ürün" yazmak
+    // ham Turkce karakteri ESC/POS encoder'a gonderir ve 1.6.8'de fisleri OLDUREN
+    // "Invalid argument (string): Contains invalid characters" hatasini geri getirir.
+    // Dosyadaki tum etiketler bu yuzden ASCII: Adisyon, Garson, Porsiyon, Toplam...
     final openedAt = ticket['opened_at'] ?? ticket['created_at'] ?? DateTime.now().toIso8601String();
-    bytes += generator.text('Saat: ${_formatTime(openedAt.toString())}');
+    bytes += generator.text('Masa Acilis: ${_formatTime(openedAt.toString())}');
+    bytes += generator.text('Urun Girisi: ${_formatTime(DateTime.now().toIso8601String())}',
+        styles: const PosStyles(bold: true));
     bytes += generator.hr(ch: '=');
 
     // ===== ÜRÜNLER =====

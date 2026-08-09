@@ -1414,6 +1414,8 @@ class SyncService {
             if (payload['notes'] != null) 'notes': payload['notes'],
             if (payload['unit_price'] != null) 'unit_price': payload['unit_price'],
             if (payload['extras_amount'] != null) 'extras_amount': payload['extras_amount'],
+            // 🔴 9 Agu 2026 (Fable Bulgu 2): offline secim (extras) degisikligi replay'de sunucuya gitsin.
+            if (payload['extras'] != null) 'extras': payload['extras'],
             if (payload['waiter_id'] != null) 'waiter_id': payload['waiter_id'],
             'is_offline': true,
           });

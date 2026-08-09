@@ -27,6 +27,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   List<Map<String, dynamic>> _serverPrinters = []; // Sunucudan gelen yazıcılar
   bool _variantOnTap = false; // POS davranisi: urune tiklayinca varyant secimi acilsin mi
   bool _failedPrintAutoPopup = true; // 24 Tem: cikmayan-fis uyarisi otomatik pop (DEFAULT ACIK)
+  bool _showWaiterTimeCash = true; // 9 Agu: kasa fisinde kalem garson+saat (DEFAULT ACIK)
+  bool _showWaiterTimeKitchen = true; // 9 Agu: mutfak fisinde kalem garson+saat (DEFAULT ACIK)
 
   // Varsayılan yazıcı türleri (ikon ve renk için)
   final Map<String, Map<String, dynamic>> _defaultTypes = {
@@ -61,6 +63,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     setState(() {
       _variantOnTap = prefs.getBool(StorageService.variantOnTapKey) ?? false;
       _failedPrintAutoPopup = prefs.getBool(StorageService.failedPrintAutoPopupKey) ?? true; // DEFAULT ACIK
+      _showWaiterTimeCash = prefs.getBool(StorageService.showWaiterTimeCashKey) ?? true; // DEFAULT ACIK
+      _showWaiterTimeKitchen = prefs.getBool(StorageService.showWaiterTimeKitchenKey) ?? true; // DEFAULT ACIK
     });
   }
 
@@ -74,6 +78,18 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(StorageService.failedPrintAutoPopupKey, value);
     if (mounted) setState(() => _failedPrintAutoPopup = value);
+  }
+
+  Future<void> _setShowWaiterTimeCash(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.showWaiterTimeCashKey, value);
+    if (mounted) setState(() => _showWaiterTimeCash = value);
+  }
+
+  Future<void> _setShowWaiterTimeKitchen(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.showWaiterTimeKitchenKey, value);
+    if (mounted) setState(() => _showWaiterTimeKitchen = value);
   }
 
   /// Sunucudan yazıcıları yükle (admin panelden eklenenler)
@@ -105,7 +121,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Yazici Ayarlari'),
+        title: const Text('Ayarlar'),
         backgroundColor: Provider.of<ThemeProvider>(context, listen: false).primaryColor,
         foregroundColor: Colors.white,
         actions: [
@@ -244,6 +260,27 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                   'Kapalı: sadece sağ üstteki uyarı simgesinden görülür.'),
               value: _failedPrintAutoPopup,
               onChanged: _setFailedPrintAutoPopup,
+            ),
+            const Divider(height: 1),
+            // 9 Agu 2026: fiste kalem garson adi + giris saati (kasa AYRI / mutfak AYRI, DEFAULT ACIK).
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Kasa fişinde garson + saat göster'),
+              subtitle: const Text(
+                  'Açık: adisyon ve hesap kapanış fişinde her kalemin yanında (fiyattan önce, '
+                  'küçük yazı) o kalemi giren garson ve giriş saati yazar. Kapalı: eskisi gibi.'),
+              value: _showWaiterTimeCash,
+              onChanged: _setShowWaiterTimeCash,
+            ),
+            const Divider(height: 1),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Mutfak fişinde garson + saat göster'),
+              subtitle: const Text(
+                  'Açık: mutfak fişinde her kalemin en sağında (küçük yazı) o kalemi giren garson '
+                  've giriş saati yazar. Hangi siparişi kim ne zaman girdi görürsünüz. Kapalı: eskisi gibi.'),
+              value: _showWaiterTimeKitchen,
+              onChanged: _setShowWaiterTimeKitchen,
             ),
           ],
         ),

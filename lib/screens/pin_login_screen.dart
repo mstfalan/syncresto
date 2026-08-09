@@ -330,8 +330,8 @@ class _PinLoginScreenState extends State<PinLoginScreen>
               onTap: () { Navigator.pop(ctx); _openLanSettings(); },
             ),
             ListTile(
-              leading: Icon(Icons.print, color: theme.primaryColor),
-              title: const Text('Yazıcı Ayarları'),
+              leading: Icon(Icons.settings, color: theme.primaryColor),
+              title: const Text('Ayarlar'),
               onTap: () {
                 Navigator.pop(ctx);
                 Navigator.push(context, MaterialPageRoute(

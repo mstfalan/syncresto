@@ -238,6 +238,27 @@ class StorageService {
     await _prefs.setBool(failedPrintAutoPopupKey, value);
   }
 
+  // 9 Agu 2026 (Mustafa): fislerde her kalemin yaninda GARSON ADI + GIRIS SAATI gosterilsin mi.
+  // Kasa (adisyon+kapanis) AYRI, mutfak AYRI. IKISI DE DEFAULT ACIK. Key'ler printer_service
+  // (okur, ham prefs) + printer_settings (yazar) ile AYNI string. Kapaliyken fis BIREBIR eski hali.
+  static const String showWaiterTimeCashKey = 'show_waiter_time_cash';
+  Future<bool> getShowWaiterTimeCash() async {
+    return _prefs.getBool(showWaiterTimeCashKey) ?? true; // DEFAULT AÇIK
+  }
+
+  Future<void> setShowWaiterTimeCash(bool value) async {
+    await _prefs.setBool(showWaiterTimeCashKey, value);
+  }
+
+  static const String showWaiterTimeKitchenKey = 'show_waiter_time_kitchen';
+  Future<bool> getShowWaiterTimeKitchen() async {
+    return _prefs.getBool(showWaiterTimeKitchenKey) ?? true; // DEFAULT AÇIK
+  }
+
+  Future<void> setShowWaiterTimeKitchen(bool value) async {
+    await _prefs.setBool(showWaiterTimeKitchenKey, value);
+  }
+
   // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
   // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
   String getOrderTrackingSort() {

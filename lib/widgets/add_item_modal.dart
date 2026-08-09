@@ -999,7 +999,7 @@ class _AddItemModalState extends State<AddItemModal> {
   ///   'varyant' -> SADECE varyant gruplari (icerikler ayri ekranda)
   ///   'icerik'  -> SADECE ekle/cikar (varyantlar ayri ekranda)
   Future<void> _openIcerikVaryantDialog(Map<String, dynamic> product, List variants,
-      {String mod = 'hepsi'}) async {
+      {String mod = 'hepsi', Map<String, dynamic>? guncellenecekKalem}) async {
     final basePrice = _restaurantBasePrice(product);
     final productName = product['name']?.toString() ?? '';
     final _icerikGoster = mod == 'hepsi' || mod == 'icerik';
@@ -1015,7 +1015,9 @@ class _AddItemModalState extends State<AddItemModal> {
     // bosa tik yapmasin sonucta ayni urune ait") — ayri secim ekrani yerine AYNI pencerede
     // sekme. Secimler sekme degisince KAYBOLMAZ (ayni StatefulBuilder durumu).
     // 3 Agu 2026 — not alani (AYNI kapi: _notAlani + variantNote kanali).
-    final notCtrl = TextEditingController();
+    // 9 Agu 2026 — GUNCELLEME MODUNDA mevcut kalemin serbest notu kutuda dursun.
+    final notCtrl = TextEditingController(
+        text: guncellenecekKalem == null ? '' : _mevcutSerbestNot(guncellenecekKalem));
     _notlariYukle(); // engellemez: pencere ANINDA acilir
 
     int sekme = 0; // 0 = Varyant, 1 = Ekle/Cikar, 2 = Combo
@@ -1027,6 +1029,57 @@ class _AddItemModalState extends State<AddItemModal> {
     final secVaryant = <String, List<Map<String, dynamic>>>{}; // grup -> secilenler
     final cikarilan = <Map<String, dynamic>>[];
     final eklenen = <Map<String, dynamic>>[];
+
+    // 🔴 9 Agu 2026 (Mustafa, panel 6 video — CIFT KALEM) — GUNCELLEME MODUNDA ON-SECIM.
+    // "Varyant" butonu gruplu urunde bu ekrani ARTIK guncelleme moduyla aciyor; mevcut
+    // kalemin extras'ini ekrana isaretli getirir ki kullanici dokunmazsa kalem AYNEN kalir
+    // (eskiden guncelleme yoktu -> secimli ikinci kalem eklenip bos kalem duruyordu = cift).
+    // extras flat [{name, price}]; ad ile eslestir: '-' onekli -> cikarilan icerik,
+    // eklenebilir icerikle eslesen -> eklenen, variant adiyla eslesen -> secVaryant[grup].
+    if (guncellenecekKalem != null) {
+      dynamic _ex = guncellenecekKalem['extras'];
+      if (_ex is String && _ex.trim().isNotEmpty) {
+        try { _ex = jsonDecode(_ex); } catch (_) { _ex = null; }
+      }
+      if (_ex is List) {
+        for (final e in _ex) {
+          if (e is! Map) continue;
+          final adRaw = (e['name']?.toString() ?? '').trim();
+          if (adRaw.isEmpty) continue;
+          if (adRaw.startsWith('-')) {
+            final ad = adRaw.substring(1).trim().toLowerCase();
+            final m = cikarilabilir
+                .where((i) => (i['name']?.toString() ?? '').trim().toLowerCase() == ad)
+                .firstOrNull;
+            if (m != null && !cikarilan.any((x) => x['id'] == m['id'])) cikarilan.add(m);
+            continue;
+          }
+          final ad = adRaw.toLowerCase();
+          final add = eklenebilir
+              .where((i) => (i['name']?.toString() ?? '').trim().toLowerCase() == ad)
+              .firstOrNull;
+          if (add != null) {
+            if (!eklenen.any((x) => x['id'] == add['id'])) eklenen.add(add);
+            continue;
+          }
+          // 🔴 Ayni ad BIRDEN COK grupta olabilir (Acili But: MAKARNA hem "1. YAN URUN
+          // SECIMI" hem "2. YAN URUN SECIMI" grubunda, AYRI id'ler). O grupta zaten secili
+          // ise SONRAKI gruba bak; yalnizca gercekten ekleyince dur. Eski kosulsuz `break`
+          // iki MAKARNA'dan ikincisini kaciriyordu (opsiyonel grupta sessiz secim+fiyat
+          // kaybi) — Fable adversaryal denetim bulgusu, 9 Agu 2026.
+          for (final entry in gruplar.entries) {
+            final v = entry.value
+                .where((vv) => (vv['name']?.toString() ?? '').trim().toLowerCase() == ad)
+                .firstOrNull;
+            if (v == null) continue;
+            final liste = secVaryant[entry.key] ??= [];
+            if (liste.any((x) => x['id'] == v['id'])) continue; // bu grupta var -> sonrakine
+            liste.add(v);
+            break;
+          }
+        }
+      }
+    }
 
     double toplamHesapla() {
       double t = basePrice;
@@ -1193,7 +1246,10 @@ class _AddItemModalState extends State<AddItemModal> {
         final _ikiSutun =
             solBolumler.isNotEmpty && sagBolumler.isNotEmpty && _ekranG >= 900;
         // Sekme SADECE hem varyant hem icerik varsa anlamli
-        final _comboVar = _comboIsActive(product);
+        // 9 Agu 2026 — GUNCELLEME modunda Combo sekmesi CIZILMEZ: combo secimi YENI kalemler
+        // uretir, mevcut bir kalemi duzenlerken anlamsiz/riskli. (Varyant butonu combo paketine
+        // ait kalemi zaten engelliyor; bu ek guvence.)
+        final _comboVar = _comboIsActive(product) && guncellenecekKalem == null;
         // Sekme cubugu: varyant+icerik ikisi de varsa VEYA combo varsa
         final _sekmeVar = ((solBolumler.isNotEmpty || sagBolumler.isNotEmpty) &&
                 altBolumler.isNotEmpty) ||
@@ -1321,7 +1377,7 @@ class _AddItemModalState extends State<AddItemModal> {
                     backgroundColor: hazir ? Colors.green[700] : Colors.grey[300],
                     foregroundColor: Colors.white, minimumSize: const Size(0, 48),
                   ),
-                  child: Text('Ekle (${toplam.toStringAsFixed(2)} TL)'),
+                  child: Text('${guncellenecekKalem == null ? 'Ekle' : 'Güncelle'} (${toplam.toStringAsFixed(2)} TL)'),
                 ),
               ]),
             ]),
@@ -1331,7 +1387,8 @@ class _AddItemModalState extends State<AddItemModal> {
     );
 
     // Combo sekmesinden "devam" denmisse bu pencere kapandi, simdi combo ekrani acilir.
-    if (comboyaGec) {
+    // (Guncelleme modunda Combo sekmesi cizilmez — _comboVar=false — yani buraya dusmez.)
+    if (comboyaGec && guncellenecekKalem == null) {
       await _openComboSelectionDialog(product);
       return;
     }
@@ -1358,6 +1415,35 @@ class _AddItemModalState extends State<AddItemModal> {
     for (final e in eklenen) toplam += _icerikFiyati(e);
 
     final _not2 = notCtrl.text.trim();
+    // 🔴 9 Agu 2026 (Mustafa, panel 6 CIFT KALEM) — GUNCELLEME MODU: yeni kalem ACMA,
+    // "Varyant" butonuyla acildiysa MEVCUT kalemi guncelle (coklu yolun esdegeri).
+    // notes = SADECE serbest not: secim adlari extras'ta zaten alt-satir cikar, nota da
+    // yazarsak fiste CIFT gorunur (grup ADD yolu da boyle). Fiyat = toplam + serbest
+    // nottaki legacy '(+NTL)' token'lari (6 Agu not-token safety kurali ile ayni).
+    if (guncellenecekKalem != null) {
+      final gItemId = _safeInt(guncellenecekKalem['id']);
+      if (gItemId == null) return;
+      final gNotlar = _not2.isEmpty ? null : _not2;
+      final gNotTokenlari = _sumExtraPriceTokens(gNotlar ?? '');
+      try {
+        final res = await widget.apiService.updateTicketItem(
+          ticketId: widget.ticketId,
+          itemId: gItemId,
+          notes: gNotlar,
+          unitPrice: toplam + gNotTokenlari,
+          waiterId: widget.waiterId,
+          extras: extras,
+        );
+        if (res['success'] == true) {
+          await _loadTicketItems();
+        } else {
+          _showError(res['error']?.toString() ?? 'Varyant uygulanamadi');
+        }
+      } catch (e) {
+        _showError('Varyant hatasi: $e');
+      }
+      return;
+    }
     await _addProductWithPrice(product, productName, toplam,
         extras: extras, variantNote: _not2.isEmpty ? null : _not2);
   }
@@ -2044,9 +2130,12 @@ class _AddItemModalState extends State<AddItemModal> {
     // yani mevcut davranis bozulmaz.
     final _p = Map<String, dynamic>.from(prod);
     if (_urunIcerikleri(_p).isNotEmpty || _urunGrupluVaryantli(_p)) {
-      // Icerik/gruplu varyant ekrani YENI KALEM ekler (guncelleme modu yok) — kasiyer
-      // eski kalemi silip yenisini ekler. Coklu ekranin guncelleme modu korunuyor.
-      await _openIcerikVaryantDialog(_p, variants);
+      // 🔴 9 Agu 2026 (Mustafa, panel 6 video — CIFT KALEM) — ARTIK MEVCUT KALEMI GUNCELLER.
+      // Eskiden bu ekran guncelleme modu OLMADAN aciliyordu: gruplu urunde "Varyant" butonu
+      // secimli IKINCI kalem ekliyor, bos ilk kalem kaliyordu (Acili But: bos + MAKARNA'li).
+      // Coklu yol (asagida _openMultiVariantDialog) ZATEN guncellenecekKalem gecirip guncelliyordu;
+      // gruplu yol da artik ayni.
+      await _openIcerikVaryantDialog(_p, variants, guncellenecekKalem: item);
       return;
     }
     if (_posCokluVaryant(_p)) {

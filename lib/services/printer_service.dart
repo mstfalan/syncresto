@@ -759,6 +759,8 @@ class PrinterService {
 
     // Items
     final items = ticket['items'] as List? ?? [];
+    // 9 Agu 2026 — kalem garson·saat gosterimi (kasa toggle, Yazici Ayarlari; varsayilan ACIK).
+    final bool _gsKasa = await _kalemGarsonSaatGoster(mutfak: false);
     // 1 Agu 2026 — COMBO GRUPLAMA (Mustafa: "ana urunun adi yazicak, secilenler altinda
     // sanki o urunun varyantiymis gibi listelensin").
     // 🔴 FIS SOZLESMESI: gruplama SADECE kanit varsa (combo_group_id dolu + ayni kimlikte >=2
@@ -779,18 +781,24 @@ class PrinterService {
         final gAd = _turkishToAscii(_s['ad'] ?? '');
         final gAdet = _s['adet'] ?? 1;
         final gTutar = (_s['tutar'] ?? 0).toDouble();
-        bytes += generator.row([
-          PosColumn(
-            text: '$gAdet x $gAd',
-            width: 8,
-            styles: const PosStyles(align: PosAlign.left, bold: true),
-          ),
-          PosColumn(
-            text: '${gTutar.toStringAsFixed(2)} TL',
-            width: 4,
-            styles: const PosStyles(align: PosAlign.right, bold: true),
-          ),
-        ]);
+        // Garson·saat = grup temsilcisi (ilk uye). Toggle+veri varsa ad ile fiyat ARASINDA
+        // kucuk font; yoksa ESKI 2 sutun BIREBIR.
+        final _gGs = _gsKasa
+            ? _kalemGarsonSaatStr(
+                (_s['uyeler'] as List).isNotEmpty ? (_s['uyeler'] as List).first : const {}, ticket)
+            : '';
+        if (_gGs.isEmpty) {
+          bytes += generator.row([
+            PosColumn(text: '$gAdet x $gAd', width: 8, styles: const PosStyles(align: PosAlign.left, bold: true)),
+            PosColumn(text: '${gTutar.toStringAsFixed(2)} TL', width: 4, styles: const PosStyles(align: PosAlign.right, bold: true)),
+          ]);
+        } else {
+          bytes += generator.row([
+            PosColumn(text: '$gAdet x $gAd', width: 6, styles: const PosStyles(align: PosAlign.left, bold: true)),
+            PosColumn(text: _gGs, width: 3, styles: const PosStyles(align: PosAlign.right, fontType: PosFontType.fontB)),
+            PosColumn(text: '${gTutar.toStringAsFixed(2)} TL', width: 3, styles: const PosStyles(align: PosAlign.right, bold: true)),
+          ]);
+        }
         for (final sec in (_s['secimler'] as List)) {
           bytes += generator.text('   - ${_turkishToAscii(sec)}');
         }
@@ -816,18 +824,21 @@ class PrinterService {
       final qty = item['quantity'] ?? 1;
       final price = (item['unit_price'] ?? 0).toDouble() * qty;
 
-      bytes += generator.row([
-        PosColumn(
-          text: '$qty x $name',
-          width: 8,
-          styles: const PosStyles(align: PosAlign.left),
-        ),
-        PosColumn(
-          text: '${price.toStringAsFixed(2)} TL',
-          width: 4,
-          styles: const PosStyles(align: PosAlign.right),
-        ),
-      ]);
+      // 9 Agu 2026 — garson·saat (kasa toggle): veri+toggle varsa ad ile fiyat ARASINDA
+      // kucuk font; yoksa ESKI 2 sutunlu satir BIREBIR (0 regresyon).
+      final _iGs = _gsKasa ? _kalemGarsonSaatStr(item, ticket) : '';
+      if (_iGs.isEmpty) {
+        bytes += generator.row([
+          PosColumn(text: '$qty x $name', width: 8, styles: const PosStyles(align: PosAlign.left)),
+          PosColumn(text: '${price.toStringAsFixed(2)} TL', width: 4, styles: const PosStyles(align: PosAlign.right)),
+        ]);
+      } else {
+        bytes += generator.row([
+          PosColumn(text: '$qty x $name', width: 6, styles: const PosStyles(align: PosAlign.left)),
+          PosColumn(text: _iGs, width: 3, styles: const PosStyles(align: PosAlign.right, fontType: PosFontType.fontB)),
+          PosColumn(text: '${price.toStringAsFixed(2)} TL', width: 3, styles: const PosStyles(align: PosAlign.right)),
+        ]);
+      }
 
       // 31 Tem 2026 — POS varyant coklu secimleri (extras) MUSTERI fisinde de gorunsun.
       // Kalemde extras YOKSA hicbir sey basilmaz -> combo'suz/eski siparislerde cikti
@@ -1307,6 +1318,56 @@ class PrinterService {
     }
   }
 
+  // ==========================================================================
+  // 9 Agu 2026 (Mustafa) — HER KALEMIN sag tarafinda KUCUK fontla: garson adi + giris saati.
+  // Amac: kalemi KIM ne ZAMAN girdi denetimi ("garson mutfaga gondermeyi unuttu mu").
+  // Yerlesim (cagiran taraf yapar, ALT SATIR EKLENMEZ — fis duzeni bozulmaz):
+  //   • KASA (adisyon/kapanis): fiyat sagda oldugu icin garson·saat ad ile fiyat ARASINDA.
+  //   • MUTFAK: fiyat yok -> garson·saat EN SAGA.
+  // Aç/kapa: Yazici Ayarlari > POS Davranisi (kasa AYRI, mutfak AYRI; ikisi de VARSAYILAN ACIK).
+  //
+  // 🔴 FIS SOZLESMESI:
+  //  • Veri (garson+saat) YOKSA bos string -> cagiran taraf ESKI satiri aynen basar (0 regresyon).
+  //  • Isim _turkishToAscii'den GECER — ham Turkce karakter 1.6.8'de fisleri OLDUREN
+  //    "Invalid argument (string)" hatasini geri getirir (bu dosyada her deger ayri cevrilir).
+  //  • Hata olursa bos string (try/catch) — fis DUSMEZ.
+  //  • Garson: kalemin GIRDIGI garson (added_by_name); yoksa kalem/adisyon garsonuna duser.
+  //  • Saat: kalemin girildigi an (created_at / item_created_at) — _formatTime ile HH:mm.
+  String _kalemGarsonSaatStr(dynamic item, Map<String, dynamic> ticket, {int maxLen = 16}) {
+    try {
+      final m = (item is Map) ? item : const {};
+      var gAd = _turkishToAscii(
+          (m['added_by_name'] ?? m['waiter_name'] ?? ticket['waiter_name'] ?? '')
+              .toString()
+              .trim());
+      final caRaw = (m['created_at'] ?? m['item_created_at'] ?? '').toString().trim();
+      final saat = caRaw.isNotEmpty ? _formatTime(caRaw) : '';
+      // 🔴 esc_pos_utils 1.1.0 row() tasmayi ALT SATIRA SARMAZ, SESSIZCE KIRPAR (Fable denetimi).
+      // Bu yuzden guvenli genislige (maxLen = sutun karakter kapasitesi) burada kisaltiyoruz:
+      // SAAT hep korunur (dakika kirpilmasin), gerekirse yalniz AD kisalir.
+      if (gAd.isEmpty && saat.isEmpty) return '';
+      if (saat.isEmpty) return gAd.length > maxLen ? gAd.substring(0, maxLen) : gAd;
+      if (gAd.isEmpty) return saat;
+      final room = maxLen - saat.length - 1; // ad icin kalan (saat + bosluk dusuldu)
+      if (room <= 0) return saat; // yer yok -> yalniz saat
+      if (gAd.length > room) gAd = gAd.substring(0, room);
+      return '$gAd $saat';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// POS Davranisi toggle'lari (Yazici Ayarlari). VARSAYILAN ACIK (failedPrintAutoPopup deseni).
+  /// Kasa = adisyon + kapanis fisi; Mutfak = mutfak fisi. Kapaliyken fis BIREBIR eski hali.
+  Future<bool> _kalemGarsonSaatGoster({required bool mutfak}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(mutfak ? 'show_waiter_time_kitchen' : 'show_waiter_time_cash') ?? true;
+    } catch (_) {
+      return true; // ayar okunamazsa varsayilan ACIK
+    }
+  }
+
   String _paymentMethodLabel(String method) {
     switch (method) {
       case 'cash':
@@ -1499,6 +1560,8 @@ class PrinterService {
 
     // ===== ÜST BOŞLUK (70px ~ 10 satır) =====
     bytes += generator.feed(10);
+    // 9 Agu 2026 — kalem garson·saat gosterimi (mutfak toggle, Yazici Ayarlari; varsayilan ACIK).
+    final bool _gsMutfak = await _kalemGarsonSaatGoster(mutfak: true);
 
     // ===== MASA BİLGİSİ (EN BÜYÜK) =====
     final ticketNumber = ticket['ticket_number'] ?? '';
@@ -1574,10 +1637,27 @@ class PrinterService {
       // ---- COMBO GRUBU: ana urun BUYUK, secimler altinda kalin ----
       // Mutfak PARAYLA ILGILENMEZ -> bu fiste hicbir yerde tutar yok, burada da yazilmaz.
       if (_ms['tip'] == 'grup') {
-        bytes += generator.text(
-          '${_ms['adet'] ?? 1} x ${_turkishToAscii(_ms['ad'] ?? '')}',
-          styles: const PosStyles(bold: true, height: PosTextSize.size2),
-        );
+        // Mutfakta fiyat YOK -> garson·saat EN SAGA (kucuk font). Toggle+veri yoksa ESKI text BIREBIR.
+        final _gGs = _gsMutfak
+            ? _kalemGarsonSaatStr(
+                (_ms['uyeler'] as List).isNotEmpty ? (_ms['uyeler'] as List).first : const {}, ticket,
+                maxLen: 15)
+            : '';
+        final _gAdSatir = '${_ms['adet'] ?? 1} x ${_turkishToAscii(_ms['ad'] ?? '')}';
+        // Uzun ad KIRPILMASIN (Fable): 33'u asarsa ESKI text() ile tam ad, garson·saat yok.
+        if (_gGs.isEmpty || _gAdSatir.length > 33) {
+          bytes += generator.text(
+            _gAdSatir,
+            styles: const PosStyles(bold: true, height: PosTextSize.size2),
+          );
+        } else {
+          bytes += generator.row([
+            PosColumn(text: _gAdSatir, width: 9,
+                styles: const PosStyles(bold: true, height: PosTextSize.size2)),
+            PosColumn(text: _gGs, width: 3,
+                styles: const PosStyles(align: PosAlign.right, fontType: PosFontType.fontB)),
+          ]);
+        }
         for (final sec in (_ms['secimler'] as List)) {
           bytes += generator.text('   - ${_turkishToAscii(sec)}',
               styles: const PosStyles(bold: true));
@@ -1612,14 +1692,28 @@ class PrinterService {
       final portion = item['portion'];
       final notes = item['notes'];
 
-      // Ürün adı ve miktarı büyük fontla
-      bytes += generator.text(
-        '$qty x $name',
-        styles: const PosStyles(
-          bold: true,
-          height: PosTextSize.size2,
-        ),
-      );
+      // Ürün adı ve miktarı büyük fontla. 9 Agu: mutfakta fiyat YOK -> garson·saat EN SAGA
+      // (kucuk font, maxLen 15). Toggle+veri yoksa ESKI text BIREBIR (0 regresyon).
+      // 🔴 esc_pos_utils row() UZUN adi KIRPAR (Fable); mutfakta ad KRITIK -> ad+adet 33'u
+      // asarsa ESKI text() ile TAM ad basilir (o kalemde garson·saat yok, ad KAYBOLMAZ).
+      final _iGs = _gsMutfak ? _kalemGarsonSaatStr(item, ticket, maxLen: 15) : '';
+      final _adSatir = '$qty x $name';
+      if (_iGs.isEmpty || _adSatir.length > 33) {
+        bytes += generator.text(
+          _adSatir,
+          styles: const PosStyles(
+            bold: true,
+            height: PosTextSize.size2,
+          ),
+        );
+      } else {
+        bytes += generator.row([
+          PosColumn(text: _adSatir, width: 9,
+              styles: const PosStyles(bold: true, height: PosTextSize.size2)),
+          PosColumn(text: _iGs, width: 3,
+              styles: const PosStyles(align: PosAlign.right, fontType: PosFontType.fontB)),
+        ]);
+      }
 
       // Porsiyon bilgisi
       if (portion != null && portion.toString().isNotEmpty) {
@@ -1810,6 +1904,8 @@ class PrinterService {
     // Ürünler - fiyatlı
     final items = ticket['items'] as List? ?? [];
     double calculatedTotal = 0;
+    // 9 Agu 2026 — kalem garson·saat (kasa toggle; kapanis fisi de kasa grubu). Varsayilan ACIK.
+    final bool _gsKasa = await _kalemGarsonSaatGoster(mutfak: false);
 
     for (final item in items) {
       final name = _turkishToAscii(item['product_name'] ?? item['name'] ?? '?');
@@ -1828,11 +1924,19 @@ class PrinterService {
         ),
       );
 
-      // Fiyat
-      bytes += generator.text(
-        '${lineTotal.toStringAsFixed(2)} TL',
-        styles: const PosStyles(align: PosAlign.right),
-      );
+      // Fiyat (+ 9 Agu: kasa toggle -> garson·saat AYNI satirda solda kucuk font; alt satir YOK).
+      final _iGs = _gsKasa ? _kalemGarsonSaatStr(item, ticket, maxLen: 31) : '';
+      if (_iGs.isEmpty) {
+        bytes += generator.text(
+          '${lineTotal.toStringAsFixed(2)} TL',
+          styles: const PosStyles(align: PosAlign.right),
+        );
+      } else {
+        bytes += generator.row([
+          PosColumn(text: _iGs, width: 6, styles: const PosStyles(align: PosAlign.left, fontType: PosFontType.fontB)),
+          PosColumn(text: '${lineTotal.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right)),
+        ]);
+      }
 
       // Ürün notu varsa ekle
       if (notes.isNotEmpty) {

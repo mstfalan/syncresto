@@ -1256,14 +1256,15 @@ class _TablesScreenState extends State<TablesScreen> {
             onTap: _openFailedPrintModal,
           ),
 
-          // Printer settings button
+          // Ayarlar butonu (9 Agu: yazici + POS davranisi + fis ayarlarini kapsadigi icin
+          // ikon yazicidan genel "ayarlar"a cevrildi).
           IconButton(
             onPressed: _openPrinterSettings,
             icon: Icon(
-              Icons.print,
+              Icons.settings,
               color: widget.printerService.isConfigured ? theme.primaryColor : Colors.grey[700],
             ),
-            tooltip: 'Yazici Ayarlari',
+            tooltip: 'Ayarlar',
           ),
 
           // Logout button

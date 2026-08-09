@@ -1135,12 +1135,17 @@ class LocalDbService {
   Future<List<Map<String, dynamic>>> getUnprintedLocalItems(int localTicketId) async {
     final db = await database;
     // JOIN cached_products: printer_id'yi de al
+    // 9 Agu 2026 (Fable): mutfak fisi kalem garson+saati icin created_at + added_by_name de cek
+    // (getByTable ile ayni desen: COALESCE(cached_waiters, mirror-kolon)). Yoksa offline mutfak
+    // fisinde saat cikmaz, garson gonderi garsonuna duserdi.
     final r = await db.rawQuery('''
       SELECT i.local_id, i.server_id, i.product_id, i.product_name, i.quantity,
-             i.unit_price, i.notes, i.portion,
+             i.unit_price, i.notes, i.portion, i.created_at,
+             COALESCE(wa.name, i.added_by_name) AS added_by_name,
              p.printer_id
         FROM local_ticket_items i
    LEFT JOIN cached_products p ON p.id = i.product_id
+   LEFT JOIN cached_waiters wa ON wa.id = i.added_by
        WHERE i.local_ticket_id = ?
          AND i.printed = 0
          AND (i.status IS NULL OR i.status != 'cancelled')
@@ -1754,12 +1759,14 @@ class LocalDbService {
     double? unitPrice,
     int? quantity,
     String? notes,
+    String? extras, // 9 Agu 2026 (Fable Bulgu 2): offline secim degisikligi JSON metin olarak
   }) async {
     final db = await database;
     final fields = <String, dynamic>{};
     if (unitPrice != null) fields['unit_price'] = unitPrice;
     if (quantity != null) fields['quantity'] = quantity;
     if (notes != null) fields['notes'] = notes;
+    if (extras != null) fields['extras'] = extras; // '[]' ise secimler temizlenir (bilincli)
     if (fields.isNotEmpty) {
       await db.update('local_ticket_items', fields, where: 'local_id = ?', whereArgs: [localItemId]);
     }
@@ -2031,7 +2038,9 @@ class LocalDbService {
       if (action == 'update_item' && existId != null) {
         try {
           final merged = Map<String, dynamic>.from(jsonDecode(existing.first['payload'] as String? ?? '{}'));
-          for (final k in ['quantity', 'notes', 'unit_price', 'extras_amount', 'waiter_id']) {
+          // 9 Agu 2026 (Fable Bulgu 2): 'extras' de merge listesinde OLMALI — yoksa ardisik
+          // iki offline guncellemede (once secim, sonra not) ikincisi extras'i DUSURUR.
+          for (final k in ['quantity', 'notes', 'unit_price', 'extras_amount', 'waiter_id', 'extras']) {
             if (payload[k] != null) merged[k] = payload[k];
           }
           await db.update('sync_queue', {'payload': jsonEncode(merged)}, where: 'id = ?', whereArgs: [existId]);

@@ -811,6 +811,11 @@ class ApiService {
         if (updResolved.itemLocalId != null) 'item_local_id': updResolved.itemLocalId,
         if (quantity != null) 'quantity': quantity,
         if (notes != null) 'notes': notes,
+        // 🔴 9 Agu 2026 (Fable Bulgu 2) — offline SECIM (extras) degisikligi de kuyruga girsin.
+        // Eskiden extras payload'a YAZILMIYORDU: offline "Varyant/secim guncelle"de fiyat sync
+        // olup secim (MAKARNA->PATATES, cikarilan malzeme) sunucuya HIC gitmiyordu -> online
+        // olunca yeni fiyat + ESKI secim. Gruplu yolda tum secimler extras'ta oldugu icin kritik.
+        if (extras != null) 'extras': extras,
         if (waiterId != null) 'waiter_id': waiterId,
         if (extrasAmount != null) 'extras_amount': extrasAmount,
         // 12 Haz 2026 FIX: online dal ile ayni — unit_price her zaman dolu gider (MUTLAK fiyat)
@@ -827,6 +832,9 @@ class ApiService {
         unitPrice: unitPrice,
         quantity: quantity,
         notes: notes,
+        // 9 Agu 2026 (Fable Bulgu 2): secim degisikligi lokal aynaya da yansisin ki
+        // offline fis/adisyon alt-satirlari ESKI secimi gostermesin (JSON metin).
+        extras: extras != null ? jsonEncode(extras) : null,
       );
     }
     return {'success': true, 'offline': true, 'queued': true};

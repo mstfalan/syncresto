@@ -29,6 +29,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   bool _failedPrintAutoPopup = true; // 24 Tem: cikmayan-fis uyarisi otomatik pop (DEFAULT ACIK)
   bool _showWaiterTimeCash = true; // 9 Agu: kasa fisinde kalem garson+saat (DEFAULT ACIK)
   bool _showWaiterTimeKitchen = true; // 9 Agu: mutfak fisinde kalem garson+saat (DEFAULT ACIK)
+  bool _showGroupTitlesKitchen = true; // 10 Agu: mutfak fisinde gruplu varyant basliklari (DEFAULT ACIK)
 
   // Varsayılan yazıcı türleri (ikon ve renk için)
   final Map<String, Map<String, dynamic>> _defaultTypes = {
@@ -65,6 +66,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _failedPrintAutoPopup = prefs.getBool(StorageService.failedPrintAutoPopupKey) ?? true; // DEFAULT ACIK
       _showWaiterTimeCash = prefs.getBool(StorageService.showWaiterTimeCashKey) ?? true; // DEFAULT ACIK
       _showWaiterTimeKitchen = prefs.getBool(StorageService.showWaiterTimeKitchenKey) ?? true; // DEFAULT ACIK
+      _showGroupTitlesKitchen = prefs.getBool(StorageService.showGroupTitlesKitchenKey) ?? true; // DEFAULT ACIK
     });
   }
 
@@ -90,6 +92,12 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(StorageService.showWaiterTimeKitchenKey, value);
     if (mounted) setState(() => _showWaiterTimeKitchen = value);
+  }
+
+  Future<void> _setShowGroupTitlesKitchen(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.showGroupTitlesKitchenKey, value);
+    if (mounted) setState(() => _showGroupTitlesKitchen = value);
   }
 
   /// Sunucudan yazıcıları yükle (admin panelden eklenenler)
@@ -281,6 +289,17 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                   've giriş saati yazar. Hangi siparişi kim ne zaman girdi görürsünüz. Kapalı: eskisi gibi.'),
               value: _showWaiterTimeKitchen,
               onChanged: _setShowWaiterTimeKitchen,
+            ),
+            const Divider(height: 1),
+            // 10 Agu 2026: mutfak fişinde gruplu varyant başlıkları (DEFAULT AÇIK).
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Mutfak fişinde grup başlıklarını göster'),
+              subtitle: const Text(
+                  'Açık: çoklu seçimli üründe seçimler grup adının (ör. "1. Yan Ürün", "2. Yan Ürün") '
+                  'altında yazılır. Sadece 2. grubu seçtiğinizde mutfak 1. grubu sanmaz. Kapalı: eskisi gibi düz liste.'),
+              value: _showGroupTitlesKitchen,
+              onChanged: _setShowGroupTitlesKitchen,
             ),
           ],
         ),

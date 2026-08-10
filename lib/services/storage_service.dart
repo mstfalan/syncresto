@@ -259,6 +259,18 @@ class StorageService {
     await _prefs.setBool(showWaiterTimeKitchenKey, value);
   }
 
+  // 10 Agu 2026 (Mustafa): mutfak fisinde gruplu varyant BASLIKLARI (grup adi) gosterilsin mi.
+  // DEFAULT AÇIK. Amac: sadece "2. yan urun" secilince mutfak "1." sanmasin. Key printer_service
+  // (okur, ham prefs) + printer_settings (yazar) ile AYNI string. Kapaliyken fis BIREBIR eski.
+  static const String showGroupTitlesKitchenKey = 'show_group_titles_kitchen';
+  Future<bool> getShowGroupTitlesKitchen() async {
+    return _prefs.getBool(showGroupTitlesKitchenKey) ?? true; // DEFAULT AÇIK
+  }
+
+  Future<void> setShowGroupTitlesKitchen(bool value) async {
+    await _prefs.setBool(showGroupTitlesKitchenKey, value);
+  }
+
   // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
   // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
   String getOrderTrackingSort() {

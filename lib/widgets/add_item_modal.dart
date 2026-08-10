@@ -5961,10 +5961,46 @@ class _AddItemModalState extends State<AddItemModal> {
       return const [];
     }
     if (list.isEmpty) return const [];
-    return [
-      for (final e in list)
-        if (e is Map) _secimAltSatiri(e),
-    ];
+    // 10 Agu 2026 (Mustafa) — ADISYONDA GRUP BASLIKLARI (garsonun urun girdigi ekran).
+    // Gruplu secim (extras'ta 'group', POS 1.7.1+) grup adi basligi altinda gosterilir ki
+    // "sadece 2. yan urunu sectim" durumu net olsun (sira nedeniyle 1. sanilmasin). Grupsuz/
+    // '-' cikarilan/eski veri -> basliksiz, eskisi gibi. (Fis toggle'i AYRI; ekranda hep gosterilir.)
+    final widgets = <Widget>[];
+    String sonGrup = '';
+    for (final e in list) {
+      if (e is! Map) continue;
+      final hamAd = (e['name'] ?? '').toString();
+      final cikarilan = hamAd.startsWith('-');
+      final grp = (e['group'] ?? '').toString().trim();
+      if (grp.isNotEmpty && !cikarilan) {
+        if (grp != sonGrup) {
+          widgets.add(_grupBasligiSatiri(grp));
+          sonGrup = grp;
+        }
+      } else {
+        sonGrup = '';
+      }
+      widgets.add(_secimAltSatiri(e));
+    }
+    return widgets;
+  }
+
+  /// Adisyonda gruplu varyant grup adi basligi (secimlerin ustunde, kucuk gri).
+  Widget _grupBasligiSatiri(String grup) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 3, left: 2),
+      child: Text(
+        grup,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: Colors.grey[600],
+          letterSpacing: 0.2,
+        ),
+      ),
+    );
   }
 
   /// 1 Agu 2026 — ADISYONDA COMBO GRUPLU GORUNUM (Mustafa: "ana kartin altinda sonradan

@@ -1368,6 +1368,17 @@ class PrinterService {
     }
   }
 
+  /// 10 Agu 2026 — Mutfak fisinde gruplu varyant BASLIKLARI (grup adi) gosterilsin mi.
+  /// VARSAYILAN ACIK. Kapaliyken/grup verisi yokken fis BIREBIR eski hali.
+  Future<bool> _grupBasligiGoster() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool('show_group_titles_kitchen') ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
   String _paymentMethodLabel(String method) {
     switch (method) {
       case 'cash':
@@ -1562,6 +1573,10 @@ class PrinterService {
     bytes += generator.feed(10);
     // 9 Agu 2026 — kalem garson·saat gosterimi (mutfak toggle, Yazici Ayarlari; varsayilan ACIK).
     final bool _gsMutfak = await _kalemGarsonSaatGoster(mutfak: true);
+    // 10 Agu 2026 (Mustafa) — GRUPLU VARYANT BASLIKLARI mutfak fisinde gosterilsin mi
+    // (VARSAYILAN ACIK). Amac: sadece "2. yan urun" secilince, sira nedeniyle mutfak
+    // "1. yan urun" degistirildi sanmasin — grup adi basligiyla netlesir.
+    final bool _gtMutfak = await _grupBasligiGoster();
 
     // ===== MASA BİLGİSİ (EN BÜYÜK) =====
     final ticketNumber = ticket['ticket_number'] ?? '';
@@ -1730,15 +1745,32 @@ class PrinterService {
       try {
         final ex = item['extras'];
         if (ex is List && ex.isNotEmpty) {
+          // 10 Agu 2026 — GRUP BASLIKLARI (toggle _gtMutfak, default acik). Grup adi olan
+          // secimler (POS 1.7.1+ extras'ta 'group') grup basligi altinda toplanir. Grup
+          // degisince baslik basilir. Grupsuz/'-' cikarilan/eski veri -> ESKI davranis BIREBIR.
+          String _sonGrup = ''; // en son basilan grup basligi (tekrar basmamak icin)
           for (final e in ex) {
             var ad = (e is Map)
                 ? (e['name'] ?? e['label'] ?? e['title'] ?? '').toString().trim()
                 : (e?.toString() ?? '');
+            final _grp = (e is Map) ? (e['group'] ?? '').toString().trim() : '';
             // 1 Agu 2026: '-' onekli = CIKARILACAK malzeme. Mutfakta bu KRITIK —
             // "+ -Sogan" diye basmak yanlis okunur; "CIKAR: Sogan" diye basiyoruz.
             final _cikar = ad.startsWith('-');
             if (_cikar) ad = ad.substring(1).trim();
-            if (ad.isNotEmpty) {
+            if (ad.isEmpty) continue;
+            if (_gtMutfak && _grp.isNotEmpty && !_cikar) {
+              // Grup degisince BASLIK bas, secimi bir kademe iceride goster.
+              if (_grp != _sonGrup) {
+                bytes += generator.text('   ${_turkishToAscii(_grp)}:',
+                    styles: const PosStyles(bold: true));
+                _sonGrup = _grp;
+              }
+              bytes += generator.text('      + ${_turkishToAscii(ad)}',
+                  styles: const PosStyles(bold: true));
+            } else {
+              // ESKI davranis (grupsuz / toggle kapali / cikarilan): duz satir.
+              _sonGrup = ''; // grupsuz gelince basligi sifirla (araya girerse tekrar bassin)
               bytes += generator.text(
                   _cikar ? '   CIKAR: ${_turkishToAscii(ad)}' : '   + ${_turkishToAscii(ad)}',
                   styles: const PosStyles(bold: true));

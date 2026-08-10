@@ -1055,6 +1055,24 @@ class _AddItemModalState extends State<AddItemModal> {
             continue;
           }
           final ad = adRaw.toLowerCase();
+
+          // 🔴 10 Agu 2026 (Mustafa) — GRUP KIMLIGI varsa DOGRUDAN o gruba koy. Ayni ad birden
+          // cok grupta olabilir (Acili But: MAKARNA hem "1. YAN URUN" hem "2. YAN URUN"'de);
+          // eskiden extras'ta grup yoktu, her secim ILK eslesen gruba dusup 1.grupta toplaniyordu.
+          // Artik ekleme grup adini yaziyor: burada okuyup KESIN dogru gruba koyariz.
+          final grpKey = (e['group']?.toString() ?? '').trim();
+          if (grpKey.isNotEmpty && gruplar.containsKey(grpKey)) {
+            final v = gruplar[grpKey]!
+                .where((vv) => (vv['name']?.toString() ?? '').trim().toLowerCase() == ad)
+                .firstOrNull;
+            if (v != null) {
+              final liste = secVaryant[grpKey] ??= [];
+              if (!liste.any((x) => x['id'] == v['id'])) liste.add(v);
+              continue;
+            }
+          }
+
+          // (Grup alani YOK = eski kayit, VEYA icerik ekle/cikar) eklenebilir icerik eslesmesi.
           final add = eklenebilir
               .where((i) => (i['name']?.toString() ?? '').trim().toLowerCase() == ad)
               .firstOrNull;
@@ -1062,11 +1080,10 @@ class _AddItemModalState extends State<AddItemModal> {
             if (!eklenen.any((x) => x['id'] == add['id'])) eklenen.add(add);
             continue;
           }
-          // 🔴 Ayni ad BIRDEN COK grupta olabilir (Acili But: MAKARNA hem "1. YAN URUN
-          // SECIMI" hem "2. YAN URUN SECIMI" grubunda, AYRI id'ler). O grupta zaten secili
-          // ise SONRAKI gruba bak; yalnizca gercekten ekleyince dur. Eski kosulsuz `break`
-          // iki MAKARNA'dan ikincisini kaciriyordu (opsiyonel grupta sessiz secim+fiyat
-          // kaybi) — Fable adversaryal denetim bulgusu, 9 Agu 2026.
+          // (Grup alani YOK = eski kayit) ada gore grup arama — geriye donuk uyumluluk.
+          // Ayni ad birden cok grupta ise o grupta zaten secili degilse SONRAKI gruba bak
+          // (kosulsuz `break` iki MAKARNA'dan ikincisini kaciriyordu, 9 Agu Fable bulgusu).
+          // Yeni kayitlar yukarida grup alaniyla KESIN eslendiginden buraya DUSMEZ.
           for (final entry in gruplar.entries) {
             final v = entry.value
                 .where((vv) => (vv['name']?.toString() ?? '').trim().toLowerCase() == ad)
@@ -1110,15 +1127,17 @@ class _AddItemModalState extends State<AddItemModal> {
         //   SAG : COKLU/duz varyant secimi
         //   ALT : ekle/cikar malzemeler — tam genislik, iki sutunun ALTINDA
         // Tek taraf doluysa TEK sutun cizilir (bos yarim ekran olmasin).
-        final solBolumler = <Widget>[];   // gruplu varyantlar
-        final sagBolumler = <Widget>[];   // coklu/duz varyant
-        final altBolumler = <Widget>[];   // icerikler (ekle/cikar)
+        // 10 Agu 2026 (Mustafa) — YENI DUZEN: 1.grup | 2.grup YAN YANA, 3.sirada duz varyant.
+        // Secenekler her bolumde 2'serli (ASLA 3. sutun); cok ise dikey kaydirir.
+        final grupKolonlari = <Widget>[];  // her gruplu varyant AYRI sutun (yan yana)
+        Widget? duzBolum;                  // grupsuz/duz coklu varyant (3. sira)
+        final altBolumler = <Widget>[];    // icerikler (ekle/cikar)
 
         Widget baslik(String metin, {String? alt}) => Padding(
               padding: const EdgeInsets.only(top: 14, bottom: 6),
               child: Row(children: [
-                Text(metin,
-                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                Flexible(child: Text(metin, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold))),
                 if (alt != null) ...[
                   const SizedBox(width: 6),
                   Text(alt, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
@@ -1126,37 +1145,57 @@ class _AddItemModalState extends State<AddItemModal> {
               ]),
             );
 
-        // ---- 1) GRUPLU VARYANTLAR ----
+        // Secenek kutularini 2'serli satirlara diz (ASLA 3. sutun). Tek kalirsa yer tutucu.
+        Widget ikiliDizi(List<Widget> tiles) {
+          final satirlar = <Widget>[];
+          for (int i = 0; i < tiles.length; i += 2) {
+            satirlar.add(Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Expanded(child: tiles[i]),
+                const SizedBox(width: 8),
+                Expanded(child: (i + 1 < tiles.length) ? tiles[i + 1] : const SizedBox()),
+              ]),
+            ));
+          }
+          return Column(crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min, children: satirlar);
+        }
+
+        // ---- 1) GRUPLU VARYANTLAR — HER GRUP AYRI SUTUN, YAN YANA ----
         gruplar.forEach((grupAdi, secenekler) {
-          if (grupAdi.isEmpty) return; // duz varyantlar asagida
+          if (grupAdi.isEmpty) return; // duz varyant asagida (3. sira)
           final ilk = secenekler.first;
           final coklu = ilk['group_multi'] == true;
           final zorunlu = ilk['group_required'] == true;
-          solBolumler.add(baslik(grupAdi,
-              alt: (zorunlu ? 'zorunlu' : 'opsiyonel') + (coklu ? ' · çoklu' : '')));
-          solBolumler.add(Wrap(spacing: 8, runSpacing: 8, children: secenekler.map((v) {
+          final tiles = secenekler.map<Widget>((v) {
             final secili = (secVaryant[grupAdi] ?? []).any((x) => x['id'] == v['id']);
             final mod = _variantModifier(v);
-            return SizedBox(
-              width: _variantTileWidth,
-              child: _variantOptionTile(
-                label: v['name']?.toString() ?? '',
-                price: basePrice + mod,
-                modifier: mod,
-                selected: secili,
-                onTap: () => setSt(() {
-                  final liste = secVaryant[grupAdi] ??= [];
-                  if (secili) {
-                    liste.removeWhere((x) => x['id'] == v['id']);
-                  } else {
-                    if (!coklu) liste.clear(); // tekli grup: oncekini degistir
-                    liste.add(v);
-                  }
-                }),
-                color: secili ? Colors.green[700]! : Colors.orange[600]!,
-              ),
+            return _variantOptionTile(
+              label: v['name']?.toString() ?? '',
+              price: basePrice + mod,
+              modifier: mod,
+              selected: secili,
+              onTap: () => setSt(() {
+                final liste = secVaryant[grupAdi] ??= [];
+                if (secili) {
+                  liste.removeWhere((x) => x['id'] == v['id']);
+                } else {
+                  if (!coklu) liste.clear(); // tekli grup: oncekini degistir
+                  liste.add(v);
+                }
+              }),
+              color: secili ? Colors.green[700]! : Colors.orange[600]!,
             );
-          }).toList()));
+          }).toList();
+          grupKolonlari.add(Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              baslik(grupAdi, alt: (zorunlu ? 'zorunlu' : 'opsiyonel') + (coklu ? ' · çoklu' : '')),
+              ikiliDizi(tiles),
+            ],
+          ));
         });
 
         // ---- 1b) GRUPSUZ (DUZ) VARYANTLAR ----
@@ -1170,30 +1209,34 @@ class _AddItemModalState extends State<AddItemModal> {
         if (_varyantGoster && (gruplar[''] ?? const []).isNotEmpty) {
           final duzler = gruplar['']!;
           final cokluDuz = _posCokluVaryant(product);
-          sagBolumler.add(baslik('Varyant', alt: cokluDuz ? 'çoklu seçilebilir' : 'tek seçim'));
-          sagBolumler.add(Wrap(spacing: 8, runSpacing: 8, children: duzler.map((v) {
+          final tiles = duzler.map<Widget>((v) {
             final secili = (secVaryant[''] ?? []).any((x) => x['id'] == v['id']);
             final mod = _variantModifier(v);
-            return SizedBox(
-              width: _variantTileWidth,
-              child: _variantOptionTile(
-                label: v['name']?.toString() ?? '',
-                price: basePrice + mod,
-                modifier: mod,
-                selected: secili,
-                onTap: () => setSt(() {
-                  final liste = secVaryant[''] ??= [];
-                  if (secili) {
-                    liste.removeWhere((x) => x['id'] == v['id']);
-                  } else {
-                    if (!cokluDuz) liste.clear();
-                    liste.add(v);
-                  }
-                }),
-                color: secili ? Colors.green[700]! : Colors.orange[600]!,
-              ),
+            return _variantOptionTile(
+              label: v['name']?.toString() ?? '',
+              price: basePrice + mod,
+              modifier: mod,
+              selected: secili,
+              onTap: () => setSt(() {
+                final liste = secVaryant[''] ??= [];
+                if (secili) {
+                  liste.removeWhere((x) => x['id'] == v['id']);
+                } else {
+                  if (!cokluDuz) liste.clear();
+                  liste.add(v);
+                }
+              }),
+              color: secili ? Colors.green[700]! : Colors.orange[600]!,
             );
-          }).toList()));
+          }).toList();
+          duzBolum = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              baslik('Varyant', alt: cokluDuz ? 'çoklu seçilebilir' : 'tek seçim'),
+              ikiliDizi(tiles),
+            ],
+          );
         }
 
         // ---- 2) CIKARILABILIR ICERIKLER ----
@@ -1241,26 +1284,21 @@ class _AddItemModalState extends State<AddItemModal> {
         }
 
         final hazir = zorunluTamam();
-        // Ekran genisligine gore: iki taraf da doluysa VE yer varsa 2 sutun.
         final _ekranG = MediaQuery.of(ctx).size.width;
-        final _ikiSutun =
-            solBolumler.isNotEmpty && sagBolumler.isNotEmpty && _ekranG >= 900;
-        // Sekme SADECE hem varyant hem icerik varsa anlamli
+        final _varyantVarMi = grupKolonlari.isNotEmpty || duzBolum != null;
+        // 10 Agu 2026 (Mustafa) — RESPONSIVE: gruplar GENIS ekranda YAN YANA, DAR ekranda ALT ALTA
+        // (her biri tam genislik, 2'serli). Tek grup zaten tam genislik. Esik: 2+ grup icin >=760px.
+        final _gruplarYanYana = grupKolonlari.length <= 1 || _ekranG >= 760;
+        // DAHA GENIS pencere; kaydirma minimum. Yan yana + cok grup -> genis; degilse orta. Ekrana clamp.
+        final _hedefG = 640.0 +
+            ((_gruplarYanYana && grupKolonlari.length > 1) ? 520.0 : (grupKolonlari.isNotEmpty ? 160.0 : 0.0));
+        final _genislik = _hedefG.clamp(360.0, _ekranG * 0.96);
         // 9 Agu 2026 — GUNCELLEME modunda Combo sekmesi CIZILMEZ: combo secimi YENI kalemler
         // uretir, mevcut bir kalemi duzenlerken anlamsiz/riskli. (Varyant butonu combo paketine
         // ait kalemi zaten engelliyor; bu ek guvence.)
         final _comboVar = _comboIsActive(product) && guncellenecekKalem == null;
         // Sekme cubugu: varyant+icerik ikisi de varsa VEYA combo varsa
-        final _sekmeVar = ((solBolumler.isNotEmpty || sagBolumler.isNotEmpty) &&
-                altBolumler.isNotEmpty) ||
-            _comboVar;
-        final _genislik = (_ikiSutun ? 1040.0 : 660.0).clamp(360.0, _ekranG * 0.95);
-
-        Widget _sutun(List<Widget> ler) => Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: ler,
-            );
+        final _sekmeVar = (_varyantVarMi && altBolumler.isNotEmpty) || _comboVar;
 
         return Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -1309,25 +1347,43 @@ class _AddItemModalState extends State<AddItemModal> {
                 child: SingleChildScrollView(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     // VARYANT SEKMESI (veya sekme yoksa varyantlar)
+                    // 10 Agu 2026 (Mustafa) — 1.grup | 2.grup YAN YANA (aralarinda ince ayrac);
+                    // 3. sirada duz varyant. Her bolum kendi icinde 2'serli, ASLA 3. sutun.
                     if (!_sekmeVar || sekme == 0) ...[
-                      if (_ikiSutun)
-                        // SOL: gruplu varyantlar · SAG: coklu varyant secimi
-                        IntrinsicHeight(
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(flex: 1, child: _sutun(solBolumler)),
-                              Container(
-                                width: 1,
-                                margin: const EdgeInsets.symmetric(horizontal: 20),
-                                color: Colors.grey[300],
+                      // GENIS ekran: gruplar YAN YANA (ince ayracli). DAR ekran: ALT ALTA.
+                      if (grupKolonlari.isNotEmpty)
+                        (_gruplarYanYana
+                          ? IntrinsicHeight(
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  for (int gi = 0; gi < grupKolonlari.length; gi++) ...[
+                                    if (gi > 0)
+                                      Container(
+                                        width: 1,
+                                        margin: const EdgeInsets.symmetric(horizontal: 16),
+                                        color: Colors.grey[300],
+                                      ),
+                                    Expanded(child: grupKolonlari[gi]),
+                                  ],
+                                ],
                               ),
-                              Expanded(flex: 1, child: _sutun(sagBolumler)),
-                            ],
-                          ),
-                        )
-                      else
-                        _sutun([...solBolumler, ...sagBolumler]),
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                for (int gi = 0; gi < grupKolonlari.length; gi++) ...[
+                                  if (gi > 0) const Divider(height: 24),
+                                  grupKolonlari[gi],
+                                ],
+                              ],
+                            )),
+                      // 3. SIRA — duz/coklu varyant (gruplarin ALTINDA, tam genislik)
+                      if (duzBolum != null) ...[
+                        if (grupKolonlari.isNotEmpty) const Divider(height: 28),
+                        duzBolum,
+                      ],
                     ],
                     // EKLE/CIKAR SEKMESI (veya sekme yoksa altta)
                     if (!_sekmeVar || sekme == 1) ..._sutunListesi(altBolumler),
@@ -1395,10 +1451,20 @@ class _AddItemModalState extends State<AddItemModal> {
     if (onay != true) return;
 
     // extras: varyant secimleri + eklenen + cikarilan (hepsi tek yapida, fis zaten basiyor)
+    // 🔴 10 Agu 2026 (Mustafa) — GRUP KIMLIGI. Ayni ad BIRDEN COK grupta olabilir (Acili But:
+    // MAKARNA/SALATA hem "1. YAN URUN" hem "2. YAN URUN" grubunda). extras flat {name,price}
+    // oldugu icin "Varyant" ile tekrar acildiginda hangi secim hangi gruba aitti BILINMIYOR ->
+    // hepsi ilk eslesen gruba dusuyordu (1.grupta toplaniyor). Artik grup adini da yaziyoruz;
+    // pre-select bunu okuyup DOGRU gruba koyar. Fis/backend name/price okur -> ek alan zararsiz
+    // (additive). Grupsuz (duz) varyantta grupAdi='' -> 'group' yazilmaz (ad zaten benzersiz).
     final extras = <Map<String, dynamic>>[];
-    secVaryant.forEach((_, list) {
+    secVaryant.forEach((grupAdi, list) {
       for (final v in list) {
-        extras.add({'name': v['name']?.toString() ?? '', 'price': _variantModifier(v)});
+        extras.add({
+          'name': v['name']?.toString() ?? '',
+          'price': _variantModifier(v),
+          if (grupAdi.isNotEmpty) 'group': grupAdi,
+        });
       }
     });
     for (final e in eklenen) {

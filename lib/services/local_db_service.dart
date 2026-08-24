@@ -4325,6 +4325,7 @@ class LocalDbService {
         'items': items,
         'item_count': items.length,
         'at': ts.length >= 16 ? ts.substring(11, 16) : ts, // HH:MM
+        'ts_iso': ts, // 24 Agu (P2): yaş uyarısı için tam zaman damgası (giris/son-deneme ani)
         'error': (r['error_message'] ?? '').toString(),
         'server_job_id': serverJobId,
         'server_ticket_id': serverTicketId,

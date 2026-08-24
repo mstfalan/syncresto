@@ -93,6 +93,31 @@ class _FailedPrintModalState extends State<FailedPrintModal> {
     }
     final port = (row['printer_port'] as int?) ?? 9100;
 
+    // 24 Agu 2026 (P2): ESKİ/geç reprint uyarısı. Fiş girişi 60 dk'dan eskiyse (servis anı
+    // geçmiş, adisyon kapanmış olabilir — masa 37 / 19:10 vakası) onay sor ki mutfak taze
+    // sipariş sanmasın. ts_iso = giriş/son-deneme anı. Parse edilemezse uyarı yok (bugünkü).
+    final girisDt = DateTime.tryParse((row['ts_iso'] ?? '').toString());
+    if (girisDt != null && DateTime.now().difference(girisDt).inMinutes >= 60) {
+      final dk = DateTime.now().difference(girisDt).inMinutes;
+      final yasStr = dk >= 120 ? '${(dk / 60).floor()} saat' : '$dk dakika';
+      if (!mounted) return;
+      final onay = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Eski fiş — emin misiniz?'),
+          content: Text(
+              'Bu siparişin fişi yaklaşık $yasStr önce girilmişti (${row['at'] ?? ''}). '
+              'Sipariş çoktan hazırlanmış veya adisyon kapanmış olabilir; mutfağa YENİ sipariş '
+              'gibi gidecek. Yine de yazdırılsın mı?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Vazgeç')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Yine de bas')),
+          ],
+        ),
+      );
+      if (onay != true) return; // vazgeçildi — basma
+    }
+
     // receipt_data'dan basma verisi çöz. İKİ format: 'kitchen' → {ticket, items} (garson direkt);
     // 'kitchen_order' → {order, department} (online Web POS mutfak fişi). Doğru basma yolu seçilir.
     Map<String, dynamic>? ticket;

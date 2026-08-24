@@ -3562,14 +3562,24 @@ class _AddItemModalState extends State<AddItemModal> {
       // 24 Agu 2026 (P4): "Yazdir" hedef yazicilari. BOS -> BUGUNKU yol aynen; 1 secili ->
       // dogrudan o yaziciya; >1 -> yazici-sec pop-up. Secili yazicilar bulunamazsa (silinmis/
       // offline liste bos) yine BUGUNKU yola duser (guvenli, regresyon yok).
-      final seciliIds = await StorageService().getYazdirPrinterIds();
+      // 24 Agu (K-1 fix): POS StorageService singleton DEGIL — StorageService() boş _prefs ile
+      // LateInitializationError atardi. Kurulu desen: ham SharedPreferences + statik key.
+      final prefs = await SharedPreferences.getInstance();
+      final seciliIds = prefs.getStringList(StorageService.yazdirPrinterIdsKey) ?? const <String>[];
       bool success;
       if (seciliIds.isEmpty) {
         success = await widget.printerService!.printTicket(ticketToPrint);
       } else {
-        final adaylar = widget.printerService!.serverPrinters
+        var adaylar = widget.printerService!.serverPrinters
             .where((p) => seciliIds.contains('${p['id']}'))
             .toList();
+        if (adaylar.isEmpty) {
+          // O-1 fix: restart sonrası serverPrinters oturumda boş olabilir (Ayarlar açılmadıysa).
+          // allPrinters (printers_multi, boot'ta yüklü) üzerinden çöz — hedef yine bulunur.
+          adaylar = widget.printerService!.allPrinters
+              .where((p) => p['fromServer'] == true && seciliIds.contains('${p['id']}'))
+              .toList();
+        }
         if (adaylar.isEmpty) {
           success = await widget.printerService!.printTicket(ticketToPrint);
         } else {

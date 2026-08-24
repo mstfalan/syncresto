@@ -116,6 +116,7 @@ class _FailedPrintModalState extends State<FailedPrintModal> {
         ),
       );
       if (onay != true) return; // vazgeçildi — basma
+      if (!mounted) return; // dialog sırasında modal kapanmış olabilir (setState guard)
     }
 
     // receipt_data'dan basma verisi çöz. İKİ format: 'kitchen' → {ticket, items} (garson direkt);

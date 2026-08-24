@@ -1663,7 +1663,9 @@ class PrinterService {
     // DEFAULT ACIK. Kapaliyken satir HIC eklenmez (eski gorunum). ETIKET ASCII.
     bool fisBasimGoster = true;
     try {
-      fisBasimGoster = await StorageService().getShowKitchenPrintTime();
+      // 24 Agu (K-2 fix): POS StorageService singleton DEGIL → ham SharedPreferences + statik key.
+      final prefs = await SharedPreferences.getInstance();
+      fisBasimGoster = prefs.getBool(StorageService.showKitchenPrintTimeKey) ?? true;
     } catch (_) {
       fisBasimGoster = true;
     }

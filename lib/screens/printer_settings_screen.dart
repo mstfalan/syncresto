@@ -30,6 +30,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   bool _showWaiterTimeCash = true; // 9 Agu: kasa fisinde kalem garson+saat (DEFAULT ACIK)
   bool _showWaiterTimeKitchen = true; // 9 Agu: mutfak fisinde kalem garson+saat (DEFAULT ACIK)
   bool _showGroupTitlesKitchen = true; // 10 Agu: mutfak fisinde gruplu varyant basliklari (DEFAULT ACIK)
+  bool _showKitchenPrintTime = true; // 24 Agu: fiste 'Fis Basim' (baski ani) satiri (DEFAULT ACIK)
+  List<String> _yazdirPrinterIds = []; // 24 Agu (P4): "Yazdir" butonu hedef yazicilari (server id)
 
   // Varsayılan yazıcı türleri (ikon ve renk için)
   final Map<String, Map<String, dynamic>> _defaultTypes = {
@@ -67,6 +69,8 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _showWaiterTimeCash = prefs.getBool(StorageService.showWaiterTimeCashKey) ?? true; // DEFAULT ACIK
       _showWaiterTimeKitchen = prefs.getBool(StorageService.showWaiterTimeKitchenKey) ?? true; // DEFAULT ACIK
       _showGroupTitlesKitchen = prefs.getBool(StorageService.showGroupTitlesKitchenKey) ?? true; // DEFAULT ACIK
+      _showKitchenPrintTime = prefs.getBool(StorageService.showKitchenPrintTimeKey) ?? true; // DEFAULT ACIK
+      _yazdirPrinterIds = prefs.getStringList(StorageService.yazdirPrinterIdsKey) ?? <String>[]; // P4
     });
   }
 
@@ -98,6 +102,25 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(StorageService.showGroupTitlesKitchenKey, value);
     if (mounted) setState(() => _showGroupTitlesKitchen = value);
+  }
+
+  Future<void> _setShowKitchenPrintTime(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.showKitchenPrintTimeKey, value);
+    if (mounted) setState(() => _showKitchenPrintTime = value);
+  }
+
+  // 24 Agu 2026 (P4): "Yazdir" hedef yazicisini ekle/cikar.
+  Future<void> _toggleYazdirPrinter(String id, bool selected) async {
+    final list = List<String>.from(_yazdirPrinterIds);
+    if (selected) {
+      if (!list.contains(id)) list.add(id);
+    } else {
+      list.remove(id);
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(StorageService.yazdirPrinterIdsKey, list);
+    if (mounted) setState(() => _yazdirPrinterIds = list);
   }
 
   /// Sunucudan yazıcıları yükle (admin panelden eklenenler)
@@ -301,6 +324,44 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
               value: _showGroupTitlesKitchen,
               onChanged: _setShowGroupTitlesKitchen,
             ),
+            const Divider(height: 1),
+            // 24 Agu 2026: fişte "Fiş Basım" (baskı anı) satırı (DEFAULT AÇIK).
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Fişte basım zamanını göster'),
+              subtitle: const Text(
+                  'Açık: mutfak fişinde "Ürün Girişi" (ürünün girildiği saat) altına "Fiş Basım" '
+                  '(fişin çıktığı an) ayrı satır yazar. Ürün 10\'da girilip fiş 12\'de basıldıysa '
+                  'ikisi net ayrılır. Kapalı: sadece Ürün Girişi yazar.'),
+              value: _showKitchenPrintTime,
+              onChanged: _setShowKitchenPrintTime,
+            ),
+            const Divider(height: 1),
+            // 24 Agu 2026 (P4): "Yazdir" butonu hedef yazicilari (coklu). Bos = bugunku (kasa) yol.
+            Padding(
+              padding: const EdgeInsets.only(top: 14, bottom: 2),
+              child: Text('Yazdır Butonu Yazıcıları',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.grey[800])),
+            ),
+            Text(
+              'Adisyon "Yazdır" butonu hangi yazıcı(lar)a bassın? Hiçbiri seçili değilse: bugünkü '
+              'gibi kasa yazıcısı. 1 seçili: doğrudan ona. Birden fazla: "Yazdır"a basınca yazıcı '
+              'seçim penceresi açılır.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600], height: 1.3),
+            ),
+            ..._serverPrinters.map((p) {
+              final id = '${p['id']}';
+              return CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: Text(p['name']?.toString() ?? 'Yazıcı'),
+                subtitle: Text('${p['ip'] ?? p['ip_address'] ?? ''}',
+                    style: const TextStyle(fontSize: 12)),
+                value: _yazdirPrinterIds.contains(id),
+                onChanged: (v) => _toggleYazdirPrinter(id, v ?? false),
+              );
+            }),
           ],
         ),
       ),

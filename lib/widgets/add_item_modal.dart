@@ -3559,7 +3559,30 @@ class _AddItemModalState extends State<AddItemModal> {
       ticketToPrint['table_name'] = '$sectionName - $tableNumber';
       ticketToPrint['waiter_name'] = widget.waiter?['name'] ?? '';
 
-      final success = await widget.printerService!.printTicket(ticketToPrint);
+      // 24 Agu 2026 (P4): "Yazdir" hedef yazicilari. BOS -> BUGUNKU yol aynen; 1 secili ->
+      // dogrudan o yaziciya; >1 -> yazici-sec pop-up. Secili yazicilar bulunamazsa (silinmis/
+      // offline liste bos) yine BUGUNKU yola duser (guvenli, regresyon yok).
+      final seciliIds = await StorageService().getYazdirPrinterIds();
+      bool success;
+      if (seciliIds.isEmpty) {
+        success = await widget.printerService!.printTicket(ticketToPrint);
+      } else {
+        final adaylar = widget.printerService!.serverPrinters
+            .where((p) => seciliIds.contains('${p['id']}'))
+            .toList();
+        if (adaylar.isEmpty) {
+          success = await widget.printerService!.printTicket(ticketToPrint);
+        } else {
+          final hedef = adaylar.length == 1 ? adaylar.first : await _yaziciSecPopup(adaylar);
+          if (hedef == null) return; // pop-up iptal -> hicbir sey basma
+          success = await widget.printerService!.printTicket(
+            ticketToPrint,
+            targetIp: (hedef['ip'] ?? hedef['ip_address'])?.toString(),
+            targetPort: (hedef['port'] as num?)?.toInt() ?? 9100,
+            targetName: hedef['name']?.toString(),
+          );
+        }
+      }
       if (success) {
         _showSuccess('Fiş yazdırıldı');
       } else {
@@ -3568,6 +3591,35 @@ class _AddItemModalState extends State<AddItemModal> {
     } catch (e) {
       _showError('Yazdır hatası: $e');
     }
+  }
+
+  /// 24 Agu 2026 (P4): birden fazla "Yazdir" hedefi seciliyse yazici-sec pop-up.
+  /// Iptal -> null (hicbir sey basilmaz).
+  Future<Map<String, dynamic>?> _yaziciSecPopup(List<Map<String, dynamic>> yazicilar) async {
+    if (!mounted) return null;
+    return showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hangi yazıcıdan bassın?'),
+        content: SizedBox(
+          width: 340,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: yazicilar
+                .map((p) => ListTile(
+                      leading: const Icon(Icons.print, color: Color(0xFF2563EB)),
+                      title: Text(p['name']?.toString() ?? 'Yazıcı'),
+                      subtitle: Text('${p['ip'] ?? p['ip_address'] ?? ''}'),
+                      onTap: () => Navigator.pop(ctx, p),
+                    ))
+                .toList(),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('Vazgeç')),
+        ],
+      ),
+    );
   }
 
   /// Hesap kapat — tüm ürünleri ödeyerek kapat.

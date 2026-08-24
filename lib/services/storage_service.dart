@@ -238,6 +238,31 @@ class StorageService {
     await _prefs.setBool(failedPrintAutoPopupKey, value);
   }
 
+  // 24 Agu 2026: Mutfak fisinde "Fis Basim" (baski ani) satirini goster. DEFAULT ACIK.
+  // 'Urun Girisi' gercek giris saatini (P1), 'Fis Basim' fisin cikis anini gosterir —
+  // gec/yeniden baskida ikisi AYRILIR (garson 10'da girip fisi 12'de bastiysa net gorunur).
+  // Kapaliyken satir HIC basilmaz. Key PUBLIC — printer_settings (yazar) + printer_service (okur).
+  static const String showKitchenPrintTimeKey = 'fis_basim_zamani_goster';
+  Future<bool> getShowKitchenPrintTime() async {
+    return _prefs.getBool(showKitchenPrintTimeKey) ?? true; // DEFAULT ACIK
+  }
+
+  Future<void> setShowKitchenPrintTime(bool value) async {
+    await _prefs.setBool(showKitchenPrintTimeKey, value);
+  }
+
+  // 24 Agu 2026 (P4): "Yazdir" butonu hedef yazicilari (coklu secim, server printer id'leri).
+  // BOS -> BUGUNKU yol (cashier config'i). 1 secili -> dogrudan o yaziciya. >1 -> "Yazdir"a
+  // basinca yazici-sec pop-up. Key PUBLIC — printer_settings (yazar) + add_item_modal (okur).
+  static const String yazdirPrinterIdsKey = 'yazdir_hedef_yazici_ids';
+  Future<List<String>> getYazdirPrinterIds() async {
+    return _prefs.getStringList(yazdirPrinterIdsKey) ?? const [];
+  }
+
+  Future<void> setYazdirPrinterIds(List<String> ids) async {
+    await _prefs.setStringList(yazdirPrinterIdsKey, ids);
+  }
+
   // 9 Agu 2026 (Mustafa): fislerde her kalemin yaninda GARSON ADI + GIRIS SAATI gosterilsin mi.
   // Kasa (adisyon+kapanis) AYRI, mutfak AYRI. IKISI DE DEFAULT ACIK. Key'ler printer_service
   // (okur, ham prefs) + printer_settings (yazar) ile AYNI string. Kapaliyken fis BIREBIR eski hali.

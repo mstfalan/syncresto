@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'log_service.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart'; // Faz 2 K6: offline'da rapor aninda persist
+import 'storage_service.dart'; // 24 Agu 2026: 'Fis Basim' satiri toggle (getShowKitchenPrintTime)
 
 /// Yazıcı türleri
 enum PrinterType {
@@ -284,8 +285,14 @@ class PrinterService {
   }
 
   /// Prints a ticket receipt
-  Future<bool> printTicket(Map<String, dynamic> ticket, {String? printerType}) async {
-    final config = _getPrinterConfig(printerType ?? 'cashier');
+  /// 24 Agu 2026 (P4): targetIp verilirse o yaziciya basar ("Yazdir" coklu-yazici secimi).
+  /// Verilmezse BUGUNKU yol aynen: _getPrinterConfig('cashier'). addToPrintQueue printerIp=ip
+  /// (=hedef) oldugu icin kuyruk retry'i de AYNI hedefe gider (ek is yok).
+  Future<bool> printTicket(Map<String, dynamic> ticket,
+      {String? printerType, String? targetIp, int? targetPort, String? targetName}) async {
+    final config = (targetIp != null && targetIp.isNotEmpty)
+        ? <String, dynamic>{'ip': targetIp, 'port': targetPort ?? 9100, 'name': targetName ?? 'Yazici'}
+        : _getPrinterConfig(printerType ?? 'cashier');
     if (config == null || config['ip'] == null) {
       onStatusChange?.call('Yazici ayarlanmamis', true);
       _logService.warning(LogType.action, 'Fis yazdirma basarisiz: yazici ayarlanmamis', details: {
@@ -339,8 +346,8 @@ class PrinterService {
 
       // Hata durumunda da kuyruğa ekle — kuyruğa eklenirse caller'a true dön ki
       // çift hata bildirimi gösterilmesin.
-      final cfg = _getPrinterConfig(printerType ?? 'cashier');
-      if (cfg != null && cfg['ip'] != null) {
+      final cfg = config; // P4: hedef verildiyse ona, yoksa bugunku cashier config'i (guard sonrasi non-null)
+      if (cfg['ip'] != null) {
         await _localDb.addToPrintQueue(
           printType: 'ticket',
           printerIp: cfg['ip'] as String,
@@ -1629,8 +1636,40 @@ class PrinterService {
     // Dosyadaki tum etiketler bu yuzden ASCII: Adisyon, Garson, Porsiyon, Toplam...
     final openedAt = ticket['opened_at'] ?? ticket['created_at'] ?? DateTime.now().toIso8601String();
     bytes += generator.text('Masa Acilis: ${_formatTime(openedAt.toString())}');
-    bytes += generator.text('Urun Girisi: ${_formatTime(DateTime.now().toIso8601String())}',
+    // 24 Agu 2026 (P1, Fable-denetli): 'Urun Girisi' = BU baskidaki kalemlerin EN YENI
+    // created_at'i. Gec/yeniden baskida GERCEK giris saatini basar (masa 37 / 260823-5248:
+    // 10:47 girisi 19:10 diye basilmisti). Normal add'de kalemler yeni -> ~simdi (batch
+    // ayrimi korunur). Veri yok/parse edilemez -> BUGUNKU davranis aynen now(). Fis
+    // sozlesmesi: try/catch, fis dusmez. ETIKET ASCII (Turkce char ESC/POS'u bozar).
+    String girisIso = '';
+    try {
+      DateTime? enYeni;
+      for (final it in items) {
+        if (it is! Map) continue;
+        final raw = (it['created_at'] ?? it['item_created_at'] ?? '').toString().trim();
+        if (raw.isEmpty) continue;
+        final dt = DateTime.tryParse(raw);
+        if (dt != null && (enYeni == null || dt.isAfter(enYeni))) enYeni = dt;
+      }
+      if (enYeni != null) girisIso = enYeni.toIso8601String();
+    } catch (_) {
+      girisIso = '';
+    }
+    if (girisIso.isEmpty) girisIso = DateTime.now().toIso8601String();
+    bytes += generator.text('Urun Girisi: ${_formatTime(girisIso)}',
         styles: const PosStyles(bold: true));
+    // 24 Agu 2026: 'Fis Basim' = fisin FIZIKSEL cikis ani (now). 'Urun Girisi'nden AYRI —
+    // garson urunu 10'da girip fisi 12'de bastiysa ikisi net ayrilir. Ayardan kapatilabilir,
+    // DEFAULT ACIK. Kapaliyken satir HIC eklenmez (eski gorunum). ETIKET ASCII.
+    bool fisBasimGoster = true;
+    try {
+      fisBasimGoster = await StorageService().getShowKitchenPrintTime();
+    } catch (_) {
+      fisBasimGoster = true;
+    }
+    if (fisBasimGoster) {
+      bytes += generator.text('Fis Basim: ${_formatTime(DateTime.now().toIso8601String())}');
+    }
     bytes += generator.hr(ch: '=');
 
     // ===== ÜRÜNLER =====

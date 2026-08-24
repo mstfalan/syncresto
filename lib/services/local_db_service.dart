@@ -3,9 +3,22 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 import 'ikram_rules.dart';
+import 'log_service.dart';
+
+/// 20 Ağu 2026 — SELF-HEAL sinyali: DB açıldı ama PRAGMA quick_check 'ok' dönmedi
+/// (sessiz sayfa-bozulması). `openDatabase` bir istisna atmadığı için recovery
+/// akışına düşürmek üzere bu özel sinyal fırlatılır. `_isCorruptionError` bunu
+/// ayrıca tanır (bkz. `_initDatabase` catch bloğu).
+class _CorruptSignal implements Exception {
+  final String reason;
+  _CorruptSignal(this.reason);
+  @override
+  String toString() => '_CorruptSignal($reason)';
+}
 
 class LocalDbService {
   static Database? _database;
@@ -29,10 +42,26 @@ class LocalDbService {
   factory LocalDbService() => _instance;
   LocalDbService._internal();
 
+  // 20 Ağu 2026 [B] — single-flight: eşzamanlı ilk erişimlerde (sync_service +
+  // print_queue_service + tables_screen aynı anda) _initDatabase yalnız BİR kez
+  // koşsun. Aksi halde recovery/rename yarışır, çift açılış olur.
+  static Future<Database>? _initFuture;
   Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDatabase();
-    return _database!;
+    final ex = _database;
+    if (ex != null) return ex;
+    // F5: bu erişimin beklediği future'ı yerelde tut.
+    final f = _initFuture ??= _initDatabase();
+    try {
+      final db = await f;
+      _database = db;
+      return db;
+    } catch (e) {
+      // Başarısızsa future'ı sıfırla → sonraki erişim yeniden denesin
+      // (main.dart "Tekrar Dene" akışı bunu tetikler). F5: yalnız HÂLÂ aynı
+      // future ise sıfırla — araya yeni bir init başlamışsa onu ezme.
+      if (identical(_initFuture, f)) _initFuture = null;
+      rethrow;
+    }
   }
 
   // Init metodu - main.dart'tan cagrilir
@@ -52,6 +81,42 @@ class LocalDbService {
     // 12 Haz 2026: eski CWD-relatif konumdaki DB varsa yeni konuma taşı (tek seferlik)
     await _migrateLegacyDbIfNeeded(path);
 
+    // ───────────────────────────────────────────────────────────────────────
+    // 20 Ağu 2026 [C] — ELEKTRİK KESİNTİSİ SELF-HEAL (Fable-rafine)
+    // Bozuk DB'de openDatabase patlayınca _initDatabase throw ediyor, init bitmiyor,
+    // runApp çağrılmıyor → BEYAZ EKRAN. Artık:
+    //   1) aç + PRAGMA quick_check → 'ok' ise DÖNDÜR (sağlam)
+    //   2) quick_check 'ok' değilse (sessiz sayfa-bozulması) kapat + _CorruptSignal
+    //   3) SADECE corruption (SQLITE_CORRUPT/NOTADB veya quick_check fail) → recovery:
+    //      bozuk dosya SİLİNMEZ, yeniden ADLANDIRILIR + taze DB (onCreate) → boş
+    //      sync_queue → sunucudan re-sync (MÜKERRER push YOK).
+    //   4) lock/izin/disk-dolu/migration hataları → RETHROW (main.dart yakalar,
+    //      InitialSyncScreen "Tekrar Dene" ekranı gösterir, beyaz ekran DEĞİL).
+    //
+    // Kapsam sabiti (yanlış-pozitif wipe önlemi): _isCorruptionError SADECE bu
+    // bloktaki _openDb istisnalarına ve _CorruptSignal'a uygulanır. CRUD/sync
+    // katmanının ürettiği 'malformed' benzeri string'ler buraya ULAŞMAZ → kullanıcı
+    // verisi asla yanlışlıkla wipe TETIKLEYEMEZ.
+    // ───────────────────────────────────────────────────────────────────────
+    try {
+      final db = await _openDb(path);
+      if (await _quickCheckOk(db)) return db; // Q2: sağlam
+      try {
+        await db.close();
+      } catch (_) {}
+      throw _CorruptSignal('quick_check != ok');
+    } catch (e) {
+      if (!(e is _CorruptSignal || _isCorruptionError(e))) {
+        rethrow; // K4: lock/izin/disk-dolu/migration → main yakalar
+      }
+      return await _recreateAfterCorruption(path, e);
+    }
+  }
+
+  /// 20 Ağu 2026 [C] — asıl openDatabase çağrısı (version/onCreate/onUpgrade/
+  /// onConfigure AYNEN korunmuştur; recovery hem ilk açılışta hem taze DB'de
+  /// bunu kullanır).
+  Future<Database> _openDb(String path) async {
     return await openDatabase(
       path,
       version: 20, // v20 (3 Agu 2026): IKRAM — cached_cancel_reasons + cached_ikram_reasons + local_ticket_items.is_ikram/ikram_reason
@@ -76,6 +141,217 @@ class LocalDbService {
         await db.execute('PRAGMA auto_vacuum = INCREMENTAL');
       },
     );
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 20 Ağu 2026 [C/E] — CORRUPTION RECOVERY + YARDIMCILAR (additive, elektrik
+  // kesintisi self-heal). Var olan CRUD/sync/onUpgrade mantığına dokunmaz.
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// K1: boot başına TEK wipe. İkinci corruption'da yedeği ASLA ezme.
+  static bool _recreateAttemptedThisBoot = false;
+
+  /// Bozuk DB'yi güvenle yedekle (SİLME → yeniden ADLANDIR) ve taze DB oluştur.
+  Future<Database> _recreateAfterCorruption(String path, Object cause) async {
+    // K1: boot başına tek deneme — ikinci corruption'da mevcut yedeği ezme, hatayı
+    // yükselt (main.dart hata ekranı gösterir; forensics yedeği korunur).
+    if (_recreateAttemptedThisBoot) throw cause;
+    _recreateAttemptedThisBoot = true;
+
+    final ts =
+        DateTime.now().toIso8601String().replaceAll(RegExp(r'[:.]'), '-');
+
+    // K2: SİLME — yeniden ADLANDIR (forensics + `sqlite3 .recover` ile kurtarma şansı).
+    final corruptMain = '$path.corrupt-$ts';
+    await _renameQuietly(path, corruptMain);
+    await _renameQuietly('$path-wal', '$path.corrupt-$ts-wal');
+    await _renameQuietly('$path-shm', '$path.corrupt-$ts-shm');
+
+    // F3 (K2 ihlali önlemi): yedek GERÇEKTEN oluştu mu? rename+copy İKİSİ de
+    // başarısızsa (ör. Windows sharing violation + disk dolu) bozuk .db hâlâ
+    // path'te durur. Koşulsuz deleteDatabase onu İMHA EDER = tek kopya yok olur.
+    // Yedek doğrulanamadıysa: prune + deleteDatabase ATLA, cause'u RETHROW et →
+    // main.dart "Tekrar Dene" ekranı (bozuk da olsa tek kopya korunur).
+    if (!await File(corruptMain).exists()) {
+      try {
+        LogService().error(
+          LogType.error,
+          'DB bozuk ama yedeklenemedi (rename+copy basarisiz) — wipe IPTAL, hata ekrani',
+          details: {
+            'db_path': path,
+            'event': 'db_corruption_backup_failed',
+          },
+          error: cause,
+        );
+      } catch (_) {}
+      throw cause;
+    }
+
+    // K1+F2: en yeni 3 corrupt set'i tut, eskiyi sil (disk şişmesin). exclude ile
+    // AZ ÖNCE oluşturulan yedeği prune'dan MUAF tut: elektrik kesintisi RTC'yi
+    // sıfırlarsa ($ts '2000-...' olur) ve diskte 2026-adlı 3 yedek varsa, yeni
+    // yedek leksikografik "en eski" sayılıp SİLİNİRDİ → forensik kopya yok olurdu.
+    await _pruneCorruptBackups(path, keep: 3, exclude: corruptMain);
+
+    // Q4: rename sonrası orijinal yolda kalan -journal/-wal/-shm kalıntılarını
+    // güvenle süpür (açık handle yok — _openDb henüz başarılı olmadı). Yalnız
+    // yedek DOĞRULANDIKTAN sonra çalışır (F3).
+    try {
+      await databaseFactory.deleteDatabase(path);
+    } catch (_) {}
+
+    // Q8: sonraki başarılı boot'ta sunucuya raporlanabilsin diye iz bırak.
+    await _writeRecoveryMarker(path, cause);
+
+    // KANIT: uzaktan #poslogs'ta görülür (online olunca gönderilir).
+    // (Layer note: normalde local_db LogService'e bağlanmaz; bu TEK-SEFERLİK
+    //  felaket-kurtarma olayı için spec gereği doğrudan loglanır, try/catch ile
+    //  sarılı — loglama patlarsa recovery bloklanmaz.)
+    try {
+      LogService().error(
+        LogType.error,
+        'DB bozulmus, yedeklenip sifirdan olusturuldu (elektrik kesintisi kurtarma)',
+        details: {
+          'db_path': path,
+          'corrupt_backup': '$path.corrupt-$ts',
+          'event': 'db_corruption_recovery',
+        },
+        error: cause,
+      );
+    } catch (_) {}
+
+    // Taze DB (onCreate) → boş sync_queue → sunucudan re-sync, MÜKERRER push YOK.
+    return await _openDb(path);
+  }
+
+  /// PRAGMA quick_check(1): sessiz sayfa-bozulmasını yakala.
+  /// quick_check integrity_check'ten hafiftir (index-sırası doğrulaması yapmaz)
+  /// ama yine de tüm sayfaları tarar — boot başına 1 kez.
+  ///
+  /// F1 (KRİTİK): catch-all ARTIK YOK. Eskiden `catch (_) => false` busy/locked/
+  /// disk-I/O gibi GEÇİCİ hatalarda bile SAĞLAM DB'yi corruption sanıp wipe
+  /// ettiriyordu (çift-başlatma quick_check'i busy_timeout'u aşabilir; elektrik
+  /// sonrası titrek disk "disk I/O error" verir). Artık:
+  ///   - GERÇEK corruption (SQLITE_CORRUPT/NOTADB / 'malformed' ...) → false
+  ///     (recovery yolu, wipe).
+  ///   - busy/locked/ioerr → db'yi kapat + RETHROW → _initDatabase corruption
+  ///     saymaz, rethrow eder → main.dart "Tekrar Dene" ekranı (WIPE YOK).
+  Future<bool> _quickCheckOk(Database db) async {
+    try {
+      final r = await db.rawQuery('PRAGMA quick_check(1)');
+      return r.isNotEmpty &&
+          (r.first.values.first?.toString().toLowerCase() == 'ok');
+    } catch (e) {
+      if (_isCorruptionError(e)) return false; // gerçek corruption → recovery
+      try {
+        await db.close();
+      } catch (_) {}
+      rethrow; // busy/locked/ioerr → K4 yolu, wipe YOK
+    }
+  }
+
+  /// SADECE corruption'ı tanı. lock/busy/izin/disk-dolu/disk-i/o ASLA true dönmez
+  /// (bunlar geçici → wipe YAPILMAZ, rethrow edilir). Yalnız _openDb istisnalarına
+  /// uygulanır (kapsam sabiti — bkz. _initDatabase).
+  bool _isCorruptionError(Object e) {
+    if (e is DatabaseException) {
+      final rc = e.getResultCode();
+      if (rc == 11 || rc == 26) return true; // SQLITE_CORRUPT / SQLITE_NOTADB
+    }
+    final s = e.toString().toLowerCase();
+    const needles = <String>[
+      'malformed',
+      'file is not a database',
+      'not a database',
+      'disk image is malformed',
+      'sqlite_corrupt',
+      'sqlite_notadb',
+    ];
+    // KASITLI DIŞARIDA: 'locked', 'busy', 'unable to open', 'disk i/o',
+    // 'disk is full' — bunlar corruption DEĞİL, wipe TETIKLEMEZ.
+    for (final n in needles) {
+      if (s.contains(n)) return true;
+    }
+    return false;
+  }
+
+  /// Dosyayı sessizce taşı: rename dener, Windows "in use"/sharing-violation'da
+  /// copy+delete fallback. Asla throw etmez (recovery bloklanmasın).
+  Future<void> _renameQuietly(String from, String to) async {
+    try {
+      final f = File(from);
+      if (!await f.exists()) return;
+      try {
+        await f.rename(to);
+      } catch (_) {
+        try {
+          await f.copy(to);
+          await f.delete();
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  /// En yeni `keep` corrupt set'i (ana + -wal + -shm) TOPLAM tut, eskilerini sil.
+  /// İsimdeki ISO timestamp leksikografik olarak kronolojik → sıralama güvenli.
+  ///
+  /// F2: `exclude` verilirse o set (az önce oluşturulan yedek) HİÇBİR koşulda
+  /// silinmez ve toplam kotaya dahil sayılır — RTC sıfırlanıp yeni yedek
+  /// leksikografik "en eski" görünse bile korunur.
+  Future<void> _pruneCorruptBackups(String path,
+      {required int keep, String? exclude}) async {
+    try {
+      final dir = Directory(dirname(path));
+      if (!await dir.exists()) return;
+      final prefix = '${basename(path)}.corrupt-';
+      final excludeBase = exclude == null ? null : basename(exclude);
+      final mains = <String>[];
+      var excludedCount = 0;
+      await for (final e in dir.list(followLinks: false)) {
+        final name = basename(e.path);
+        // Ana corrupt kayıtları: prefix ile başlar, -wal/-shm ile BİTMEZ.
+        if (name.startsWith(prefix) &&
+            !name.endsWith('-wal') &&
+            !name.endsWith('-shm')) {
+          if (excludeBase != null && name == excludeBase) {
+            excludedCount++; // korunan yeni yedek — kotadan sayılır ama silinmez
+            continue;
+          }
+          mains.add(e.path);
+        }
+      }
+      // Korunan yedek toplam kotaya dahil → eskilerden yalnız (keep-excluded) kalır.
+      var allowOld = keep - excludedCount;
+      if (allowOld < 0) allowOld = 0;
+      if (mains.length <= allowOld) return;
+      mains.sort((a, b) => basename(a).compareTo(basename(b))); // eski → yeni
+      final toDelete = mains.sublist(0, mains.length - allowOld);
+      for (final mainPath in toDelete) {
+        for (final p in [mainPath, '$mainPath-wal', '$mainPath-shm']) {
+          try {
+            final f = File(p);
+            if (await f.exists()) await f.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Q8: DB klasörüne recovery iz dosyası yaz. Sonraki başarılı boot'ta sunucuya
+  /// raporlanıp silinebilir — bu turda SADECE yazılır (raporlama opsiyonel/eklenmedi).
+  Future<void> _writeRecoveryMarker(String path, Object cause) async {
+    try {
+      final markerPath = join(dirname(path), 'db_recovery_marker.json');
+      final causeShort = cause.toString();
+      final marker = <String, dynamic>{
+        'at': DateTime.now().toIso8601String(),
+        'step': 'recreate_after_corruption',
+        'cause_kisa':
+            causeShort.length > 300 ? causeShort.substring(0, 300) : causeShort,
+      };
+      await File(markerPath).writeAsString(jsonEncode(marker));
+      // TODO(opsiyonel): sonraki başarılı boot'ta bu marker'ı sunucuya raporla + sil.
+    } catch (_) {}
   }
 
   // ───────────────────────────────────────────────────────────────────────
@@ -104,6 +380,17 @@ class LocalDbService {
   /// Kopyalama başarılı olsa bile ESKİ DOSYALAR SİLİNMEZ (güvenlik için bırakılır).
   /// Hata olursa migration atlanır — açılış ASLA bloklanmaz.
   Future<void> _migrateLegacyDbIfNeeded(String newPath) async {
+    // 20 Ağu 2026 [D/K3] — TEK SEFER: recovery sonrası antik CWD-relatif DB
+    // hortlamasın. SharedPreferences bayrağı set ise HEMEN çık. İlk kontrolden
+    // sonra (kopyalasa da kopyalamasa da) bayrak true yazılır (finally).
+    const migCheckedKey = 'legacy_db_migration_checked';
+    SharedPreferences? migPrefs;
+    try {
+      migPrefs = await SharedPreferences.getInstance();
+      if (migPrefs.getBool(migCheckedKey) == true) return;
+    } catch (_) {
+      migPrefs = null; // prefs erişilemezse guard'sız eski davranışa düş
+    }
     try {
       if (await File(newPath).exists()) return; // Yeni konumda DB zaten var
 
@@ -130,6 +417,11 @@ class LocalDbService {
       }
     } catch (e) {
       print('[LocalDb] DB migration hatası (atlandı, normal devam): $e');
+    } finally {
+      // K3: ilk kontrolden sonra bayrağı işaretle (return'lerde de finally çalışır).
+      try {
+        await migPrefs?.setBool(migCheckedKey, true);
+      } catch (_) {}
     }
   }
 
@@ -3972,10 +4264,10 @@ class LocalDbService {
   }
 
   /// 24 Tem 2026: RETRY TÜKENMİŞ (5/5 denendi, çıkmadı) mutfak fişleri — POS sağ-üst
-  /// "çıkmayan fiş" bildirimi için. status='failed' + kitchen + SON 18 SAAT.
-  /// 🔴 Fable H2: takvim-günü (startsWith today) DEĞİL rolling 18h window — yoksa 23:58'de
+  /// "çıkmayan fiş" bildirimi için. status='failed' + kitchen + SON 12 SAAT (24 Agu: 18h→12h).
+  /// 🔴 Fable H2: takvim-günü (startsWith today) DEĞİL rolling 12h window — yoksa 23:58'de
   /// çıkmayan fiş 00:01'de takvim değişince SESSİZCE kaybolurdu (restoran gece yarısını geçer).
-  /// 18h = gece servisini kapsar ama ertesi günün servisine taşmaz (pratik "günlük" his).
+  /// 24 Agu (Mustafa): 12h — şişme/eski-kayıt olmasın. cleanupCompletedPrintJobs 12h'te fiziksel siler.
   /// Her satır: id (failed job id, sil/retry için), masa, ürünler, yazıcı, saat, server_job_id.
   Future<List<Map<String, dynamic>>> getFailedKitchenPrints() async {
     final db = await database;
@@ -3986,7 +4278,7 @@ class LocalDbService {
       where: "print_type IN ('kitchen','kitchen_order') AND status = 'failed'",
       orderBy: 'last_attempt_at DESC',
     );
-    final cutoff = DateTime.now().subtract(const Duration(hours: 18));
+    final cutoff = DateTime.now().subtract(const Duration(hours: 12)); // 24 Agu: 18h -> 12h (Mustafa: sisme/eski-kayit olmasin)
     final result = <Map<String, dynamic>>[];
     for (final r in rows) {
       final ts = (r['last_attempt_at'] ?? r['created_at'] ?? '').toString();
@@ -4190,16 +4482,16 @@ class LocalDbService {
     }
 
     // 24 Tem 2026 (Fable H3): failed row'lar HİÇ purge edilmiyordu → SQLite şişme.
-    // 48h'dan eski failed'ları sil (18h bildirim penceresinden UZUN → gece yarısı fişi
-    // kaybolmaz ama günlerce eski ölü kayıt birikmez).
-    final twoDaysAgo = DateTime.now().subtract(const Duration(hours: 48)).toIso8601String();
+    // 24 Agu 2026 (Mustafa): 48h → 12h. Çıkmayan-fiş bildirim penceresi de 12h; eşit tutuldu
+    // → 12 saatten eski failed kayıt hem sağ-üst listede görünmez hem DB'den SİLİNİR (şişme yok).
+    final twelveHoursAgo = DateTime.now().subtract(const Duration(hours: 12)).toIso8601String();
     final failedCount = await db.delete(
       'print_queue',
       where: "status = 'failed' AND COALESCE(last_attempt_at, created_at) < ?",
-      whereArgs: [twoDaysAgo],
+      whereArgs: [twelveHoursAgo],
     );
     if (failedCount > 0) {
-      print('[LocalDb] $failedCount eski failed print job temizlendi (48h+)');
+      print('[LocalDb] $failedCount eski failed print job temizlendi (12h+)');
     }
   }
 
@@ -4282,5 +4574,8 @@ class LocalDbService {
     final db = await database;
     await db.close();
     _database = null;
+    // 20 Ağu 2026 [B] — single-flight future'ı da sıfırla; yoksa sonraki
+    // `database` erişimi tamamlanmış-ama-kapalı db'yi döndürür.
+    _initFuture = null;
   }
 }

@@ -133,12 +133,31 @@ void main() {
     }
 
     final storageService = StorageService();
-    await storageService.init().timeout(
-      const Duration(seconds: 5),
-      onTimeout: () {
-        if (kDebugMode) print('[Main] storageService.init timeout');
-      },
-    );
+    // 20 Ağu 2026 [F4 / K4] — storageService.init() içindeki
+    // SharedPreferences.getInstance() bozuk prefs'te .timeout'tan ÖNCE senkron
+    // throw edebilir → runZonedGuarded zone'u ölür → runApp HİÇ çağrılmaz =
+    // BEYAZ EKRAN (K4'ün kapatmaya çalıştığı sınıf). try/catch ile yakala: hata
+    // olsa da AKIŞ DEVAM ETSİN, runApp çalışsın.
+    try {
+      await storageService.init().timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          if (kDebugMode) print('[Main] storageService.init timeout');
+        },
+      );
+    } catch (e, st) {
+      if (kDebugMode) {
+        print('[Main] storageService.init HATA (akış devam, uygulama yine de açılır): $e');
+      }
+      try {
+        LogService().error(
+          LogType.error,
+          'storageService.init basarisiz — uygulama yine de acildi (beyaz ekran onlendi)',
+          error: e,
+          stackTrace: st,
+        );
+      } catch (_) {}
+    }
 
     final apiService = ApiService();
     final printerService = PrinterService();
@@ -154,27 +173,59 @@ void main() {
       },
     );
 
-    final savedApiUrl = storageService.getApiUrl();
-    if (savedApiUrl != null) {
-      apiService.setBaseUrl(savedApiUrl);
-    }
-    final savedApiKey = storageService.getApiKey();
-    if (savedApiKey != null) {
-      apiService.setApiKey(savedApiKey);
+    // 20 Ağu 2026 [F4 / K4] — storageService.init() yukarıda başarısız olduysa
+    // _prefs (late) atanmamıştır → bu getter'lar LateInitializationError atar.
+    // Korumasız bırakılırsa zone ölür, runApp çalışmaz = BEYAZ EKRAN (init'i
+    // sarmanın anlamı kalmazdı). Bu blok da yakalanır: hata olursa saved-* boş
+    // kalır, uygulama Setup/InitialSync ekranıyla açılır.
+    try {
+      final savedApiUrl = storageService.getApiUrl();
+      if (savedApiUrl != null) {
+        apiService.setBaseUrl(savedApiUrl);
+      }
+      final savedApiKey = storageService.getApiKey();
+      if (savedApiKey != null) {
+        apiService.setApiKey(savedApiKey);
+      }
+
+      // Backend URL (for images/assets)
+      final savedBackendUrl = storageService.getBackendUrl();
+      if (savedBackendUrl != null) {
+        apiService.setBackendUrl(savedBackendUrl);
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('[Main] storageService okuma HATA (akış devam): $e');
+      }
     }
 
-    // Backend URL (for images/assets)
-    final savedBackendUrl = storageService.getBackendUrl();
-    if (savedBackendUrl != null) {
-      apiService.setBackendUrl(savedBackendUrl);
+    // 20 Ağu 2026 [K4] — initOfflineServices (LocalDbService.init dahil) hatası
+    // uygulamayı ÖLDÜRMESİN. Bozuk DB self-heal edilemezse (2. corruption / lock /
+    // izin / disk-dolu / migration) burada yakala; AKIŞ DEVAM ETSİN, runApp MUTLAKA
+    // çalışsın → InitialSyncScreen'in mevcut "Tekrar Dene" ekranı görünür (beyaz
+    // ekran DEĞİL). LocalDbService.init içindeki corruption ise zaten sessizce
+    // self-heal edilir (yeni DB); bu catch onun ÖTESİNDEKİ hatalar içindir.
+    try {
+      await apiService.initOfflineServices().timeout(
+        const Duration(seconds: 8),
+        onTimeout: () {
+          if (kDebugMode) print('[Main] apiService.initOfflineServices timeout');
+        },
+      );
+    } catch (e, st) {
+      if (kDebugMode) {
+        print('[Main] initOfflineServices HATA (akış devam, hata ekranı gösterilecek): $e');
+      }
+      // Uygulamayı ÖLDÜRME — sadece logla (uzaktan #poslogs).
+      try {
+        LogService().error(
+          LogType.error,
+          'initOfflineServices basarisiz — uygulama hata ekraniyla devam etti (beyaz ekran onlendi)',
+          error: e,
+          stackTrace: st,
+        );
+      } catch (_) {}
     }
-
-    await apiService.initOfflineServices().timeout(
-      const Duration(seconds: 8),
-      onTimeout: () {
-        if (kDebugMode) print('[Main] apiService.initOfflineServices timeout');
-      },
-    );
 
     // 1 Haz 2026 (v1.5.6) — Boot cache audit (donma fix)
     // Fire-and-forget: UI'ı bloklamaz, arka planda çalışır.

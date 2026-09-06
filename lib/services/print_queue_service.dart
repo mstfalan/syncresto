@@ -106,9 +106,14 @@ class PrintQueueService {
 
   /// Tek bir işi manuel olarak tekrar dene
   Future<bool> retryJob(int jobId) async {
-    // Önce job'u sıfırla (retry_count = 0, status = pending)
-    await _localDb.resetPrintJob(jobId);
-    // Sonra tekrar dene
+    // Önce job'u sıfırla (retry_count = 0, status = pending).
+    // 6 Eyl 2026 (Fable K-1): iş şu an 'printing' ise (arka plan gönderiyor) sıfırlanmaz → BASMA.
+    final reset = await _localDb.resetPrintJob(jobId);
+    if (!reset) {
+      print('[PrintQueue] Job $jobId su an gonderiliyor (printing) — manuel tekrar atlandi');
+      return false;
+    }
+    // Sonra tekrar dene (retryPrintJob kendi claim'ini yapar)
     return await _printerService.retryPrintJob(jobId);
   }
 

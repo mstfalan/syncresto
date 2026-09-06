@@ -8,6 +8,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
 import 'ikram_rules.dart';
 import 'log_service.dart';
+import 'print_queue_reprint_decision.dart'; // 6 Eyl 2026: 'printing' claim / stale sure
 
 /// 20 Ağu 2026 — SELF-HEAL sinyali: DB açıldı ama PRAGMA quick_check 'ok' dönmedi
 /// (sessiz sayfa-bozulması). `openDatabase` bir istisna atmadığı için recovery
@@ -4203,10 +4204,54 @@ class LocalDbService {
         print('[LocalDb] completed print job temizlik hatası: $e');
       }
     }
+    // 6 Eyl 2026: uygulama 'printing' ortasında kapandıysa takılı claim'i serbest bırak.
+    try {
+      await resetStalePrintingJobs();
+    } catch (e) {
+      print('[LocalDb] stale printing reset hatasi: $e');
+    }
     return await db.query(
       'print_queue',
       where: "status = 'pending' AND retry_count < max_retries",
       orderBy: 'created_at ASC',
+    );
+  }
+
+  /// 6 Eyl 2026 (kuyruk×popup yarışı, Green Chef çift fiş): göndermeden ÖNCE işi 'printing' ile
+  /// SAHİPLEN. `UPDATE … WHERE status='pending'` tek SQL = ATOMİK; aynı işi iki aktör
+  /// (PrintQueueService 5 sn timer ve KitchenPrintRetryModal "Tekrar Yazdır") aynı anda basamaz.
+  /// true = sahiplenildi (bas), false = başkası aldı / bitti / tükendi (DOKUNMA).
+  Future<bool> claimPrintJobForSending(int id) async {
+    final db = await database;
+    final n = await db.update(
+      'print_queue',
+      {'status': 'printing', 'last_attempt_at': DateTime.now().toIso8601String()},
+      where: "id = ? AND status = 'pending'",
+      whereArgs: [id],
+    );
+    return n == 1;
+  }
+
+  /// Sahiplenilen iş basılamadı ve retry sayacına dokunulmayacaksa claim'i bırak (→ pending).
+  Future<void> releasePrintJobClaim(int id) async {
+    final db = await database;
+    await db.update(
+      'print_queue',
+      {'status': 'pending'},
+      where: "id = ? AND status = 'printing'",
+      whereArgs: [id],
+    );
+  }
+
+  /// 'printing' durumunda takılı kalmış (2 dk'dan eski) işleri pending'e döndür (kilitlenme yok).
+  Future<int> resetStalePrintingJobs() async {
+    final db = await database;
+    final cutoff = DateTime.now().subtract(PrintQueueReprintDecision.staleClaimAfter).toIso8601String();
+    return await db.update(
+      'print_queue',
+      {'status': 'pending'},
+      where: "status = 'printing' AND (last_attempt_at IS NULL OR last_attempt_at < ?)",
+      whereArgs: [cutoff],
     );
   }
 
@@ -4226,7 +4271,7 @@ class LocalDbService {
     final db = await database;
     return await db.query(
       'print_queue',
-      where: "status IN ('pending', 'failed')",
+      where: "status IN ('pending', 'printing', 'failed')", // 6 Eyl 2026: 'printing' de listelensin
       orderBy: 'created_at DESC',
     );
   }
@@ -4404,21 +4449,24 @@ class LocalDbService {
   }
 
   // Yazdırma işini sıfırla (manuel retry için)
-  Future<void> resetPrintJob(int id) async {
+  /// 6 Eyl 2026 (Fable K-1): 'printing' (şu an gönderiliyor) satırı SIFIRLANMAZ — yoksa manuel
+  /// "Tekrar Gönder" arka plan gönderimiyle çakışıp ÇİFT FİŞ basar. false = sıfırlanmadı (basma).
+  Future<bool> resetPrintJob(int id) async {
     final db = await database;
 
-    await db.update(
+    final n = await db.update(
       'print_queue',
       {
         'status': 'pending',
         'retry_count': 0,
         'error_message': null,
       },
-      where: 'id = ?',
+      where: "id = ? AND status != 'printing'",
       whereArgs: [id],
     );
 
-    print('[LocalDb] Print job sıfırlandı: $id');
+    print('[LocalDb] Print job sıfırlandı: $id (etkilenen=$n)');
+    return n == 1;
   }
 
   // Yazdırma işini sil
@@ -4501,7 +4549,7 @@ class LocalDbService {
     final db = await database;
 
     final pending = await db.rawQuery(
-      "SELECT COUNT(*) as count FROM print_queue WHERE status = 'pending'",
+      "SELECT COUNT(*) as count FROM print_queue WHERE status IN ('pending', 'printing')",
     );
     final failed = await db.rawQuery(
       "SELECT COUNT(*) as count FROM print_queue WHERE status = 'failed'",

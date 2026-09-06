@@ -10,6 +10,7 @@ import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'ikram_rules.dart';
 import 'sync_service.dart';
+import 'auth_failure_classifier.dart'; // 6 Eyl 2026: yanlis PIN cache silmesin
 import 'lan_sync_service.dart';
 import 'log_service.dart';
 import 'websocket_service.dart';
@@ -304,20 +305,39 @@ class ApiService {
 
         return response.data;
       } on DioException catch (e) {
-        // 401/403 = API key geçersiz veya pasif - offline'a fallback YAPMA
-        if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
-          print('[API] API key gecersiz veya pasif: ${e.response?.statusCode}');
-          _logService.error(LogType.login, 'API key gecersiz veya pasif', details: {
-            'status': e.response?.statusCode,
-            'error': e.response?.data?['error'],
+        // 401/403 — offline'a fallback YAPMA. 6 Eyl 2026 FIX: ESKİDEN her 401/403 "API key geçersiz"
+        // sayılıp TÜM cache (print_queue/local_tickets/sync_queue/cached_*) siliniyordu; oysa 69/69
+        // olay yanlış PIN'di (401 {error:'Gecersiz PIN'}). Artık AuthFailureClassifier: cache
+        // YALNIZ açık API-key/lisans reddinde silinir; yanlış PIN ve bilinmeyen gövde (HTML/proxy) KORUR.
+        final statusCode = e.response?.statusCode;
+        if (statusCode == 401 || statusCode == 403) {
+          final body = e.response?.data;
+          final kind = AuthFailureClassifier.classify(statusCode, body);
+          if (kind == AuthFailureKind.wrongPin) {
+            _logService.warning(LogType.login, 'Basarisiz giris denemesi (online, yanlis PIN)');
+            return {'success': false, 'error': AuthFailureClassifier.userMessage(kind, statusCode, body)};
+          }
+          if (AuthFailureClassifier.shouldWipeCache(kind)) {
+            print('[API] API key gecersiz veya pasif: $statusCode');
+            _logService.error(LogType.login, 'API key gecersiz veya pasif', details: {
+              'status': statusCode,
+              'error': body is Map ? body['error'] : AuthFailureClassifier.bodySnippet(body),
+              'kind': kind.name,
+            });
+            // Cache'i temizle - kullanıcı artık bu cihazı kullanamaz (gerçek key/lisans reddi)
+            await _syncService.clearAllCache();
+            return {
+              'success': false,
+              'error': AuthFailureClassifier.userMessage(kind, statusCode, body),
+              'api_key_invalid': true,
+            };
+          }
+          // unknown: sunucu 401/403 dedi ama gövde API key/lisans belirtmiyor → cache KORUNUR.
+          _logService.warning(LogType.login, 'Giris reddedildi (bilinmeyen 401/403 govdesi) — cache KORUNDU', details: {
+            'status': statusCode,
+            'body': AuthFailureClassifier.bodySnippet(body),
           });
-          // Cache'i temizle - kullanıcı artık bu cihazı kullanamaz
-          await _syncService.clearAllCache();
-          return {
-            'success': false,
-            'error': e.response?.data?['error'] ?? 'API key gecersiz veya pasif. Lutfen yoneticiyle iletisime gecin.',
-            'api_key_invalid': true,
-          };
+          return {'success': false, 'error': AuthFailureClassifier.userMessage(kind, statusCode, body)};
         }
 
         // Network hatasi - offline dene

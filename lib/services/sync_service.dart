@@ -9,6 +9,7 @@ import 'local_db_service.dart';
 import 'connectivity_service.dart';
 import 'image_cache_service.dart';
 import 'log_service.dart';
+import 'auth_failure_classifier.dart'; // 6 Eyl 2026: 401/403 siniflandirma
 
 /// API key geçersiz veya pasif olduğunda fırlatılır
 class ApiKeyInvalidException implements Exception {
@@ -305,15 +306,26 @@ class SyncService {
     } on DioException catch (e) {
       print('[Sync] İlk sync DioException: ${e.response?.statusCode}');
 
-      // 401/403 = API key geçersiz veya pasif
-      if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
-        _logService.error(LogType.sync, 'API key gecersiz veya pasif', details: {
-          'status': e.response?.statusCode,
-          'error': e.response?.data?['error'],
+      // 401/403 — 6 Eyl 2026 FIX: ApiKeyInvalidException (→ initial_sync_screen cache SİLER) YALNIZ
+      // sunucu açıkça API key / lisans reddi döndüğünde fırlar. HTML/proxy/bilinmeyen 401-403 → normal
+      // hata (cache KORUNUR, "tekrar deneyin").
+      final statusCode = e.response?.statusCode;
+      if (statusCode == 401 || statusCode == 403) {
+        final body = e.response?.data;
+        final kind = AuthFailureClassifier.classify(statusCode, body);
+        if (AuthFailureClassifier.shouldWipeCache(kind)) {
+          _logService.error(LogType.sync, 'API key gecersiz veya pasif', details: {
+            'status': statusCode,
+            'error': body is Map ? body['error'] : AuthFailureClassifier.bodySnippet(body),
+            'kind': kind.name,
+          });
+          throw ApiKeyInvalidException(AuthFailureClassifier.userMessage(kind, statusCode, body));
+        }
+        _logService.warning(LogType.sync, 'Ilk sync 401/403 ama govde API key/lisans belirtmiyor — cache KORUNDU', details: {
+          'status': statusCode,
+          'body': AuthFailureClassifier.bodySnippet(body),
         });
-        throw ApiKeyInvalidException(
-          e.response?.data?['error'] ?? 'API key geçersiz veya lisans pasif edilmiş.',
-        );
+        throw Exception('Sunucu erisimi reddedildi (HTTP $statusCode). Lutfen tekrar deneyin.');
       }
 
       _logService.logSyncError('Ilk sync hatasi', operation: 'initial_sync', error: e);

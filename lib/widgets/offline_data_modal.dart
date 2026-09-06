@@ -498,7 +498,7 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
   // ==================== PRINT QUEUE UI ====================
 
   Widget _buildPrintContent(ThemeProvider theme) {
-    final pendingJobs = _printJobs.where((j) => j['status'] == 'pending').toList();
+    final pendingJobs = _printJobs.where((j) => j['status'] == 'pending' || j['status'] == 'printing').toList();
     final failedJobs = _printJobs.where((j) => j['status'] == 'failed').toList();
 
     if (pendingJobs.isEmpty && failedJobs.isEmpty) {
@@ -567,7 +567,7 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
     final errorMessage = job['error_message'] as String?;
     final createdAt = job['created_at'] as String?;
 
-    final isPending = status == 'pending';
+    final isPending = status == 'pending' || status == 'printing'; // 6 Eyl 2026: 'printing' = gonderiliyor
 
     // Print type label
     String typeLabel;
@@ -643,9 +643,10 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
                 ),
               ),
               IconButton(
-                onPressed: _isSyncing ? null : () => _retryPrintJob(id),
+                // 6 Eyl 2026: 'printing' = arka plan su an gonderiyor → manuel tekrar KAPALI (cift fis)
+                onPressed: (_isSyncing || status == 'printing') ? null : () => _retryPrintJob(id),
                 icon: const Icon(Icons.refresh, size: 20),
-                tooltip: 'Tekrar Gonder',
+                tooltip: status == 'printing' ? 'Su an gonderiliyor' : 'Tekrar Gonder',
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
                 color: theme.primaryColor,
@@ -706,7 +707,7 @@ class _OfflineDataModalState extends State<OfflineDataModal> with SingleTickerPr
   }
 
   Widget _buildPrintActions(ThemeProvider theme) {
-    final pendingJobs = _printJobs.where((j) => j['status'] == 'pending').toList();
+    final pendingJobs = _printJobs.where((j) => j['status'] == 'pending' || j['status'] == 'printing').toList();
     final failedJobs = _printJobs.where((j) => j['status'] == 'failed').toList();
     final hasPending = pendingJobs.isNotEmpty;
     final hasFailed = failedJobs.isNotEmpty;

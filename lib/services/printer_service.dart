@@ -23,6 +23,37 @@ class PrinterService {
   final LogService _logService = LogService();
   final LocalDbService _localDb = LocalDbService();
 
+  /// 6 Eyl 2026: kuyruk işi tamamlanınca (arka plan retry veya manuel) queue id yayınlanır —
+  /// KitchenPrintRetryModal açıkken ilgili satırı düşürür, kullanıcı aynı fişi ikinci kez basmaz.
+  final StreamController<int> _queueJobCompletedCtrl = StreamController<int>.broadcast();
+  Stream<int> get queueJobCompleted => _queueJobCompletedCtrl.stream;
+
+  /// Kuyruk kaydının anlık durumu ('pending' | 'printing' | 'completed' | 'failed' | null=yok).
+  Future<String?> getQueueJobStatus(int queueId) async {
+    try {
+      final job = await _localDb.getPrintJob(queueId);
+      return job?['status'] as String?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Manuel (popup) basım için işi ATOMİK sahiplen (pending → printing). false = dokunma.
+  Future<bool> claimQueueJobForManual(int queueId) async {
+    try {
+      return await _localDb.claimPrintJobForSending(queueId);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Manuel basım başarısız → claim'i bırak ki arka plan kuyruğu denemeye devam etsin.
+  Future<void> releaseQueueJobClaim(int queueId) async {
+    try {
+      await _localDb.releasePrintJobClaim(queueId);
+    } catch (_) {}
+  }
+
   String? _cachedBrandName;
   Future<String> _getBrandName({String? overrideFromSettings}) async {
     if (overrideFromSettings != null && overrideFromSettings.trim().isNotEmpty) {
@@ -2209,6 +2240,7 @@ class PrinterService {
   /// arka plan retry'inin ayni isi tekrar yazdirmasini onler.
   Future<void> markQueueJobCompleted(int queueId) async {
     try { await _localDb.markPrintCompleted(queueId); } catch (_) {}
+    try { _queueJobCompletedCtrl.add(queueId); } catch (_) {}
   }
 
   /// Kuyruktan yazdırma işini tekrar dene
@@ -2224,6 +2256,26 @@ class PrinterService {
     final port = job['printer_port'] as int;
     final receiptDataJson = job['receipt_data'] as String;
     final receiptData = jsonDecode(receiptDataJson) as Map<String, dynamic>;
+
+    // 6 Eyl 2026 (kuyruk×popup yarışı): zaten basıldıysa TEKRAR BASMA; pending değilse (başka aktör
+    // 'printing' / tükenmiş 'failed') DOKUNMA. Sahiplenme ATOMİK (WHERE status='pending').
+    final currentStatus = job['status'] as String?;
+    if (currentStatus == 'completed') {
+      print('[Printer] Print job $queueId zaten completed — tekrar basilmadi');
+      return true;
+    }
+    bool claimed;
+    try {
+      claimed = await _localDb.claimPrintJobForSending(queueId);
+    } catch (e) {
+      // Fable K-5: DB istisnasi _processQueue dongusunu kesmesin; retry sayacina dokunma.
+      print('[Printer] Print job $queueId claim hatasi: $e');
+      return false;
+    }
+    if (!claimed) {
+      print('[Printer] Print job $queueId sahiplenilemedi (status=$currentStatus) — atlandi');
+      return false;
+    }
 
     print('[Printer] Retry print job: $queueId (type: $printType, ip: $ip)');
 
@@ -2244,6 +2296,21 @@ class PrinterService {
       if (success) {
         await _localDb.markPrintCompleted(queueId);
         print('[Printer] Print job basarili: $queueId');
+        // 6 Eyl 2026: sunucuya KANIT (eskiden sadece console) + popup'a haber (satır düşer).
+        try {
+          LogService().logAction(
+            'Fis kuyruk tekrar BASARILI (PrintQueue): ${job['printer_name'] ?? ip}',
+            details: {
+              'queue_id': queueId,
+              'print_type': printType,
+              'printer_ip': ip,
+              'retry_count': job['retry_count'],
+              'server_job_id': receiptData['server_job_id'],
+              'server_ticket_id': receiptData['server_ticket_id'],
+            },
+          );
+        } catch (_) {}
+        try { _queueJobCompletedCtrl.add(queueId); } catch (_) {}
         // Faz 2: fire-and-forget sunucu raporu — donus degerini ETKILEMEZ, basim tekrari YOK.
         // 24 Tem: kitchen_order da dahil (tutarlılık; server_job_id yoksa _reportQueueJobPrinted
         // zaten no-op — online orders claim/markItemsPrinted ile ayrı reconcile eder).

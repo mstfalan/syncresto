@@ -242,17 +242,15 @@ class _InitialSyncScreenState extends State<InitialSyncScreen> {
       await _syncService.clearAllCache();
       await _licenseService.clearLicense();
     } catch (e) {
-      // Genel hata - ama önce 401/403 kontrol et
+      // Genel hata. 6 Eyl 2026 FIX: eskiden hata METNİNDE '401'/'403' geçince cache siliniyordu
+      // (HTML/proxy 403 dahil). Gerçek key/lisans reddi artık YALNIZ ApiKeyInvalidException ile gelir
+      // (sync_service AuthFailureClassifier) — burada cache SİLİNMEZ, sadece mesaj gösterilir.
       final errorStr = e.toString().toLowerCase();
       if (errorStr.contains('401') || errorStr.contains('403') || errorStr.contains('unauthorized')) {
         setState(() {
           _hasError = true;
-          _errorMessage = 'Lisans Hatası\n\nAPI key geçersiz veya lisans pasif edilmiş.\n\nLütfen SyncResto yöneticinize başvurun.';
+          _errorMessage = 'Sunucu erişimi reddedildi.\n\n$e\n\nLütfen internet/ağ bağlantınızı kontrol edip tekrar deneyin.';
         });
-
-        // Cache'i temizle
-        await _syncService.clearAllCache();
-        await _licenseService.clearLicense();
       } else {
         setState(() {
           _hasError = true;

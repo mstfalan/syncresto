@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/printer_service.dart';
 import '../services/api_service.dart';
 import '../services/log_service.dart';
+import '../services/print_queue_reprint_decision.dart'; // 6 Eyl 2026: kuyruk×popup yarisi
 
 /// 18 May 2026: Mutfak fisi yazici hatasi pop-up.
 /// Backend printKitchen zaten printed=1 SET etti — bu modal SADECE TCP retry yapar
@@ -37,15 +39,91 @@ class _KitchenPrintRetryModalState extends State<KitchenPrintRetryModal> {
   bool _retryingAll = false;
   bool _showPrinterCheckHint = false; // 2+ fail sonrasi yazici kontrol uyarisi
 
+  StreamSubscription<int>? _queueSub;
+
   @override
   void initState() {
     super.initState();
     _groups = List<Map<String, dynamic>>.from(widget.failedGroups);
+    // 6 Eyl 2026: arka plan PrintQueueService bu satırlardan birini basarsa satırı düşür
+    // (kullanıcı ikinci kez basmasın). Kendi manuel basımımız _retrying guard'ıyla ayrılır.
+    _queueSub = widget.printerService.queueJobCompleted.listen(_onQueueJobCompleted);
   }
 
-  Future<bool> _retryGroup(int idx) async {
-    if (idx < 0 || idx >= _groups.length) return false;
-    final g = _groups[idx];
+  @override
+  void dispose() {
+    _queueSub?.cancel();
+    super.dispose();
+  }
+
+  void _onQueueJobCompleted(int queueId) {
+    if (!mounted) return;
+    final idx = _groups.indexWhere((g) => g['queue_job_id'] == queueId);
+    if (idx < 0) return;
+    if (_retrying[idx] == true) return; // bu satırı şu an biz basıyoruz → _retryGroup halleder
+    _dropAlreadyPrinted(_groups[idx], queueId, source: 'arka plan kuyruk');
+  }
+
+  /// Satırı KİMLİĞİYLE (Map örneği) kaldır ve indeks-anahtarlı bayrak haritalarını kaydır.
+  /// (Fable K-2, 6 Eyl 2026): eşzamanlı silme indeksleri kaydırır; kaydırmazsak yanlış satıra
+  /// "basılıyor"/"hata" yazılır. setState çağıranın sorumluluğu DEĞİL — burada yapılır.
+  void _removeGroup(Map<String, dynamic> g) {
+    final i = _groups.indexOf(g);
+    if (i < 0) return;
+    Map<int, T> shift<T>(Map<int, T> m) {
+      final out = <int, T>{};
+      m.forEach((k, v) {
+        if (k < i) {
+          out[k] = v;
+        } else if (k > i) {
+          out[k - 1] = v;
+        }
+      });
+      return out;
+    }
+    final r = shift(_retrying);
+    final e = shift(_lastError);
+    final a = shift(_retryAttempts);
+    setState(() {
+      _groups.removeAt(i);
+      _retrying
+        ..clear()
+        ..addAll(r);
+      _lastError
+        ..clear()
+        ..addAll(e);
+      _retryAttempts
+        ..clear()
+        ..addAll(a);
+    });
+  }
+
+  /// Kuyruk (arka plan) zaten bastı → satırı düşür, TEKRAR BASMA. Tüm satırlar bitince modal kapanır.
+  void _dropAlreadyPrinted(Map<String, dynamic> g, int queueId, {required String source}) {
+    if (!mounted || !_groups.contains(g)) return;
+    final printerName = g['printer_name'] as String? ?? 'Yazici';
+    LogService().logAction(
+      'Mutfak fisi pop-up: $source zaten basti, tekrar BASILMADI: $printerName',
+      details: {'ticket_id': widget.ticketId, 'queue_job_id': queueId, 'job_id': g['job_id']},
+    );
+    _removeGroup(g);
+    try {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+        content: Text('$printerName: fiş arka planda zaten basıldı, tekrar basılmadı.'),
+        duration: const Duration(seconds: 4),
+      ));
+    } catch (_) {}
+    if (_groups.isEmpty && mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  /// Satır kimliği = Map örneği (g). Her await sonrası indeks g'den YENİDEN bulunur (Fable K-2):
+  /// arka plan kuyruk yayını bu arada daha düşük indeksli bir satırı silmiş olabilir.
+  Future<bool> _retryGroup(int startIdx) async {
+    if (startIdx < 0 || startIdx >= _groups.length) return false;
+    final g = _groups[startIdx];
+    int idx() => _groups.indexOf(g);
     final ip = g['printer_ip'] as String?;
     final port = (g['printer_port'] as int?) ?? 9100;
     final items = (g['items'] as List?) ?? [];
@@ -53,15 +131,82 @@ class _KitchenPrintRetryModalState extends State<KitchenPrintRetryModal> {
     final printerName = g['printer_name'] as String? ?? 'Yazici';
 
     if (ip == null || ip.isEmpty || items.isEmpty) {
-      setState(() => _lastError[idx] = 'Yazici IP veya urun bilgisi eksik');
+      setState(() => _lastError[startIdx] = 'Yazici IP veya urun bilgisi eksik');
       return false;
     }
 
-    setState(() {
-      _retrying[idx] = true;
-      _lastError[idx] = null;
-      _retryAttempts[idx] = (_retryAttempts[idx] ?? 0) + 1;
-    });
+    void setErr(String msg) {
+      final i = idx();
+      if (mounted && i >= 0) setState(() => _lastError[i] = msg);
+    }
+
+    // 6 Eyl 2026 — KUYRUK×POPUP YARIŞI (Green Chef çift fiş): arka plan PrintQueueService aynı işi
+    // 5 sn'de bir zaten deniyor. Basmadan ÖNCE kuyruk durumuna bak; 'completed' ise TEKRAR BASMA,
+    // 'printing' ise bekle, 'pending' ise işi ATOMİK sahiplen (arka plan artık dokunamaz).
+    final queueJobId = g['queue_job_id'] as int?;
+    bool claimedHere = false;
+    if (queueJobId != null) {
+      var action = PrintQueueReprintDecision.decide(await widget.printerService.getQueueJobStatus(queueJobId));
+      if (!mounted) return false;
+      if (idx() < 0) return true; // satır bu arada düştü (arka plan bastı)
+      if (action == ManualReprintAction.waitInProgress) {
+        setErr('Arka plan şu an basıyor, bekleyin…');
+        await Future.delayed(const Duration(seconds: 3));
+        if (!mounted) return false;
+        if (idx() < 0) return true;
+        action = PrintQueueReprintDecision.decide(await widget.printerService.getQueueJobStatus(queueJobId));
+        if (!mounted) return false;
+        if (idx() < 0) return true;
+        if (action == ManualReprintAction.waitInProgress) {
+          setErr('Arka plan hâlâ basıyor; birkaç saniye sonra tekrar deneyin');
+          return false;
+        }
+      }
+      if (action == ManualReprintAction.skipAlreadyPrinted) {
+        _dropAlreadyPrinted(g, queueJobId, source: 'arka plan kuyruk');
+        return true;
+      }
+      if (action == ManualReprintAction.printWithClaim) {
+        claimedHere = await widget.printerService.claimQueueJobForManual(queueJobId);
+        if (!mounted) {
+          if (claimedHere) await widget.printerService.releaseQueueJobClaim(queueJobId);
+          return false;
+        }
+        if (idx() < 0) {
+          if (claimedHere) await widget.printerService.releaseQueueJobClaim(queueJobId);
+          return true;
+        }
+        if (!claimedHere) {
+          // pending'den başka duruma geçti (arka plan kaptı ya da bitirdi) → yeniden değerlendir
+          final st = await widget.printerService.getQueueJobStatus(queueJobId);
+          if (!mounted) return false;
+          if (idx() < 0) return true;
+          if (st == 'completed') {
+            _dropAlreadyPrinted(g, queueJobId, source: 'arka plan kuyruk');
+            return true;
+          }
+          if (st == 'printing') {
+            setErr('Arka plan şu an basıyor, bekleyin…');
+            return false;
+          }
+          // 'failed'/null → arka plan dokunmaz, manuel devam (claim'siz)
+        }
+      }
+      // printWithoutClaim ('failed' tükenmiş / kayıt yok) → claim gerekmez, eski davranış
+    }
+
+    {
+      final i = idx();
+      if (i < 0) {
+        if (claimedHere && queueJobId != null) await widget.printerService.releaseQueueJobClaim(queueJobId);
+        return true;
+      }
+      setState(() {
+        _retrying[i] = true;
+        _lastError[i] = null;
+        _retryAttempts[i] = (_retryAttempts[i] ?? 0) + 1;
+      });
+    }
 
     final ok = await widget.printerService.printKitchenReceiptToIp(
       ticket: widget.ticketInfo,
@@ -80,8 +225,8 @@ class _KitchenPrintRetryModalState extends State<KitchenPrintRetryModal> {
         ).catchError((_) => false);
       }
       // 18 May 2026: Sag ust badge'deki kuyruktan da dus — yoksa PrintQueueService
-      // arka planda ayni isi tekrar yazdirir (cift TCP retransmit).
-      final queueJobId = g['queue_job_id'] as int?;
+      // arka planda ayni isi tekrar yazdirir (cift TCP retransmit). (6 Eyl: claim zaten 'printing'
+      // yaptı; completed'a çevirir ve popup dinleyicisine yayınlar — _retrying guard'ı bizi atlar.)
       if (queueJobId != null) {
         await widget.printerService.markQueueJobCompleted(queueJobId);
       }
@@ -90,30 +235,32 @@ class _KitchenPrintRetryModalState extends State<KitchenPrintRetryModal> {
         details: {'ticket_id': widget.ticketId, 'job_id': jobId, 'queue_job_id': queueJobId, 'items': items.length},
       );
       if (!mounted) return true;
-      setState(() {
-        _groups.removeAt(idx);
-        _retrying.remove(idx);
-        _lastError.remove(idx);
-      });
+      _removeGroup(g);
       // Kalan grup yoksa modal kapansin
       if (_groups.isEmpty && mounted) {
         Navigator.of(context).pop(true);
       }
       return true;
     } else {
+      // 6 Eyl 2026: manuel basım başarısız → sahiplendiysek bırak, arka plan kuyruğu denemeye devam etsin.
+      if (claimedHere && queueJobId != null) {
+        await widget.printerService.releaseQueueJobClaim(queueJobId);
+      }
       if (!mounted) return false;
+      final i = idx();
+      if (i < 0) return false;
       setState(() {
-        _retrying[idx] = false;
-        _lastError[idx] = 'Yaziciya ulasilamadi';
+        _retrying[i] = false;
+        _lastError[i] = 'Yaziciya ulasilamadi';
         // 2 veya daha fazla deneme sonrasi hala fail ise yazici kontrol uyarisi goster
-        if ((_retryAttempts[idx] ?? 0) >= 2) {
+        if ((_retryAttempts[i] ?? 0) >= 2) {
           _showPrinterCheckHint = true;
         }
       });
       LogService().warning(
         LogType.error,
         'Mutfak fisi pop-up tekrar yazdirma BASARISIZ: $printerName',
-        details: {'ticket_id': widget.ticketId, 'job_id': jobId, 'attempt': _retryAttempts[idx]},
+        details: {'ticket_id': widget.ticketId, 'job_id': jobId, 'attempt': _retryAttempts[i]},
       );
       return false;
     }

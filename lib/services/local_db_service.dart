@@ -1849,6 +1849,13 @@ class LocalDbService {
       where: 'local_id = ? OR server_id = ?',
       whereArgs: [itemId, itemId],
     );
+    // 8 Eyl 2026 HIZLI SATIS: hedef masa hizli satis ise tasinan kalem TESLIM olur (backend moveItem ile ayni kural).
+    if (await isQuickSaleTable(targetTableId)) {
+      await db.rawUpdate(
+        'UPDATE local_ticket_items SET delivered_at = COALESCE(delivered_at, ?), delivered_by = COALESCE(delivered_by, ?) WHERE (local_id = ? OR server_id = ?)',
+        [DateTime.now().toIso8601String(), waiterId, itemId, itemId],
+      );
+    }
 
     // Kaynak + hedef ticket total'larını güncelle (taşınan item her ikisinin tutarını değiştirir).
     if (sourceLocalTicketId != null) await recalcTicketTotals(sourceLocalTicketId);
@@ -3941,6 +3948,14 @@ class LocalDbService {
     final localTicketId = item['local_ticket_id'] as int;
     final itemServerId = item['server_id'] as int?;
     final currentlyDelivered = item['delivered_at'] != null;
+    // 8 Eyl 2026 HIZLI SATIS (Mustafa): hizli adisyonda teslim GERI ALINMAZ (tezgah) -> no-op (backend ile ayni kural).
+    if (currentlyDelivered) {
+      final tk = await db.query('local_tickets', columns: ['table_id'], where: 'local_id = ?', whereArgs: [localTicketId], limit: 1);
+      final tid = tk.isNotEmpty ? tk.first['table_id'] : null;
+      if (tid != null && await isQuickSaleTable((tid as num).toInt())) {
+        return {'success': true, 'action': 'delivered', 'offline': true, 'locked': true};
+      }
+    }
     final now = DateTime.now().toIso8601String();
 
     // Toggle: teslim edildi <-> geri al

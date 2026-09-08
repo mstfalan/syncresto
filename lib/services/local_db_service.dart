@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import 'ikram_rules.dart';
 import 'log_service.dart';
 import 'print_queue_reprint_decision.dart'; // 6 Eyl 2026: 'printing' claim / stale sure
+import 'quick_sale_rules.dart'; // 8 Eyl 2026: HIZLI SATIS bayraklari + offline ticket_number kirpma
 
 /// 20 Ağu 2026 — SELF-HEAL sinyali: DB açıldı ama PRAGMA quick_check 'ok' dönmedi
 /// (sessiz sayfa-bozulması). `openDatabase` bir istisna atmadığı için recovery
@@ -120,7 +121,7 @@ class LocalDbService {
   Future<Database> _openDb(String path) async {
     return await openDatabase(
       path,
-      version: 20, // v20 (3 Agu 2026): IKRAM — cached_cancel_reasons + cached_ikram_reasons + local_ticket_items.is_ikram/ikram_reason
+      version: 21, // v21 (8 Eyl 2026): HIZLI SATIS — cached_sections/cached_tables.is_quick_sale (v20: IKRAM tablolari)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -485,6 +486,7 @@ class LocalDbService {
         current_total REAL,
         ticket_opened_at TEXT,
         opened_by_device TEXT,
+        is_quick_sale INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -497,6 +499,7 @@ class LocalDbService {
         color TEXT,
         table_count INTEGER DEFAULT 0,
         summary_printer_id INTEGER,
+        is_quick_sale INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -1011,6 +1014,23 @@ class LocalDbService {
       print('[LocalDb] v20 IKRAM tablolari/kolonlari eklendi');
     }
 
+    // v21 (8 Eyl 2026): HIZLI SATIS — panelde 'Hizli Satis' isaretli salon + salon adinda GIZLI masa.
+    // Bayraklar cache'e girer ki cevrimdisi buton/salon secimi/gizli masa bulma calissin.
+    // Additive + DEFAULT 0 -> eski satirlar 0 = normal (SQLite boolean yok, okuma QuickSaleRules.bayrak).
+    if (oldVersion < 21) {
+      for (final ddl in [
+        'ALTER TABLE cached_sections ADD COLUMN is_quick_sale INTEGER DEFAULT 0',
+        'ALTER TABLE cached_tables ADD COLUMN is_quick_sale INTEGER DEFAULT 0',
+      ]) {
+        try {
+          await db.execute(ddl);
+        } catch (e) {
+          print('[LocalDb] v21 adim zaten var: $e');
+        }
+      }
+      print('[LocalDb] v21 HIZLI SATIS bayraklari eklendi');
+    }
+
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
     // local_tickets: garson/salon adi. local_ticket_items: ekleyen/teslim eden garson, porsiyon,
     // odeme durumu, mutfak-gizle. Hepsi nullable/DEFAULT'lu additive -> sync_queue/FIFO etkilenmez.
@@ -1276,6 +1296,7 @@ class LocalDbService {
           'color': sec['color'],
           'table_count': sec['table_count'] ?? 0,
           'summary_printer_id': sec['summary_printer_id'], // v8: ozet fis yazicisi
+          'is_quick_sale': QuickSaleRules.bayrak(sec['is_quick_sale']) ? 1 : 0, // v21: hizli satis salonu
           'cached_at': now,
         });
       }
@@ -1322,6 +1343,7 @@ class LocalDbService {
           'current_total': _parseMoney(table['current_total']),
           'ticket_opened_at': table['ticket_opened_at']?.toString(),
           'opened_by_device': table['opened_by_device']?.toString(), // v14: masayı açan kasa
+          'is_quick_sale': QuickSaleRules.bayrak(table['is_quick_sale']) ? 1 : 0, // v21: gizli hizli-satis masasi
           'cached_at': now,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
@@ -1676,9 +1698,13 @@ class LocalDbService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
-    // Benzersiz ticket numarası: OFFLINE-{masa_no}-{UUID8}
+    // Benzersiz ticket numarası: OFFLINE-{masa}-{UUID8}
+    // 8 Eyl 2026 (Fable E1): sunucu ticket_number varchar(30). Masa parcasi ASCII+alfanumerik, en fazla
+    // 13 karakter (8+13+1+8=30). Uzun/Turkce masa adi (ornek hizli satis salonu 'Hızlı Satış Kasa 2')
+    // 30'u asinca create sync KALICI fail -> dead_letter -> ciro kaybi oluyordu. ticket_number hicbir
+    // yerde parse edilmez; sadece kimlik/goruntu. Kisa masa adlari ('5','12') BIREBIR ayni kalir.
     final uuid = const Uuid().v4().substring(0, 8).toUpperCase();
-    final ticketNumber = 'OFFLINE-$tableNumber-$uuid';
+    final ticketNumber = 'OFFLINE-${QuickSaleRules.offlineMasaAnahtari(tableNumber)}-$uuid';
 
     // Offline'da tüm yetkiler açık
     final offlinePermissions = jsonEncode({
@@ -4017,6 +4043,22 @@ class LocalDbService {
   /// (bu cihazin kendi acik self ticket'i YOK ama baska cihazdan yansiyan lan_origin='lan' VAR).
   /// true -> masa SALT-OKUNUR: garson uzerine YENI adisyon acmamali (cift kayit/ciro karismasi).
   /// Masayi ACAN cihaz backend'e sync eder; bu cihaz sadece gorur.
+  /// 8 Eyl 2026 (Fable E2, HIZLI SATIS): bu masada sunucuya HENUZ gitmemis close/void var mi?
+  /// Varsa sunucu masayi hala 'dolu' ve eski adisyonu 'acik' gosterir; hizli satis yolu sunucuya
+  /// sormadan DOGRUDAN offline create yapar (createLocalTicket priorClose zinciri: close1 -> create2).
+  /// Aksi halde odenmis adisyona yeni musterinin urunleri eklenirdi (ciro/odeme karismasi).
+  Future<bool> hasPendingCloseForTable(int tableId) async {
+    final db = await database;
+    final r = await db.rawQuery('''
+      SELECT sq.id FROM sync_queue sq
+        JOIN local_tickets lt ON lt.local_id = sq.local_id
+       WHERE sq.action IN ('close','void') AND sq.status IN ('pending','in_progress')
+         AND lt.table_id = ?
+       LIMIT 1
+    ''', [tableId]);
+    return r.isNotEmpty;
+  }
+
   Future<bool> hasLanOnlyOpenTicket(int tableId) async {
     final db = await database;
     final self = await db.query('local_tickets',

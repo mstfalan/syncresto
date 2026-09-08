@@ -32,6 +32,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
   bool _showGroupTitlesKitchen = true; // 10 Agu: mutfak fisinde gruplu varyant basliklari (DEFAULT ACIK)
   bool _showKitchenPrintTime = true; // 24 Agu: fiste 'Fis Basim' (baski ani) satiri (DEFAULT ACIK)
   List<String> _yazdirPrinterIds = []; // 24 Agu (P4): "Yazdir" butonu hedef yazicilari (server id)
+  bool _quickSaleEnabled = false; // 8 Eyl 2026: HIZLI SATIS butonu (perakende, DEFAULT KAPALI)
 
   // Varsayılan yazıcı türleri (ikon ve renk için)
   final Map<String, Map<String, dynamic>> _defaultTypes = {
@@ -71,6 +72,7 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
       _showGroupTitlesKitchen = prefs.getBool(StorageService.showGroupTitlesKitchenKey) ?? true; // DEFAULT ACIK
       _showKitchenPrintTime = prefs.getBool(StorageService.showKitchenPrintTimeKey) ?? true; // DEFAULT ACIK
       _yazdirPrinterIds = prefs.getStringList(StorageService.yazdirPrinterIdsKey) ?? <String>[]; // P4
+      _quickSaleEnabled = prefs.getBool(StorageService.quickSaleEnabledKey) ?? false; // 8 Eyl: DEFAULT KAPALI
     });
   }
 
@@ -108,6 +110,13 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(StorageService.showKitchenPrintTimeKey, value);
     if (mounted) setState(() => _showKitchenPrintTime = value);
+  }
+
+  // 8 Eyl 2026 (Mustafa): HIZLI SATIS butonu ac/kapa (DEFAULT KAPALI).
+  Future<void> _setQuickSaleEnabled(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(StorageService.quickSaleEnabledKey, value);
+    if (mounted) setState(() => _quickSaleEnabled = value);
   }
 
   // 24 Agu 2026 (P4): "Yazdir" hedef yazicisini ekle/cikar.
@@ -335,6 +344,20 @@ class _PrinterSettingsScreenState extends State<PrinterSettingsScreen> {
                   'ikisi net ayrılır. Kapalı: sadece Ürün Girişi yazar.'),
               value: _showKitchenPrintTime,
               onChanged: _setShowKitchenPrintTime,
+            ),
+            const Divider(height: 1),
+            // 8 Eyl 2026 (Mustafa): HIZLI SATIS butonu (perakende). DEFAULT KAPALI.
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              secondary: const Icon(Icons.bolt, color: Color(0xFFF59E0B)),
+              title: const Text('Hızlı Satış butonu (perakende)'),
+              subtitle: const Text(
+                  'Açık: salon sekmelerinin başında HIZLI SATIŞ butonu görünür. Masa açmadan satış '
+                  'yapılır; ödeme alınınca ekran kapanmaz, yeni müşteri için aynı ekran açık kalır. '
+                  'Panelde Restoran (POS) → Salonlar bölümünde bir salonu "Hızlı Satış" olarak '
+                  'işaretlemeniz gerekir (her kasa için ayrı salon önerilir). Kapalı: buton yok.'),
+              value: _quickSaleEnabled,
+              onChanged: _setQuickSaleEnabled,
             ),
             const Divider(height: 1),
             // 24 Agu 2026 (P4): "Yazdir" butonu hedef yazicilari (coklu). Bos = bugunku (kasa) yol.

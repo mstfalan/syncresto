@@ -43,6 +43,12 @@ class AddItemModal extends StatefulWidget {
   final Map<String, dynamic>? table;
   final Map<String, dynamic>? waiter;
   final Map<String, dynamic>? section;
+  /// 8 Eyl 2026 HIZLI SATIS: true ise odeme/iptal/tasima sonrasi modal KAPANMAZ, [onTicketDone]
+  /// cagrilir (QuickSaleHost ayni gizli masada yeni adisyon acip icerigi degistirir). Mutfaga
+  /// gonder de kapatmaz (ayni adisyon devam, kalemler tazelenir). Tek cikis X -> onClose.
+  /// false (varsayilan) -> bugunku davranis BIREBIR (her yerde widget.onClose).
+  final bool quickSale;
+  final void Function(String reason)? onTicketDone;
 
   const AddItemModal({
     super.key,
@@ -57,6 +63,8 @@ class AddItemModal extends StatefulWidget {
     this.table,
     this.waiter,
     this.section,
+    this.quickSale = false,
+    this.onTicketDone,
   });
 
   @override
@@ -3523,9 +3531,9 @@ class _AddItemModalState extends State<AddItemModal> {
           );
         }
         // Modal kapandiktan sonra ekrani da kapat — kullanici durumu gordu
-        if (mounted) widget.onClose();
+        if (mounted) _kitchenSentDone();
       } else {
-        if (mounted) widget.onClose();
+        if (mounted) _kitchenSentDone();
       }
     } catch (e, st) {
       _showError('Mutfağa gönderilemedi: $e');
@@ -3656,7 +3664,7 @@ class _AddItemModalState extends State<AddItemModal> {
         );
         _showSuccess('Hesap kapatıldı');
         widget.onItemAdded();
-        widget.onClose();
+        _finish('paid');
       } catch (e) {
         _showError('Hesap kapatılamadı: $e');
       }
@@ -3720,7 +3728,7 @@ class _AddItemModalState extends State<AddItemModal> {
         );
         _showSuccess('Hesap kapatıldı (çevrimdışı)');
         widget.onItemAdded();
-        widget.onClose();
+        _finish('paid');
       } catch (e) {
         _showError('Hesap kapatılamadı: $e');
       }
@@ -3744,7 +3752,7 @@ class _AddItemModalState extends State<AddItemModal> {
         );
         _showSuccess('Hesap kapatıldı');
         widget.onItemAdded();
-        widget.onClose();
+        _finish('paid');
       } else {
         _showError(result['error'] ?? 'Ödeme başarısız');
       }
@@ -3809,7 +3817,7 @@ class _AddItemModalState extends State<AddItemModal> {
 
       _showSuccess('Hesap kapatıldı');
       widget.onItemAdded();
-      widget.onClose();
+      _finish('paid');
     } catch (e) {
       _showError('Hesap kapatılamadı: $e');
     }
@@ -4004,6 +4012,28 @@ class _AddItemModalState extends State<AddItemModal> {
     if (mounted) widget.onClose();
   }
 
+  /// 8 Eyl 2026 HIZLI SATIS: adisyon bitti (paid/void/transfer). Hizli satista host'a devret
+  /// (ekran kapanmaz, yeni adisyon), normalde bugunku gibi kapat. quickSale=false -> BIREBIR
+  /// widget.onClose() (mounted kontrolu eklenmedi; cagiran yerler eskisi gibi).
+  void _finish(String reason) {
+    if (widget.quickSale && widget.onTicketDone != null) {
+      if (mounted) widget.onTicketDone!(reason);
+      return;
+    }
+    widget.onClose();
+  }
+
+  /// Mutfaga gonder tamamlandi: normalde modal kapanir; HIZLI SATISTA ekran ACIK kalir ve ayni
+  /// adisyon devam eder (Mustafa: 'ekran kapanmayacak'), kalemler tazelenir (printed rozetleri).
+  void _kitchenSentDone() {
+    if (!mounted) return;
+    if (widget.quickSale) {
+      _loadTicketItems();
+      return;
+    }
+    widget.onClose();
+  }
+
   Future<void> _printSummaryReceipt(String paymentMethod) async {
     print('[AddItemModal] _printSummaryReceipt: printerService=${widget.printerService != null}, section=${widget.section}');
     if (widget.printerService == null || widget.section == null) {
@@ -4088,7 +4118,7 @@ class _AddItemModalState extends State<AddItemModal> {
             // Tüm ürünler ödendi, adisyon kapanır - dialog ve modal kapanır
             Navigator.pop(ctx);
             widget.onItemAdded();
-            widget.onClose();
+            _finish('paid');
           } else {
             // Kısmi ödeme - dialog açık kalır, sadece arkadaki listeyi tazele
             widget.onItemAdded();
@@ -4289,7 +4319,7 @@ class _AddItemModalState extends State<AddItemModal> {
       );
       _showSuccess('Adisyon iptal edildi: $selectedReason');
       widget.onItemAdded();
-      widget.onClose();
+      _finish('void');
     } catch (e) {
       _showError('Adisyon iptal edilemedi: $e');
     }
@@ -4989,7 +5019,7 @@ class _AddItemModalState extends State<AddItemModal> {
           ? 'Adisyonlar birleştirildi: ${selectedTable['section_name']} - Masa ${selectedTable['table_number']}'
           : 'Masa değiştirildi: ${selectedTable['section_name']} - Masa ${selectedTable['table_number']}');
       widget.onItemAdded();
-      widget.onClose();
+      _finish('transfer');
     } catch (e) {
       _showError('Masa değiştirilemedi: $e');
     }

@@ -296,6 +296,19 @@ class StorageService {
     await _prefs.setBool(showGroupTitlesKitchenKey, value);
   }
 
+  // 8 Eyl 2026 (Mustafa): HIZLI SATIS butonu (perakende — masa acmadan satis). DEFAULT KAPALI.
+  // Acikken salon sekmelerinin BASINDA 'HIZLI SATIS' butonu gorunur; panelde 'Hizli Satis' isaretli
+  // salon(lar) gerekir. Odeme alininca ekran kapanmaz, ayni masada yeni adisyon acilir.
+  // Key PUBLIC — printer_settings (yazar) + tables_screen (okur) ayni prefs anahtarini paylasir.
+  static const String quickSaleEnabledKey = 'quick_sale_enabled';
+  Future<bool> getQuickSaleEnabled() async {
+    return _prefs.getBool(quickSaleEnabledKey) ?? false; // DEFAULT KAPALI
+  }
+
+  Future<void> setQuickSaleEnabled(bool value) async {
+    await _prefs.setBool(quickSaleEnabledKey, value);
+  }
+
   // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
   // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
   String getOrderTrackingSort() {

@@ -25,6 +25,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'order_tracking_screen.dart';
 import '../services/version_service.dart';
 import '../widgets/update_modal.dart';
+import '../services/quick_sale_rules.dart'; // 8 Eyl 2026: HIZLI SATIS
+import '../services/quick_sale_flow.dart';
+import '../widgets/quick_sale_host.dart';
 
 class TablesScreen extends StatefulWidget {
   final StorageService storageService;
@@ -75,6 +78,10 @@ class _TablesScreenState extends State<TablesScreen> {
     return raw[anahtar] == true;
   }
   List<dynamic> _tables = [];
+  // 8 Eyl 2026 HIZLI SATIS (Mustafa): ayar DEFAULT KAPALI; panelde 'Hizli Satis' isaretli salonlar
+  // normal sekmede ASLA gorunmez (ayar acik/kapali fark etmez), gizli masalari gridde ASLA gorunmez.
+  bool _quickSaleEnabled = false;
+  List<Map<String, dynamic>> _hizliSalonlar = [];
   bool _isLoading = true;
   int? _selectedSectionId;
   Timer? _clockTimer;
@@ -197,8 +204,12 @@ class _TablesScreenState extends State<TablesScreen> {
 
   Future<void> _loadSettings() async {
     final showImages = await widget.storageService.getShowProductImages();
+    final quickSale = await widget.storageService.getQuickSaleEnabled(); // 8 Eyl: HIZLI SATIS ayari
     if (mounted) {
-      setState(() => _showProductImages = showImages);
+      setState(() {
+        _showProductImages = showImages;
+        _quickSaleEnabled = quickSale;
+      });
     }
   }
 
@@ -582,13 +593,18 @@ class _TablesScreenState extends State<TablesScreen> {
           ? sections
           : sections.where((s) => _izinliIdler.contains(_safeInt(s['id']))).toList();
 
+      // 8 Eyl 2026 HIZLI SATIS: hizli salonlar sekmeden AYRILIR (garson salon kisiti yukarida
+      // uygulandi -> kisitli garson yalniz atandigi hizli salonu gorur, view_all_tables ust yetki).
+      final _hizli = QuickSaleRules.hizliSalonlar(_gorunur);
+      final _normal = QuickSaleRules.normalSalonlar(_gorunur);
       setState(() {
-        _sections = _gorunur;
+        _sections = _normal;
+        _hizliSalonlar = _hizli;
         _tables = tables;
         // Secili salon artik gorunmuyorsa ilk gorunur salona kay (bos ekran kalmasin).
-        final _hala = _gorunur.any((s) => _safeInt(s['id']) == _selectedSectionId);
-        if (_gorunur.isNotEmpty && (_selectedSectionId == null || !_hala)) {
-          _selectedSectionId = _safeInt(_gorunur[0]['id']);
+        final _hala = _normal.any((s) => _safeInt(s['id']) == _selectedSectionId);
+        if (_normal.isNotEmpty && (_selectedSectionId == null || !_hala)) {
+          _selectedSectionId = _safeInt(_normal[0]['id']);
         }
       });
 
@@ -718,7 +734,8 @@ class _TablesScreenState extends State<TablesScreen> {
   }
 
   List<dynamic> get _filteredTables {
-    final filtered = _tables.where((t) => t['section_id'] == _selectedSectionId).toList();
+    // 8 Eyl 2026: gizli hizli-satis masasi gridde/sayaclarda ASLA gorunmez.
+    final filtered = _tables.where((t) => t['section_id'] == _selectedSectionId && !QuickSaleRules.masaGizli(t)).toList();
     // Masa numarasına göre sırala
     filtered.sort((a, b) {
       final numA = int.tryParse(a['table_number']?.toString() ?? '0') ?? 0;
@@ -1316,6 +1333,7 @@ class _TablesScreenState extends State<TablesScreen> {
       ),
     ).then((_) {
       // Ayarlar değiştiğinde UI'ı güncelle
+      _loadSettings(); // 8 Eyl: HIZLI SATIS ayari degismis olabilir
       setState(() {});
     });
   }
@@ -1333,6 +1351,216 @@ class _TablesScreenState extends State<TablesScreen> {
     );
   }
 
+  // ==================== HIZLI SATIS (8 Eyl 2026) ====================
+  // Perakende: masa acmadan satis. Buton salon sekmelerinin BASINDA (ayar acikken). Tek hizli salon
+  // -> dogrudan; birden fazla -> pop-up ile salon sec. Salonun gizli masasinda BU kasanin acik adisyonu
+  // varsa devam, yoksa yeni adisyon. Akis QuickSaleHost icinde: odeme sonrasi ekran KAPANMAZ.
+  Widget _buildQuickSaleButton() {
+    final ozet = QuickSaleRules.acikOzet(_tables, _hizliSalonlar.map((s) => _safeInt(s['id']) ?? -1));
+    const amber = Color(0xFFF59E0B);
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: _openQuickSale,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 56, minWidth: 150),
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFEA580C)]),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: amber, width: 2),
+              boxShadow: [BoxShadow(color: amber.withValues(alpha: 0.35), blurRadius: 10, offset: const Offset(0, 4))],
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.bolt, color: Colors.white, size: 24),
+                const SizedBox(width: 6),
+                const Text('HIZLI SATIŞ',
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16, letterSpacing: 0.5)),
+                if (ozet.adet > 0) ...[
+                  const SizedBox(width: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+                    child: Text(
+                      ozet.adet == 1 ? '${ozet.tutar.toStringAsFixed(0)} TL' : '${ozet.adet} açık',
+                      style: const TextStyle(color: Color(0xFFB45309), fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _bilgiDialog(String baslik, String metin) async {
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(baslik),
+        content: Text(metin, style: const TextStyle(fontSize: 15)),
+        actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Tamam'))],
+      ),
+    );
+  }
+
+  Future<void> _openQuickSale() async {
+    if (!_yetkiVar('open_ticket')) {
+      _showError('Adisyon açma yetkiniz yok');
+      return;
+    }
+    if (_hizliSalonlar.isEmpty) {
+      await _loadData(silent: true);
+      if (!mounted) return;
+      if (_hizliSalonlar.isEmpty) {
+        await _bilgiDialog('Hızlı Satış salonu yok',
+            'Panelde Restoran (POS) → Salonlar bölümünde bir salonu "Hızlı Satış" olarak işaretleyin. '
+            'Salon adında gizli bir masa otomatik açılır; her kasa için ayrı salon önerilir. '
+            'Bu kasa çevrimdışıysa ayar ilk bağlantıda gelir.');
+        return;
+      }
+    }
+    Map<String, dynamic>? salon;
+    if (_hizliSalonlar.length == 1) {
+      salon = _hizliSalonlar.first;
+    } else {
+      salon = await _secHizliSalon();
+    }
+    if (salon == null || !mounted) return;
+    await _hizliSatisBaslat(salon);
+  }
+
+  /// Birden fazla hizli salon: pop-up ile sec (acik adisyon tutari rozetli).
+  Future<Map<String, dynamic>?> _secHizliSalon() async {
+    return showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.bolt, color: Color(0xFFF59E0B)),
+          SizedBox(width: 8),
+          Text('Hızlı Satış — salon seçin'),
+        ]),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: _hizliSalonlar.map((s) {
+              final sid = _safeInt(s['id']) ?? -1;
+              final ozet = QuickSaleRules.acikOzet(_tables, [sid]);
+              final color = _parseColor(s['color'] ?? '#F59E0B');
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 60,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).pop(s),
+                    style: ElevatedButton.styleFrom(backgroundColor: color, foregroundColor: Colors.white),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(s['name']?.toString() ?? '', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        if (ozet.adet > 0)
+                          Text('Açık: ${ozet.tutar.toStringAsFixed(0)} TL', style: const TextStyle(fontSize: 14)),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(null), child: const Text('Vazgeç'))],
+      ),
+    );
+  }
+
+  Future<void> _hizliSatisBaslat(Map<String, dynamic> salon) async {
+    final sectionId = _safeInt(salon['id']);
+    if (sectionId == null) return;
+    var masa = QuickSaleRules.gizliMasa(_tables, sectionId);
+    if (masa == null) {
+      await _loadData(silent: true);
+      if (!mounted) return;
+      masa = QuickSaleRules.gizliMasa(_tables, sectionId);
+    }
+    if (masa == null) {
+      await _bilgiDialog('Hızlı satış masası bulunamadı',
+          '"${salon['name']}" salonunun gizli masası bu kasaya henüz gelmedi. İnternet bağlantısını ve '
+          'paneldeki salon ayarını kontrol edin.');
+      return;
+    }
+    final flow = QuickSaleFlow(apiService: widget.apiService);
+    final waiterId = (widget.waiter['id'] as num).toInt();
+    QuickSaleOpenResult r;
+    try {
+      r = await flow.hazirla(table: masa, waiterId: waiterId, resume: true);
+    } catch (e) {
+      _showError('Hızlı satış açılamadı: $e');
+      return;
+    }
+    if (!mounted) return;
+    switch (r.kind) {
+      case 'ok':
+        break;
+      case 'other_device':
+        await _bilgiDialog('Başka kasada açık',
+            'Bu hızlı satış adisyonu ${r.deviceName ?? "başka"} kasasında açık. Hızlı satış adisyonu yalnız açan kasada devam eder; '
+            'her kasa için ayrı hızlı satış salonu kullanın.');
+        return;
+      case 'lan_only':
+        await _bilgiDialog('Başka kasada açık (LAN)',
+            'Bu masa ${r.deviceName ?? "başka"} kasasında açık. İşlem o kasadan yapılmalıdır.');
+        return;
+      case 'already_open':
+        await _loadData(silent: true);
+        if (!mounted) return;
+        await _bilgiDialog('Salon başka kasada kullanılıyor',
+            'Bu hızlı satış salonunda başka bir kasadan açılmış adisyon var. Liste yenilendi; her kasa için ayrı hızlı satış salonu kullanın.');
+        return;
+      case 'lan_denied':
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Bu masa başka kasada açık'), backgroundColor: Color(0xFFF59E0B)));
+        return;
+      default:
+        _showError(r.error ?? 'Hızlı satış açılamadı');
+        return;
+    }
+    _logService.logAction('Hizli satis acildi', details: {
+      'section_id': sectionId,
+      'table_id': masa['id'],
+      'ticket_id': r.ticketId,
+      'offline': r.offline,
+    });
+    final masaMap = masa;
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => QuickSaleHost(
+        apiService: widget.apiService,
+        printerService: widget.printerService,
+        waiter: widget.waiter,
+        section: salon,
+        table: masaMap,
+        showProductImages: _showProductImages,
+        initialTicketId: r.ticketId!,
+        flow: flow,
+        onExit: () {
+          Navigator.of(context).pop();
+          _loadData(silent: true);
+        },
+      ),
+    );
+    if (mounted) _loadData(silent: true);
+  }
+
   Widget _buildSectionTabs() {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1342,6 +1570,7 @@ class _TablesScreenState extends State<TablesScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 24),
         child: Row(
           children: [
+            if (_quickSaleEnabled) _buildQuickSaleButton(), // 8 Eyl 2026: salonlarin BASINDA
             ..._sections.map((section) {
               final sectionId = _safeInt(section['id']);
               final isSelected = sectionId == _selectedSectionId;
@@ -1491,7 +1720,7 @@ class _TablesScreenState extends State<TablesScreen> {
             Icon(Icons.table_restaurant, size: 64, color: Colors.grey[300]),
             const SizedBox(height: 16),
             Text(
-              'Bu salonda masa yok',
+              (_sections.isEmpty && _quickSaleEnabled) ? 'Salon yok — HIZLI SATIŞ butonunu kullanın' : 'Bu salonda masa yok',
               style: TextStyle(color: Colors.grey[500], fontSize: 18),
             ),
           ],

@@ -59,6 +59,9 @@ class ApiService {
       receiveTimeout: const Duration(seconds: 15),
       headers: {
         'Content-Type': 'application/json',
+        // 8 Eyl 2026 HIZLI SATIS (Fable Y2): sunucu (panel-direct/tables.js) hizli-satis salonunu ve
+        // gizli masayi YALNIZ bu header gelince doner -> eski POS surumleri + WebPOS hic gormez.
+        'X-POS-Quick-Sale': '1',
       },
     ));
 
@@ -476,10 +479,17 @@ class ApiService {
   // Tickets (Adisyonlar) - Offline destekli
   // =============================================
 
+  /// [forceOffline] (8 Eyl 2026, hizli satis / Fable E2): bu masada sunucuya gitmemis close/void
+  /// varken sunucuya SORMADAN yerel adisyon ac (createLocalTicket priorClose zinciri sirayi korur).
+  /// [offlineFallbackOn400] (Fable Y1): false ise sunucu 400 'zaten acik adisyon' dondugunde offline
+  /// create YAPMAZ, {'success':false,'already_open':true,...} doner (baska kasanin adisyonuna sessiz
+  /// merge onlenir). Varsayilanlar bugunku davranisin BIREBIR aynisi.
   Future<Map<String, dynamic>> openTicket({
     required int tableId,
     required int waiterId,
     int customerCount = 1,
+    bool forceOffline = false,
+    bool offlineFallbackOn400 = true,
   }) async {
     final lan = LanSyncService();
     if (lan.enabled) {
@@ -488,7 +498,7 @@ class ApiService {
         return {'success': false, 'lan_denied': true, 'error': 'Masa baska kasada acik'};
       }
     }
-    if (_connectivity.isOnline) {
+    if (_connectivity.isOnline && !forceOffline) {
       try {
         final response = await _dio.post('/api/pos/tickets/open', data: {
           'table_id': tableId,
@@ -506,6 +516,20 @@ class ApiService {
       } on DioException catch (e) {
         print('[API] Online openTicket basarisiz: ${e.message}');
         _logService.warning(LogType.action, 'Online masa acma basarisiz', details: {'table_id': tableId, 'error': e.message});
+        if (!offlineFallbackOn400 && e.response?.statusCode == 400) {
+          // Hizli satis: sunucu 'bu masada zaten acik adisyon var' dedi -> offline create ile
+          // baska kasanin adisyonuna merge OLMASIN. LAN kirasi alindiysa geri birak.
+          if (lan.enabled) {
+            try { await lan.releaseTable(tableId); } catch (_) {}
+          }
+          final data = e.response?.data;
+          return {
+            'success': false,
+            'already_open': true,
+            'error': (data is Map && data['error'] != null) ? data['error'].toString() : 'Bu masada zaten acik adisyon var',
+            'ticket_id': (data is Map) ? data['ticket_id'] : null,
+          };
+        }
       }
     }
 

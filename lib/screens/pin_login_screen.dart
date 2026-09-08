@@ -847,7 +847,7 @@ class _PinLoginScreenState extends State<PinLoginScreen>
             const SizedBox(height: 24),
 
             const Text(
-              'Garson Girişi',
+              'GİRİŞ', // 8 Eyl 2026 (Mustafa): 'Garson Girişi' degil, sadece GİRİŞ
               style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,

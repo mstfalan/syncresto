@@ -1977,8 +1977,10 @@ class LocalDbService {
     String? comboGroupName,
     String? comboPickName,
     String? extras,
+    bool autoDelivered = false, // 8 Eyl 2026 HIZLI SATIS
   }) async {
     final localId = await addTicketItem(
+      autoDelivered: autoDelivered,
       localTicketId: localTicketId,
       productId: productId,
       productName: productName,
@@ -2009,6 +2011,7 @@ class LocalDbService {
     String? comboGroupId,
     String? comboGroupName,
     String? comboPickName,
+    bool autoDelivered = false, // 8 Eyl 2026 HIZLI SATIS: kalem teslim edilmis dogar (masa takipte bekleyen gorunmez)
   }) async {
     final db = await database;
     final now = DateTime.now().toIso8601String();
@@ -2025,6 +2028,8 @@ class LocalDbService {
       'created_at': now,
       'synced': 0,
       'added_by': waiterId, // v11: ekleyen garson (garson performans raporu)
+      if (autoDelivered) 'delivered_at': now, // 8 Eyl 2026 HIZLI SATIS: tezgah satisi, dogrudan teslim
+      if (autoDelivered) 'delivered_by': waiterId,
       'portion': portion,
       'combo_group_id': comboGroupId,
       'combo_group_name': comboGroupName,
@@ -4047,6 +4052,14 @@ class LocalDbService {
   /// Varsa sunucu masayi hala 'dolu' ve eski adisyonu 'acik' gosterir; hizli satis yolu sunucuya
   /// sormadan DOGRUDAN offline create yapar (createLocalTicket priorClose zinciri: close1 -> create2).
   /// Aksi halde odenmis adisyona yeni musterinin urunleri eklenirdi (ciro/odeme karismasi).
+  /// 8 Eyl 2026 HIZLI SATIS: masa gizli hizli-satis masasi mi (cached_tables.is_quick_sale, 0/1).
+  Future<bool> isQuickSaleTable(int tableId) async {
+    final db = await database;
+    final r = await db.query('cached_tables', columns: ['is_quick_sale'], where: 'id = ?', whereArgs: [tableId], limit: 1);
+    if (r.isEmpty) return false;
+    return QuickSaleRules.bayrak(r.first['is_quick_sale']);
+  }
+
   Future<bool> hasPendingCloseForTable(int tableId) async {
     final db = await database;
     final r = await db.rawQuery('''

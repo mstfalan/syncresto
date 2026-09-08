@@ -1386,7 +1386,7 @@ class _TablesScreenState extends State<TablesScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
                     child: Text(
-                      ozet.adet == 1 ? '${ozet.tutar.toStringAsFixed(0)} TL' : '${ozet.adet} açık',
+                      ozet.adet == 1 ? (ozet.tutar > 0 ? '${ozet.tutar.toStringAsFixed(0)} TL' : 'Açık') : '${ozet.adet} açık',
                       style: const TextStyle(color: Color(0xFFB45309), fontSize: 14, fontWeight: FontWeight.bold),
                     ),
                   ),

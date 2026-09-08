@@ -774,8 +774,16 @@ class ApiService {
       );
     }
     final localTicketId = localTicket['local_id'] as int;
+    // 8 Eyl 2026 HIZLI SATIS: gizli masadaki adisyonun kalemi TESLIM EDILMIS dogar (online'da backend
+    // addItem ticket.is_quick_sale'den ayni kurali uygular; sync replay de oradan gecer -> tutarli).
+    bool autoDelivered = false;
+    try {
+      final tid = localTicket['table_id'];
+      if (tid != null) autoDelivered = await _localDb.isQuickSaleTable((tid as num).toInt());
+    } catch (_) {}
 
     final localItem = await _localDb.addLocalTicketItem(
+      autoDelivered: autoDelivered,
       localTicketId: localTicketId,
       productId: productId,
       productName: productName,

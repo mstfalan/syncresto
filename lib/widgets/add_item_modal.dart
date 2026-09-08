@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
+import '../services/quick_sale_rules.dart'; // 8 Eyl 2026: gizli hizli-satis masalari secicilerde gorunmez
 import '../services/ikram_rules.dart';
 import '../services/printer_service.dart';
 import '../services/log_service.dart';
@@ -4340,7 +4341,7 @@ class _AddItemModalState extends State<AddItemModal> {
     }
 
     try {
-      final tables = await widget.apiService.getTables();
+      final tables = QuickSaleRules.gorunurMasalar(await widget.apiService.getTables()); // 8 Eyl: gizli masa secilemez
       final candidateTables = (tables as List)
           .where((t) => (t['id'] as num).toInt() != widget.tableId)
           .toList();
@@ -4664,7 +4665,7 @@ class _AddItemModalState extends State<AddItemModal> {
       // 16 May 2026: Hem bos hem dolu masalari listele
       // - Bos masa secilirse → transfer
       // - Dolu masa secilirse → birlestirme onayi → backend ticket'lari birlestirir
-      final tables = await widget.apiService.getTables();
+      final tables = QuickSaleRules.gorunurMasalar(await widget.apiService.getTables()); // 8 Eyl: gizli masa secilemez
       final candidateTables = (tables as List)
           .where((t) => (t['id'] as num).toInt() != widget.tableId) // Mevcut masa haric
           .toList();

@@ -4051,7 +4051,8 @@ class LocalDbService {
     final db = await database;
     final r = await db.rawQuery('''
       SELECT sq.id FROM sync_queue sq
-        JOIN local_tickets lt ON lt.local_id = sq.local_id
+        JOIN local_tickets lt ON (lt.local_id = sq.local_id)
+                              OR (sq.server_id IS NOT NULL AND lt.server_id = sq.server_id)
        WHERE sq.action IN ('close','void') AND sq.status IN ('pending','in_progress')
          AND lt.table_id = ?
        LIMIT 1

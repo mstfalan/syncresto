@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../services/api_service.dart';
+import '../services/quick_sale_rules.dart'; // 8 Eyl 2026: gizli hizli-satis masasi sayilmaz
 import '../services/storage_service.dart';
 import '../services/printer_service.dart';
 import '../services/websocket_service.dart';
@@ -181,7 +182,7 @@ class _PinLoginScreenState extends State<PinLoginScreen>
   // Masa özeti — cached_tables'tan (offline'da da çalışır). Boş = occupied değil + adisyon yok.
   Future<void> _loadTableStats() async {
     try {
-      final tables = await LocalDbService().getCachedTables();
+      final tables = QuickSaleRules.gorunurMasalar(await LocalDbService().getCachedTables()); // 8 Eyl: gizli masa sayilmaz
       final total = tables.length;
       final empty = tables.where((t) =>
           t['status'] != 'occupied' && t['current_ticket_id'] == null).length;

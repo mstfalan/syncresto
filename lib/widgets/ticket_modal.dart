@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/api_service.dart';
+import '../services/quick_sale_rules.dart'; // 8 Eyl 2026: gizli hizli-satis masalari secicide gorunmez
 import '../services/printer_service.dart';
 import '../services/log_service.dart';
 import '../providers/theme_provider.dart';
@@ -963,7 +964,7 @@ class _TicketModalState extends State<TicketModal> {
     // Tum masalari getir (bos + dolu, mevcut haric)
     List<dynamic> candidateTables = [];
     try {
-      final tables = await widget.apiService.getTables();
+      final tables = QuickSaleRules.gorunurMasalar(await widget.apiService.getTables()); // 8 Eyl: gizli masa secilemez
       final currentTableId = _safeInt(widget.table['id']);
       candidateTables = tables.where((t) => _safeInt(t['id']) != currentTableId).toList();
     } catch (e) {

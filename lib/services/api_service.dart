@@ -582,6 +582,22 @@ class ApiService {
   }
 
   Future<Map<String, dynamic>?> getTableTicket(int tableId) async {
+    // 8 Eyl 2026 (Fable E-1/O-1, HIZLI SATIS): bu masada OFFLINE OLUSTURULMUS ve HENUZ sunucuya gitmemis
+    // (server_id NULL + create sync bekleyen) acik adisyon varsa ONU dondur. Sunucuya sorarsak ya bayat
+    // (kapanisi gitmemis) eski adisyon gelir ya 404 -> ekran yanlis adisyonu gosterir, kalem cift eklenir /
+    // yeni online adisyon acilip merge olur. Normal masalarda da ayni sinif acigi kapatir. Sync tamamlaninca
+    // server_id dolar -> bu dal atlanir, bugunku online akis aynen.
+    try {
+      final localOpen = await _localDb.getLocalTicketByTable(tableId);
+      if (localOpen != null && localOpen['status'] == 'open' && localOpen['server_id'] == null) {
+        final localId = (localOpen['local_id'] ?? localOpen['id']) as int;
+        if (await _localDb.hasPendingSyncForTicket(localId)) {
+          return _formatLocalTicket(localOpen);
+        }
+      }
+    } catch (e) {
+      print('[API] getTableTicket yerel-oncelik kontrolu atlandi: $e');
+    }
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.get('/api/pos/tickets/table/$tableId');

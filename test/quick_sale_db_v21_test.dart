@@ -62,12 +62,14 @@ const _semaSyncQueue = '''
     action TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     local_id INTEGER,
+    server_id INTEGER,
     status TEXT DEFAULT 'pending'
   )
 ''';
 const _semaLocalTickets = '''
   CREATE TABLE local_tickets (
     local_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
     table_id INTEGER NOT NULL,
     status TEXT DEFAULT 'open'
   )
@@ -77,7 +79,8 @@ const _semaLocalTickets = '''
 Future<bool> _hasPendingClose(Database db, int tableId) async {
   final r = await db.rawQuery('''
       SELECT sq.id FROM sync_queue sq
-        JOIN local_tickets lt ON lt.local_id = sq.local_id
+        JOIN local_tickets lt ON (lt.local_id = sq.local_id)
+                              OR (sq.server_id IS NOT NULL AND lt.server_id = sq.server_id)
        WHERE sq.action IN ('close','void') AND sq.status IN ('pending','in_progress')
          AND lt.table_id = ?
        LIMIT 1
@@ -163,6 +166,10 @@ void main() {
       final t4 = await db.insert('local_tickets', {'table_id': 14, 'status': 'open'});
       await db.insert('sync_queue', {'action': 'create', 'entity_type': 'ticket', 'local_id': t4, 'status': 'pending'});
       expect(await _hasPendingClose(db, 14), isFalse);
+      // Fable O-2: yerel ayna yokken enqueueServerTicketAction server_id ile close kuyruklar -> guard gormeli
+      await db.insert('local_tickets', {'server_id': 5005, 'table_id': 15, 'status': 'closed'});
+      await db.insert('sync_queue', {'action': 'close', 'entity_type': 'ticket', 'local_id': null, 'server_id': 5005, 'status': 'pending'});
+      expect(await _hasPendingClose(db, 15), isTrue);
       await db.close();
     });
   });

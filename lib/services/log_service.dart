@@ -212,14 +212,38 @@ class LogService {
     });
   }
 
+  /// Yerel saat + saat dilimi ofseti (ISO 8601). Dart yerel DateTime'i ofsetsiz yazar;
+  /// ofset olmadan "kasanin saati mi yanlis, biz mi gec aldik" ayirt edilemiyordu.
+  /// Panel TR saatini kullanir [[feedback_rapor_turkiye_saati_kati_kural]] — deger YEREL kalir.
+  static String _isoOfsetli(DateTime t) {
+    if (t.isUtc) return t.toIso8601String(); // zaten 'Z' tasir; ofset eklenirse bozulur
+    final o = t.timeZoneOffset;
+    final isaret = o.isNegative ? '-' : '+';
+    final mutlak = o.abs();
+    final sa = mutlak.inHours.toString().padLeft(2, '0');
+    final dk = (mutlak.inMinutes % 60).toString().padLeft(2, '0');
+    return '${t.toIso8601String()}$isaret$sa:$dk';
+  }
+
   /// Log ekle
   void _addLog(LogLevel level, LogType type, String message,
       {Map<String, dynamic>? details}) {
+    // 19 Eyl 2026: sunucu pos_logs'a KENDI saatini (NOW()) yaziyor, istemci timestamp'i
+    // INSERT'e girmiyor. Cevrimdisi birikip toplu giden kayitlar panelde yeniden-baglanma
+    // saniyesine yigiliyor, "kasa ne zaman dustu" gorunmuyordu. Gercek saat details icinde
+    // TASINIR (additive: mevcut alanlar aynen kalir, zaten 'istemci_saati' varsa dokunulmaz).
+    final zaman = DateTime.now();
+    final Map<String, dynamic> detay = {
+      ...?details,
+      if (details == null || !details.containsKey('istemci_saati'))
+        'istemci_saati': _isoOfsetli(zaman), // ofsetli: saati yanlis ayarli kasa fark edilir
+    };
     final entry = LogEntry(
       level: level,
       type: type,
       message: message,
-      details: details,
+      details: detay,
+      timestamp: zaman,
       userId: _currentUserId,
       userName: _currentUserName,
     );
@@ -405,8 +429,13 @@ class LogService {
 
       if (logsJson != null) {
         final logs = jsonDecode(logsJson) as List;
+        // 🔴 Fable (tur 3 / B1): diskten gelenler listenin BASINA eklenir. Eskiden sona
+        // ekleniyordu; hem panelde sira bozuluyordu (init ONCESI olusan "Baglanti baslangic"
+        // ve cokme kayitlari onceki oturumun loglarindan once gidiyordu) hem de tavan budamasi
+        // (_capPendingLogs bastan siler) once ONLARI atiyordu. Disktekiler daha ESKI: basa.
+        final yuklenen = <LogEntry>[];
         for (final log in logs) {
-          _pendingLogs.add(LogEntry(
+          yuklenen.add(LogEntry(
             level: LogLevel.values.firstWhere(
               (l) => l.name == log['log_level'],
               orElse: () => LogLevel.info,
@@ -419,7 +448,8 @@ class LogService {
             timestamp: DateTime.tryParse(log['timestamp'] ?? '') ?? DateTime.now(),
           ));
         }
-        debugPrint('[LogService] ${_pendingLogs.length} bekleyen log yüklendi');
+        _pendingLogs.insertAll(0, yuklenen);
+        debugPrint('[LogService] ${yuklenen.length} bekleyen log yüklendi');
 
         // 1 Haz 2026 (v1.5.6) — Load sonrası cap + legacy temizlik
         _capPendingLogs();

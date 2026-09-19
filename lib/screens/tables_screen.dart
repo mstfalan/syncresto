@@ -667,7 +667,10 @@ class _TablesScreenState extends State<TablesScreen> {
         // skip_pos_print=true (icecek/su gibi) ürünler hic basilmadigi icin
         // unprinted sayilmaz; aksi halde masa bos yere kirmizi badge alir.
         final isPrinted = r['printed'] == 1 || r['printed'] == true;
-        final isSkip = r['skip_pos_print'] == true;
+        // 19 Eyl 2026: SQLite 0/1 (int) doner, backend true/false; '1'/'t' bicimleri de
+        // gelebilir. Tek bicime bakmak cevrimdisi kolda sahte rozet uretiyordu.
+        final skipRaw = r['skip_pos_print'];
+        final isSkip = skipRaw == true || skipRaw == 1 || skipRaw == '1' || skipRaw == 'true' || skipRaw == 't';
         if (!isPrinted && !isSkip && tid != null) {
           unprintedTables.add(tid);
         }

@@ -23,6 +23,49 @@ class _CorruptSignal implements Exception {
 }
 
 class LocalDbService {
+  /// skip_pos_print'in TUM bicimlerini tek kurala indirger: SQLite int 0/1, backend bool,
+  /// bazi uclarda metin ('1'/'true'/'t'). Dart'ta `1 == true` FALSE oldugu icin tek bicime
+  /// bakmak sahte rozet/yanlis atlama uretiyordu (19 Eyl 2026).
+  /// v22 gecisi (19 Eyl 2026) — AYRI ve TEST EDILEBILIR. `_onUpgrade`'in acik
+  /// transaction'i icinde calisir: firlatirsa sqflite geri alir, surum 21'de kalir.
+  /// Idempotent: iki kez cagrilabilir.
+  static Future<void> migrasyonV22(DatabaseExecutor db) async {
+    try {
+      await db.execute('ALTER TABLE cached_products ADD COLUMN skip_pos_print INTEGER DEFAULT 0');
+    } catch (e) {
+      print('[LocalDb] v22 adim zaten var: $e');
+    }
+    // 🔴 Fable: catch HER hatayi yutuyordu. Kolon gercekten eklenemediyse (disk dolu vb.)
+    // user_version=22 yine yazilir -> cacheProducts her sync'te "no such column" ile patlar
+    // VE getUnprintedLocalItems ayni hatayla duser = o kasada CEVRIMDISI MUTFAK FISI HIC
+    // CIKMAZ. Kolonu dogrula; yoksa firlat -> sqflite yukseltme transaction'ini geri alir,
+    // surum 21'de kalir, sonraki acilista tekrar denenir (veri kaybi yok).
+    final bilgi = await db.rawQuery('PRAGMA table_info(cached_products)');
+    final kolonVar = bilgi.any((k) => (k['name'] ?? '').toString() == 'skip_pos_print');
+    if (!kolonVar) {
+      throw StateError('v22: cached_products.skip_pos_print eklenemedi (surum 21 korunuyor)');
+    }
+    // 🔴 Fable (tur 3 / B6): i.skip_pos_print v11'de DOGRULAMASIZ ALTER ile eklenmisti
+    // (try/catch her hatayi yutuyor). O ALTER sessizce basarisiz olduysa hem mutfak fisi
+    // sorgusu hem masa takip sorgusu "no such column" ile duser. Burada ONARILIR.
+    final kalemBilgi = await db.rawQuery('PRAGMA table_info(local_ticket_items)');
+    final kalemKolonVar =
+        kalemBilgi.any((k) => (k['name'] ?? '').toString() == 'skip_pos_print');
+    if (!kalemKolonVar) {
+      await db.execute(
+          'ALTER TABLE local_ticket_items ADD COLUMN skip_pos_print INTEGER DEFAULT 0');
+      final tekrar = await db.rawQuery('PRAGMA table_info(local_ticket_items)');
+      if (!tekrar.any((k) => (k['name'] ?? '').toString() == 'skip_pos_print')) {
+        throw StateError('v22: local_ticket_items.skip_pos_print onarilamadi (surum 21 korunuyor)');
+      }
+      print('[LocalDb] v22 eksik v11 kolonu onarildi: local_ticket_items.skip_pos_print');
+    }
+    print('[LocalDb] v22 cached_products.skip_pos_print eklendi');
+  }
+
+  static int skipBayragi(Object? ham) =>
+      (ham == 1 || ham == true || ham == '1' || ham == 'true' || ham == 't') ? 1 : 0;
+
   static Database? _database;
   // 12 Haz 2026: sabitlenmiş mutlak DB yolu (cache) — _resolveDbPath() doldurur
   static String? _dbPath;
@@ -121,7 +164,7 @@ class LocalDbService {
   Future<Database> _openDb(String path) async {
     return await openDatabase(
       path,
-      version: 21, // v21 (8 Eyl 2026): HIZLI SATIS — cached_sections/cached_tables.is_quick_sale (v20: IKRAM tablolari)
+      version: 22, // v22 (19 Eyl 2026): cached_products.skip_pos_print (cevrimdisi mutfak fisi online kolla parite)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -469,6 +512,7 @@ class LocalDbService {
         variants_required_pos INTEGER DEFAULT 0,
         ingredients TEXT,
         hide_from_tracking INTEGER DEFAULT 0,
+        skip_pos_print INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -1031,6 +1075,14 @@ class LocalDbService {
       print('[LocalDb] v21 HIZLI SATIS bayraklari eklendi');
     }
 
+    // v22 (19 Eyl 2026): cevrimdisi mutfak fisi ONLINE kolla parite. Backend printKitchen
+    // URUNUN skip_pos_print'ine bakip kalemi SESSIZCE atliyor; cevrimdisi kolda bu bilgi
+    // yoktu (cached_products'ta kolon yok, offline eklenen kalemde 0). Additive + DEFAULT 0
+    // -> backend alani dondurmese bile bugunku davranis (atlama yok) korunur.
+    if (oldVersion < 22) {
+      await migrasyonV22(db);
+    }
+
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
     // local_tickets: garson/salon adi. local_ticket_items: ekleyen/teslim eden garson, porsiyon,
     // odeme durumu, mutfak-gizle. Hepsi nullable/DEFAULT'lu additive -> sync_queue/FIFO etkilenmez.
@@ -1199,6 +1251,9 @@ class LocalDbService {
               ? prod['ingredients']
               : (prod['ingredients'] != null ? jsonEncode(prod['ingredients']) : null),
           'printer_id': prod['printer_id'], // v8: offline mutfak fisi icin
+          // v22: urun bazli "POS'ta basma" bayragi (icecek vb.) — backend products ucu
+          // COALESCE(p.skip_pos_print,false) olarak donduruyor. Yoksa 0 = bugunku davranis.
+          'skip_pos_print': (prod['skip_pos_print'] == true || prod['skip_pos_print'] == 1) ? 1 : 0,
           // v12 COMBO: backend combo_* dondurunce offline hesap icin sakla. Bool->0/1, sayilar oldugu gibi.
           // Backend dondurmese hepsi NULL -> combo_enabled 0 -> combo KAPALI (guvenli).
           'combo_enabled': (prod['combo_enabled'] == true || prod['combo_enabled'] == 1) ? 1 : 0,
@@ -1453,11 +1508,20 @@ class LocalDbService {
     // 9 Agu 2026 (Fable): mutfak fisi kalem garson+saati icin created_at + added_by_name de cek
     // (getByTable ile ayni desen: COALESCE(cached_waiters, mirror-kolon)). Yoksa offline mutfak
     // fisinde saat cikmaz, garson gonderi garsonuna duserdi.
+    // 19 Eyl 2026 — CEVRIMDISI FISTE SECIM KAYBI FIX (Green Chef masa 33, adisyon 260919-7263):
+    // extras SELECT'te YOKTU -> item['extras'] null -> _generateKitchenReceipt'in
+    // `ex is List` kontrolu dusuyor -> "Urun Secimi: + SYC" satiri SESSIZCE basilmiyordu
+    // (not basiliyordu, cunku notes seciliyordu). combo_group_* de yoktu -> offline'da
+    // combo gruplamasi hic calismiyordu. skip_pos_print online kolun atlama kurali icin.
     final r = await db.rawQuery('''
       SELECT i.local_id, i.server_id, i.product_id, i.product_name, i.quantity,
              i.unit_price, i.notes, i.portion, i.created_at,
+             i.extras,
+             COALESCE(p.skip_pos_print, i.skip_pos_print, 0) AS skip_pos_print,
+             i.combo_group_id, i.combo_group_name, i.combo_pick_name,
              COALESCE(wa.name, i.added_by_name) AS added_by_name,
-             p.printer_id
+             p.printer_id,
+             p.id AS cached_product_id
         FROM local_ticket_items i
    LEFT JOIN cached_products p ON p.id = i.product_id
    LEFT JOIN cached_waiters wa ON wa.id = i.added_by
@@ -1466,7 +1530,18 @@ class LocalDbService {
          AND (i.status IS NULL OR i.status != 'cancelled')
        ORDER BY i.created_at
     ''', [localTicketId]);
-    return r;
+    // sqflite satirlari SALT OKUNUR: once kopyala (yoksa UnsupportedError -> printKitchen
+    // catch'ine duser -> CEVRIMDISI HIC FIS CIKMAZ). extras SQLite'ta JSON METIN durur;
+    // fis ureticisi List bekler. Bozuk/bos veri -> [] -> eski davranis (hicbir sey basilmaz).
+    return r.map((row) {
+      final m = Map<String, dynamic>.from(row);
+      try {
+        m['extras'] = _decodeJsonList(m['extras']);
+      } catch (_) {
+        m.remove('extras'); // en kotu durumda BUGUNKU davranis
+      }
+      return m;
+    }).toList();
   }
 
   // Lokal ticket bilgisi + masa + salon — offline mutfak fisi icin
@@ -1919,6 +1994,13 @@ class LocalDbService {
     final processedItems = items.map((item) {
       final newItem = Map<String, dynamic>.from(item);
       newItem['id'] = newItem['local_id'];
+      // 19 Eyl 2026 — ayni kok: SELECT i.* extras'i JSON METIN getiriyor, musteri fisi
+      // ureticisi (_generateTicketReceipt) `ex is List` ariyordu -> secimler dusuyordu.
+      try {
+        newItem['extras'] = _decodeJsonList(newItem['extras']);
+      } catch (_) {
+        newItem.remove('extras');
+      }
       return newItem;
     }).toList();
 
@@ -2023,10 +2105,25 @@ class LocalDbService {
     final db = await database;
     final now = DateTime.now().toIso8601String();
 
+    // 🔴 Fable (tur 3 / B5): kalem, eklendigi andaki URUN bayragini tasir. Ayna (upsertServerTicket)
+    // gelmeden urun onbellekten duserse (stok disi/pasif -> cacheProducts tam degistirme) masa
+    // takip yine sahte "MUTFAGA GITMEDI" rozeti veriyordu. Onbellek yoksa 0 = bugunku davranis.
+    int kalemSkipPosPrint = 0;
+    try {
+      final u = await db.query('cached_products',
+          columns: ['skip_pos_print'], where: 'id = ?', whereArgs: [productId], limit: 1);
+      if (u.isNotEmpty) {
+        kalemSkipPosPrint = LocalDbService.skipBayragi(u.first['skip_pos_print']);
+      }
+    } catch (_) {
+      kalemSkipPosPrint = 0; // kolon/kayit yoksa eski davranis
+    }
+
     final localItemId = await db.insert('local_ticket_items', {
       'local_ticket_id': localTicketId,
       'product_id': productId,
       'product_name': productName,
+      'skip_pos_print': kalemSkipPosPrint,
       'quantity': quantity,
       'unit_price': unitPrice,
       'notes': notes,
@@ -3907,6 +4004,13 @@ class LocalDbService {
         COALESCE(wd.name, i.delivered_by_name) AS delivered_by_name,
         COALESCE(wa.name, i.added_by_name) AS added_by_name,
         i.created_at AS item_created_at,
+        -- 19 Eyl 2026: online pending-orders ile eslenik. skip_pos_print=1 urunler (icecek/su gibi
+        -- mutfak yazicisina HIC gitmeyenler) "mutfaga gitmedi" sayilmamali; kolon gelmeyince masa
+        -- kartinda sahte KIRMIZI rozet kaliyordu. Kaynak: v22 cached_products.skip_pos_print.
+        -- Kardes sorgu getUnprintedLocalItems ile AYNI oncelik: urun bayragi > kalem bayragi > 0.
+        -- Urun pasif/stok-disi olup cache'ten dustugunde (cacheProducts tam-degistirme yapar) kalem
+        -- uzerindeki ayna bayrak devreye girer; yoksa icecek masasi yine sahte rozet alirdi.
+        COALESCE(cp.skip_pos_print, i.skip_pos_print, 0) AS skip_pos_print,
         i.printed AS printed
       FROM local_tickets t
       JOIN local_ticket_items i ON i.local_ticket_id = t.local_id

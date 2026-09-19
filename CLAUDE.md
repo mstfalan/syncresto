@@ -549,7 +549,7 @@ git push origin main
 ### PostgreSQL Bağlantıları
 ```bash
 # SyncResto RDS (Tenant yönetimi)
-PGPASSWORD='ZNTo3ppGS0GfzdJUItiAox' psql -h babystorybook-db.postgres.database.azure.com -U babystorybookadmin -d postgres
+PGPASSWORD='<KEYCHAIN:SyncResto-RDS-babystorybookadmin>' psql -h babystorybook-db.postgres.database.azure.com -U babystorybookadmin -d postgres
 
 # GreenChef RDS (Restoran verileri)
 PGPASSWORD='GyZbQ0HKvPWr4Td73KSAbm9L' psql -h greenchef-db.c7g6a8ycwaij.eu-central-1.rds.amazonaws.com -U greenchef -d greenchef

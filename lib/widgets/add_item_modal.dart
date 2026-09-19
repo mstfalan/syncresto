@@ -3493,6 +3493,7 @@ class _AddItemModalState extends State<AddItemModal> {
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
@@ -3505,6 +3506,7 @@ class _AddItemModalState extends State<AddItemModal> {
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
           },
         );
@@ -3962,6 +3964,7 @@ class _AddItemModalState extends State<AddItemModal> {
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
@@ -3975,6 +3978,7 @@ class _AddItemModalState extends State<AddItemModal> {
           details: {
             'ticket_id': widget.ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
           },
         );

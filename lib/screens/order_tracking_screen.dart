@@ -34,6 +34,9 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
   Map<int, TableBundle> _byTable = {};
   int? _selectedTableId;
   bool _isLoading = true;
+  // 19 Eyl 2026: cevrimdisi liste sorgusu duserse EKRANI BOSALTMA — son bilinen satirlar
+  // kalir, ustte uyari seridi cikar. Bos liste garsona "siparis yok" dedirtiyordu.
+  DateTime? _listeHatasiAn;
   String? _sectionFilter; // null = tum salonlar
   // Sidebar siralama (kalici tercih StorageService'te). Default: 'time_asc' (en eski bekleyen ustte = en acil)
   // Degerler: 'time_asc', 'time_desc', 'table_asc', 'table_desc'
@@ -114,6 +117,12 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
     try {
       final rows = await widget.apiService.getPendingOrders();
       if (!mounted) return;
+      // Seridi hemen kaldirma: kesintili hata/basari (sync yazimi kilit tutuyorsa)
+      // 2 sn'de bir yanip sonmesin. Son hatanin uzerinden 8 sn gecmeden kalkmaz.
+      if (_listeHatasiAn != null &&
+          DateTime.now().difference(_listeHatasiAn!).inSeconds >= 8) {
+        _listeHatasiAn = null;
+      }
       final merged = _groupMerge(rows);
       setState(() {
         _raw = rows;
@@ -131,6 +140,13 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
         }
         _selectedTableId ??= _byTable.keys.isEmpty ? null : _byTable.keys.first;
         _isLoading = false;
+      });
+    } on CevrimdisiListeHatasi {
+      // Lokal sorgu dustu (ornegin kilit/IO). Mevcut _raw/_byTable KORUNUR; yalnizca
+      // yukleme gostergesi kapanir ve uyari seridi gorunur.
+      if (mounted) setState(() {
+        _isLoading = false;
+        _listeHatasiAn = DateTime.now();
       });
     } finally {
       _isFetching = false;
@@ -468,13 +484,16 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
           ),
         ],
       ),
-      body: _isLoading && _raw.isEmpty
+      body: Column(children: [
+        if (_listeHatasiAn != null) _listeUyariSeridi(),
+        Expanded(
+          child: _isLoading && _raw.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : allBundlesWithPending.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text(
-                    'Acik adisyon yok',
-                    style: TextStyle(fontSize: 18, color: Colors.grey),
+                    _listeHatasiAn != null ? 'Liste alinamadi' : 'Acik adisyon yok',
+                    style: const TextStyle(fontSize: 18, color: Colors.grey),
                   ),
                 )
               : Row(children: [
@@ -516,6 +535,40 @@ class _OrderTrackingScreenState extends State<OrderTrackingScreen> {
                           ),
                   ),
                 ]),
+        ),
+      ]),
+    );
+  }
+
+  /// Cevrimdisi liste tazelenemedi: satirlar SON BILINEN haliyle duruyor demektir.
+  /// Sessizce bos gostermek yerine bunu acikca soyleriz (garson "siparis yok" sanmasin).
+  Widget _listeUyariSeridi() {
+    // Hic veri yokken "son bilinen durum" demek yanlis olur.
+    final veriVar = _raw.isNotEmpty;
+    return Container(
+      width: double.infinity,
+      color: Colors.orange.shade100,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(children: [
+        Icon(Icons.warning_amber_rounded, size: 18, color: Colors.orange.shade900),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            veriVar
+                ? 'Liste tazelenemedi — ekrandaki kalemler son bilinen durumu gosteriyor.'
+                : 'Liste alinamadi — bekleyen siparis OLMADIGI anlamina GELMEZ.',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Colors.orange.shade900,
+            ),
+          ),
+        ),
+        TextButton(
+          onPressed: _isFetching ? null : () => _load(),
+          child: Text(_isFetching ? 'Yenileniyor…' : 'Tekrar dene'),
+        ),
+      ]),
     );
   }
 

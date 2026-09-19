@@ -441,6 +441,7 @@ class _TicketModalState extends State<TicketModal> {
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
             'failed_count': failCount,
           },
@@ -451,6 +452,7 @@ class _TicketModalState extends State<TicketModal> {
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
           },
         );
@@ -842,6 +844,7 @@ class _TicketModalState extends State<TicketModal> {
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
             'failed_count': failCount,
             'failed_printers': failReasons,
@@ -853,6 +856,7 @@ class _TicketModalState extends State<TicketModal> {
           details: {
             'ticket_id': ticketId,
             'table': tableLabel,
+            'offline': result['offline'] == true,   // 19 Eyl 2026: fis cevrimdisi mi basildi (teshis)
             'printed_count': successCount,
           },
         );

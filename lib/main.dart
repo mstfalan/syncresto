@@ -22,6 +22,8 @@ import 'services/sync_service.dart';
 import 'services/image_cache_service.dart';
 import 'services/local_db_service.dart';
 import 'services/version_service.dart';
+import 'services/crash_beacon.dart';
+import 'widgets/pos_error_screen.dart';
 import 'providers/theme_provider.dart';
 import 'screens/setup_screen.dart';
 import 'screens/initial_sync_screen.dart';
@@ -79,8 +81,11 @@ Future<void> _selfHealCorruptCache() async {
     final keys = prefs.getKeys().toList();
     int healed = 0;
     for (final key in keys) {
-      final value = prefs.getString(key);
-      if (value == null) continue;
+      // 14 Eyl denetimi: getString() bool/List anahtarda TypeError atıyor ve dış catch onu yutup
+      // DÖNGÜYÜ KESİYORDU — tarama fiilen hiç çalışmamış. get() cast yapmaz.
+      final raw = prefs.get(key);
+      if (raw is! String) continue;
+      final value = raw;
       // Sadece JSON-vari (obje veya dizi) basliyorsa kontrol et
       final trimmed = value.trim();
       if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue;
@@ -106,11 +111,28 @@ void main() {
   // main() ilk satirinda, herhangi bir Dio/HttpClient olusmadan ONCE.
   HttpOverrides.global = _syncRestoOverrides;
 
+  // 14 Eyl 2026: runApp'e gelinemeden patlarsa (zone gövdesi ölür) ekranda HİÇBİR ŞEY olmaz =
+  // bomboş pencere. Bayrak ile zone kancasında onarım ekranını kendimiz çiziyoruz.
+  var appStarted = false;
+  Zone? appZone;
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    appZone = Zone.current;
+
+    // 14 Eyl 2026 (Green Chef gri ekran): build hatasında gri kutu yerine onarım ekranı; her yakalanmayan
+    // hata sunucuya KİMLİKSİZ çökme sinyali olarak gider (X-API-Key şart değil) → Telegram'a mağaza adıyla düşer.
+    ErrorWidget.builder = (FlutterErrorDetails d) => PosErrorScreen(details: d);
+    final prevOnError = FlutterError.onError;
+    FlutterError.onError = (FlutterErrorDetails d) {
+      prevOnError?.call(d);
+      // d.silent: framework'un 'bunu gostermeye gerek yok' dedigi hatalar (ornegin bazi layout
+      // taşmaları) 3'luk raporlama butcesini yemesin.
+      if (!d.silent) CrashBeacon.send(stage: 'flutter', error: d.exception, stack: d.stack);
+    };
 
     // 19 May 2026: CA bundle'i asset'ten yukle (Cloudflare cert dogrulamasi icin)
     // WidgetsFlutterBinding.ensureInitialized() SONRASI olmali (rootBundle hazir)
+    CrashBeacon.setStage('ca-bundle');
     await _syncRestoOverrides.loadCaBundle().timeout(
       const Duration(seconds: 5),
       onTimeout: () {
@@ -119,6 +141,7 @@ void main() {
     );
 
     // 7 May 2026: Bozuk cache'leri ilk acilista temizle (FormatException onlemi)
+    CrashBeacon.setStage('cache-selfheal');
     await _selfHealCorruptCache().timeout(
       const Duration(seconds: 3),
       onTimeout: () {
@@ -138,6 +161,7 @@ void main() {
     // throw edebilir → runZonedGuarded zone'u ölür → runApp HİÇ çağrılmaz =
     // BEYAZ EKRAN (K4'ün kapatmaya çalıştığı sınıf). try/catch ile yakala: hata
     // olsa da AKIŞ DEVAM ETSİN, runApp çalışsın.
+    CrashBeacon.setStage('storage-init');
     try {
       await storageService.init().timeout(
         const Duration(seconds: 5),
@@ -157,7 +181,27 @@ void main() {
           stackTrace: st,
         );
       } catch (_) {}
+      // Ayar dosyası şüpheli → onarım ekranının yıkıcı düğmeleri ancak bu durumda gösterilir.
+      CrashBeacon.prefsSuspect = true;
     }
+    CrashBeacon.setStage('services-init');
+    if (storageService.recoveredCorruptPrefs) {
+      // 14 Eyl 2026 (Green Chef gri ekran): bozuk shared_preferences.json kenara alındı, prefs yeniden kuruldu.
+      CrashBeacon.prefsSuspect = true;
+      // İKİ kanal: yetkili log (anahtar kurtulduysa) + KİMLİKSİZ çökme sinyali. İkincisi şart: anahtar
+      // kurtarılamadıysa LogService hiç başlatılmaz ve olay sunucuya HİÇ ulaşmaz (bu olayın kendisi buydu).
+      try {
+        LogService().warning(LogType.general,
+            'Ayar dosyasi bozuktu, kendi kendine onarildi: ${storageService.recoveryNote}');
+      } catch (_) {}
+      unawaited(CrashBeacon.report(
+        stage: 'prefs-recovered',
+        message: 'Ayar dosyasi bozuktu, kendi kendine onarildi: ${storageService.recoveryNote}',
+      ));
+    }
+    // Önceki oturumda ağ yokken gönderilemeyen çökme raporları. GECİKMELİ: elektrik kesintisinden
+    // sonra modem ~30-60 sn'de açılır; açılışta hemen denemek 5 raporu da boşa harcardı.
+    unawaited(Future<void>.delayed(const Duration(seconds: 45), CrashBeacon.flushSpool));
 
     final apiService = ApiService();
     final printerService = PrinterService();
@@ -573,6 +617,7 @@ void main() {
   // (api.hasApiKey guard), InitialSync sonrası key set olunca devreye girer.
   unawaited(webposPrintService.start());
 
+    CrashBeacon.setStage('run-app');
     runApp(
       ChangeNotifierProvider.value(
         value: themeProvider,
@@ -586,8 +631,25 @@ void main() {
         ),
       ),
     );
+    appStarted = true;
+    // İlk kare çizildi = uygulama ayakta. Ayar şüphesi bayrağı burada DÜŞER; sonraki alakasız
+    // hatalarda onarım/kapat düğmeleri gösterilmez (denetim bulgusu: bayrak yapışkandı).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      CrashBeacon.prefsSuspect = false;
+    });
   }, (error, stack) {
     // 7 May 2026: runZonedGuarded — yakalanmayan exception app'i oldurmesin
+    CrashBeacon.send(stage: 'zone', error: error, stack: stack);
+    if (!appStarted) {
+      // runApp'e hiç gelinemedi → boş pencere yerine onarım ekranı (kasiyer ne olduğunu görsün).
+      appStarted = true;
+      try {
+        // Uygulamanın zone'unda çiz: kanca kök zone'da koşuyor, doğrudan runApp çağırmak
+        // 'Zone mismatch' bildirimi üretip gerçek hatayı gölgeliyordu.
+        (appZone ?? Zone.current).run(() =>
+            runApp(PosErrorScreen(details: FlutterErrorDetails(exception: error, stack: stack), fatal: true)));
+      } catch (_) {}
+    }
     if (kDebugMode) {
       print('[FATAL] Yakalanmayan hata: $error');
       print(stack);

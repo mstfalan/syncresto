@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'log_service.dart';
 
 class ConnectivityService {
   static final ConnectivityService _instance = ConnectivityService._internal();
@@ -51,6 +52,9 @@ class ConnectivityService {
     // İlk NIC durumunu kontrol et
     final result = await _connectivity.checkConnectivity();
     _updateNicStatus(result, notify: false);
+    try {
+      _baslangicDurumunuLogla();
+    } catch (_) {}
 
     // NIC değişikliklerini dinle
     _connectivity.onConnectivityChanged.listen((r) => _updateNicStatus(r, notify: true));
@@ -125,12 +129,99 @@ class ConnectivityService {
     }
   }
 
+  // 19 Eyl 2026: baglanti gecisleri POS loglarina yazilir. Mutfak fisi teshisi icin:
+  // fis logunda 'offline: true' varsa kasa o anda gercekten cevrimdisi miydi, buradan dogrulanir.
+  // pos_logs'u doldurmamak icin kararsiz baglantida (10 dk'da 6+ gecis) 10 dk'da TEK uyari yazilir.
+  DateTime? _sonGecisAn;
+  final List<DateTime> _sonGecisler = [];
+  DateTime? _kararsizUyariAn;
+  int _bastirilanGecis = 0; // sel bastirmasi sirasinda YUTULAN gecis sayisi (teshis kor kalmasin)
+
+  /// Acilis durumu: gecis olmadigi icin _gecisiLogla calismaz; kasa sabah modem kapali
+  /// acildiginda "hic OFFLINE logu yok" durumu olusuyordu. Uygulama basina TEK kayit.
+  void _baslangicDurumunuLogla() {
+    _sonGecisAn = DateTime.now();
+    LogService().logAction(
+      'Baglanti baslangic: ${_nicOnline ? "ONLINE" : "OFFLINE"}',
+      details: {
+        'durum': _nicOnline ? 'online' : 'offline',
+        'nic': _nicOnline,
+        // 🔴 Fable (tur 3 / B3): 'backend' diger kayitlarda BOOL; buraya metin yazmak ileride
+        // details->>'backend' tipli sorgusunu patlatir. Olculmedigini AYRI alan soyler.
+        'backend': null,
+        'backend_olculdu': false, // ilk probe sonucu durumu degistirirse ayri kayit duser
+      },
+    );
+  }
+
+  void _gecisiLogla(bool nowOnline) {
+    final simdi = DateTime.now();
+    final fark = _sonGecisAn == null ? null : simdi.difference(_sonGecisAn!);
+    // Saat geriye sicrarsa (RTC/NTP duzeltmesi) negatif sure raporlama.
+    final oncekiSn = (fark == null || fark.isNegative) ? null : fark.inSeconds;
+    _sonGecisAn = simdi;
+    _sonGecisler.add(simdi);
+    _sonGecisler.removeWhere((t) {
+      final d = simdi.difference(t);
+      return d.isNegative || d.inMinutes >= 10;
+    });
+
+    if (_sonGecisler.length >= 6) {
+      // Kararsiz ag: her gecisi yazmak pos_logs'u doldurur. Gecisler SAYILIR, 10 dk'da
+      // tek uyari ile toplu raporlanir — "kac kere gidip geldi" bilgisi kaybolmaz.
+      // 🔴 Fable (tur 3 / B4): saat GERIYE sicrarsa (NTP/RTC) _kararsizUyariAn gelecekte kalir
+      // ve fark negatif olur; "< 10" negatifte de dogru oldugu icin bastirma sicrama kadar
+      // uzardi (1 saat geri = 70 dk sessizlik). Negatif farki suresi DOLMUS say.
+      if (_kararsizUyariAn != null) {
+        final gecen = simdi.difference(_kararsizUyariAn!);
+        if (!gecen.isNegative && gecen.inMinutes < 10) {
+          _bastirilanGecis++;
+          return;
+        }
+      }
+      _kararsizUyariAn = simdi;
+      LogService().warning(
+        LogType.general,
+        'Baglanti kararsiz: son 10 dk icinde ${_sonGecisler.length} gecis',
+        details: {
+          'durum': nowOnline ? 'online' : 'offline',
+          // gecis_sayisi = son 10 dk PENCERESI; yazilmayan_gecis = son uyaridan beri yutulan.
+          // Ikisi ORTUSUR, TOPLANMAZ.
+          'gecis_sayisi': _sonGecisler.length,
+          'yazilmayan_gecis': _bastirilanGecis,
+          'nic': _nicOnline,
+          'backend': _backendReachable,
+          if (oncekiSn != null) 'onceki_durum_sn': oncekiSn,
+        },
+      );
+      _bastirilanGecis = 0;
+      return;
+    }
+
+    LogService().logAction(
+      'Baglanti ${nowOnline ? "ONLINE" : "OFFLINE"}',
+      details: {
+        'durum': nowOnline ? 'online' : 'offline',
+        'nic': _nicOnline,
+        'backend': _backendReachable,
+        if (oncekiSn != null) 'onceki_durum_sn': oncekiSn,
+        // Sel bastirmasi bittikten sonraki ILK normal kayit yutulanlari da soyler.
+        if (_bastirilanGecis > 0) 'yazilmayan_gecis': _bastirilanGecis,
+      },
+    );
+    _bastirilanGecis = 0;
+  }
+
   void _emitIfChanged(bool wasOnline, bool notify) {
     final nowOnline = isOnline;
     if (wasOnline != nowOnline && notify) {
       _connectionController.add(nowOnline);
       print('[Connectivity] Status changed: ${nowOnline ? "ONLINE" : "OFFLINE"} '
           '(nic=$_nicOnline, backend=$_backendReachable)');
+      // Log ASLA akisi bozmasin (LogService diske/bellege yazar, ag beklemez).
+      try {
+        _gecisiLogla(nowOnline);
+      } catch (_) {}
     }
   }
 

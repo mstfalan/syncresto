@@ -15,6 +15,15 @@ import 'lan_sync_service.dart';
 import 'log_service.dart';
 import 'websocket_service.dart';
 
+/// Cevrimdisi masa takip sorgusu duserse firlatilir. Cagiran ekran son bilinen listeyi
+/// KORUR (bos liste = "siparis yok" yanilgisi) ve kullaniciya uyari gosterir.
+class CevrimdisiListeHatasi implements Exception {
+  final Object neden;
+  CevrimdisiListeHatasi(this.neden);
+  @override
+  String toString() => 'CevrimdisiListeHatasi: $neden';
+}
+
 class ApiService {
   static const String defaultBaseUrl = 'https://api.syncresto.com';
 
@@ -1741,16 +1750,60 @@ class ApiService {
   // =============================================
 
   // Tum acik adisyonlarin acik item'larini tek sorguda getir
+  // 🔴 Fable (tur 5): kalici hatada 2 sn'lik poll her turda ~3 KB'lik sqflite hatasi (SQL metni
+  // dahil) logluyordu -> 1000'lik kuyruk 30 dk'da yalnizca bu hatayla dolup cevrimdisi birikmis
+  // cokme/sync kayitlarini DUSURUYORDU. Ayni hata en fazla 5 dk'da bir yazilir; sorun bitince
+  // bayrak sifirlanir, YENI kesinti tekrar loglanir.
+  DateTime? _listeHataLogAn;
+  static const Duration _listeHataLogAraligi = Duration(minutes: 5);
+
+  void _listeHatasiniLogla(Object e) {
+    final simdi = DateTime.now();
+    final gecen = _listeHataLogAn == null ? null : simdi.difference(_listeHataLogAn!);
+    if (gecen != null && !gecen.isNegative && gecen < _listeHataLogAraligi) return;
+    _listeHataLogAn = simdi;
+    final metin = e.toString();
+    _logService.error(
+      LogType.error,
+      'Cevrimdisi masa takip sorgusu basarisiz',
+      details: {
+        // Ham sqflite hatasi SQL'in tamamini tasiyor; kirpilir (kuyruk ve 413 koruma).
+        'hata': metin.length > 300 ? '${metin.substring(0, 300)}…' : metin,
+        if (gecen != null) 'onceki_kayittan_sn': gecen.inSeconds,
+      },
+    );
+  }
+
   Future<List<dynamic>> getPendingOrders() async {
     // v11: offline'da mirror'lanan item'lardan doldur (eskiden boş liste dönüyordu).
-    if (!_connectivity.isOnline) return await _localDb.getPendingOrdersOffline();
+    // 🔴 Fable (19 Eyl / B6): lokal sorgu FIRLATIRSA (ör. eski kurulumda eksik kolon) hata
+    // cagirana kadar cikiyor; masa takip ekraninin catch'i olmadigi icin spinner KILITLENIYOR.
+    // Bos liste + error log: ekran acilir, sorun panelde gorunur.
+    if (!_connectivity.isOnline) return await _pendingOrdersOfflineGuvenli();
     try {
       final response = await _dio.get('/api/pos/tickets/pending-orders');
       return (response.data['rows'] as List?) ?? [];
     } on DioException catch (_) {
-      return await _localDb.getPendingOrdersOffline(); // fake-online kurtarma
-    } catch (_) {
-      return [];
+      return await _pendingOrdersOfflineGuvenli(); // fake-online kurtarma
+    } catch (e) {
+      // 🔴 Fable (tur 5): Dio DISI hata (ornegin bicim/tip) da sessizce bos liste donuyordu —
+      // ekran "siparis yok" gosterirdi. Ayni tipli hata: son bilinen liste korunur.
+      _listeHatasiniLogla(e);
+      throw CevrimdisiListeHatasi(e);
+    }
+  }
+
+  Future<List<dynamic>> _pendingOrdersOfflineGuvenli() async {
+    try {
+      final r = await _localDb.getPendingOrdersOffline();
+      _listeHataLogAn = null; // sorgu calisiyor: sonraki kesinti yeniden loglanabilsin
+      return r;
+    } catch (e) {
+      // 🔴 Fable (tur 4): bos liste DONDURMEK gecici bir kilit/IO hatasinda masa takip
+      // ekranini "siparis yok" gosteriyordu — garson bekleyen kalemleri GORMEZ. Tipli hata
+      // firlatilir: ekran son bilinen listeyi korur ve uyari seridi gosterir.
+      _listeHatasiniLogla(e);
+      throw CevrimdisiListeHatasi(e);
     }
   }
 
@@ -2139,14 +2192,51 @@ class ApiService {
     }
 
     // Yazici gruplari olustur
+    // 19 Eyl 2026 — ONLINE KOLLA PARITE (Mustafa karari): backend printers.js printKitchen
+    //   (a) URUNUN skip_pos_print=true oldugu kalemi SESSIZCE atlar (icecek vb.) — bayrak
+    //       v22'den beri cached_products'ta; sorgu COALESCE(urun, kalem, 0) okur,
+    //   (b) yazicisi ATANMAMIS (printer_id NULL) kalemi atlar ve unassigned_items ile bildirir.
+    // Cevrimdisi kol ikisini de yapmiyordu: 19 Eyl'de Didi x2 + Ayran (yazicisiz/skip) KASA
+    // yazicisina "mutfak fisi" olarak cikti. Artik ayni kural burada da uygulanir.
+    // ⚠️ AYRIM: printer_id VAR ama yazici onbellekte yoksa (IP cozulemedi) kalem ATILMAZ —
+    // bu bizim cache eksigimiz, urun ayari degil; eski davranis (varsayilan yaziciya dusme)
+    // korunur, yoksa sessiz fis kaybi olur (6 Tem 2026 offline fix Adim 4).
+    final List<Map<String, dynamic>> unassignedItems = [];
     final Map<String, Map<String, dynamic>> printerGroups = {};
     for (final item in unprinted) {
+      final skipPos = item['skip_pos_print'];
+      if (skipPos == true || skipPos == 1) continue; // (a) sessizce atla
       final printerId = item['printer_id'] as int?;
-      final groupKey = printerId != null ? printerId.toString() : 'default';
+      if (printerId == null) {
+        // 🔴 Fable: pasif/stoksuz urun ONBELLEGE HIC GIRMIYOR (products ucu yalniz aktif+stokta
+        // olani dondurur) -> p.printer_id NULL gelir ama urun "yazicisiz" DEGILDIR; backend o
+        // urunu kendi yazicisina basar. Ayirt et: urun onbellekte yoksa ESKI davranis
+        // (varsayilan yaziciya bas), yalnizca onbellekteki urunun yazicisi yoksa atla.
+        if (item['cached_product_id'] == null) {
+          final key = 'default';
+          if (!printerGroups.containsKey(key)) {
+            printerGroups[key] = {
+              'printer_id': null,
+              'printer_name': 'Varsayilan',
+              'printer_ip': null,
+              'printer_port': 9100,
+              'items': <Map<String, dynamic>>[],
+              'type': 'kitchen',
+            };
+          }
+          (printerGroups[key]!['items'] as List).add(item);
+          continue;
+        }
+        unassignedItems.add({
+          'id': item['server_id'] ?? item['local_id'],
+          'product_name': item['product_name'],
+        });
+        continue; // (b) yazicisiz urun basilmaz, garsona uyari gider
+      }
+      final groupKey = printerId.toString();
       if (!printerGroups.containsKey(groupKey)) {
-        Map<String, dynamic>? printer = printerId != null
-            ? await _localDb.getCachedPrinterById(printerId)
-            : null;
+        final Map<String, dynamic>? printer =
+            await _localDb.getCachedPrinterById(printerId);
         printerGroups[groupKey] = {
           'printer_id': printerId,
           'printer_name': printer?['name'] ?? 'Varsayilan',
@@ -2178,6 +2268,7 @@ class ApiService {
       'success': true,
       'offline': true,
       'items': unprinted,
+      'unassigned_items': unassignedItems, // online kolla ayni alan adi (turuncu uyari)
       'ticket': {
         'ticket_number': ticketRow['ticket_number'],
         'table_number': ticketRow['table_number'],

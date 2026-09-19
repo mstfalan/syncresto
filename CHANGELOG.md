@@ -1,5 +1,24 @@
 # SyncResto POS - Changelog & Yapılanlar
 
+## v1.7.6+68 (19 Eylül 2026)
+
+### Bug Fix — Çevrimdışı mutfak fişinde ÜRÜN SEÇİMİ kayboluyordu (kritik)
+- Seçimler (`extras`) online jsonb dizi, çevrimdışı JSON **metin** olarak saklanıyor; fiş üreticisi yalnız dizi biçimini tanıdığı için çevrimdışı basılan mutfak fişinde seçim satırları sessizce düşüyordu. Artık iki biçim de basılıyor (bozuk veri fişi düşürmez). Seçimi olmayan kalemde fiş çıktısı **bayt bayt aynı**.
+- Çevrimdışı mutfak kolu online kolla parite: `skip_pos_print` ürünü sessizce atlanır, yazıcısı atanmamış ürün "yazıcısız" uyarısına düşer (önceden varsayılan yazıcıya basıyordu), combo grupları çevrimdışı da gruplanır.
+- SQLite **v22**: `cached_products.skip_pos_print` + v11'de sessizce atlanmış olabilen `local_ticket_items.skip_pos_print` onarımı (doğrulamalı; başarısız olursa sürüm 21'de kalır, veri kaybı yok).
+
+### Bug Fix — Masa kartında sahte "MUTFAĞA GİTMEDİ" rozeti
+- Çevrimdışı masa takip sorgusu `skip_pos_print` okumuyordu; içecek/su gibi mutfağa hiç gitmeyen ürünler masaya kırmızı rozet taktırıyordu.
+- Masa takip ekranı, lokal sorgu düşerse artık **boşalmıyor**: son bilinen liste kalır + "Liste tazelenemedi" uyarı şeridi (önceden "sipariş yok" gibi görünüyordu).
+
+### Bug Fix — Gri ekran / açılmayan kasa (14 Eylül sahada)
+- Bozuk `shared_preferences.json` (elektrik kesintisi) karantinaya alınıp yeniden kuruluyor; ayarlar yedekten geri geliyor, uygulama hiçbir durumda gri kalmıyor.
+- `runApp` öncesi çökmede boş pencere yerine **onarım ekranı**; yakalanmayan hatalar kimliksiz çökme sinyali olarak sunucuya gidiyor.
+
+### Teşhis
+- Mutfak fişi loglarında `offline` bayrağı; bağlantı ONLINE/OFFLINE geçişleri POS loglarına (kararsız ağda sel koruması); her logda istemci saati (saat dilimi ofsetiyle).
+
+
 ## v1.4.4+36 (16 May 2026)
 
 ### Yeni Özellikler

@@ -14,11 +14,50 @@ class StorageService {
   static const String _waiterDataKey = 'waiter_data';
   static const String _showProductImagesKey = 'show_product_images';
 
-  late SharedPreferences _prefs;
+  /// 14 Eyl 2026 denetimi: `late` idi. init() 5 sn timeout'a düşerse (AV taraması, soğuk disk)
+  /// alan ATANMADAN kalıyor ve ilk build'deki `getApiKey()` LateInitializationError fırlatıp
+  /// GRİ EKRAN üretiyordu. Artık nullable: okuyucular null görür, uygulama Setup ekranıyla açılır.
+  SharedPreferences? _prefsOrNull;
+  SharedPreferences get _prefs => _prefsOrNull ?? (throw StateError('prefs hazır değil'));
+  bool get hazir => _prefsOrNull != null;
   File? _backupFile;
 
+  /// 14 Eyl 2026 (Green Chef gri ekran): shared_preferences.json bozulunca (elektrik kesintisi → dosya
+  /// sıfırlarla dolar, "FormatException: Unexpected character (at character 1)") getInstance() fırlatıyor,
+  /// _prefs hiç kurulmuyor, ilk ekran build'de LateInitializationError → GRİ EKRAN. Artık: bozuk dosya
+  /// `.corrupt-<ts>` olarak kenara alınır, prefs yeniden kurulur (API key/URL pos_settings.json yedeğinden
+  /// geri gelir); o da olmazsa bellek-içi prefs ile açılır (Setup ekranı). Uygulama HİÇBİR durumda gri kalmaz.
+  bool recoveredCorruptPrefs = false;
+  String? recoveryNote;
+
   Future<void> init() async {
-    _prefs = await SharedPreferences.getInstance();
+    try {
+      _prefsOrNull = await SharedPreferences.getInstance();
+    } catch (e) {
+      recoveryNote = 'prefs okunamadı: ${e.toString().split('\n').first}';
+      final moved = await quarantineCorruptPrefsFile();
+      try {
+        _prefsOrNull = await SharedPreferences.getInstance();
+        recoveredCorruptPrefs = true;
+        recoveryNote = '$recoveryNote → bozuk dosya kenara alındı (${moved ?? 'dosya bulunamadı'}), prefs yeniden kuruldu';
+      } catch (e2) {
+        // Son çare: bellek-içi prefs — uygulama açılır, yedekten API key/URL gelir, kalıcı olmayan ayarlar Setup'ta tekrar girilir.
+        // ignore: invalid_use_of_visible_for_testing_member — bilinçli: bellek-içi prefs son çare (uygulama gri/beyaz kalmasın)
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        _prefsOrNull = await SharedPreferences.getInstance();
+        recoveredCorruptPrefs = true;
+        recoveryNote = '$recoveryNote → yeniden kurulamadı (${e2.toString().split('\n').first}), bellek-içi prefs ile açıldı';
+      }
+      if (kDebugMode) print('[Storage] $recoveryNote');
+    }
+
+    // 14 Eyl denetimi: shared_preferences.json 0 BYTE ise eklenti hata FIRLATMAZ, sessizce boş
+    // harita döndürür (kaynak: shared_preferences_windows _readFromFile). O yüzden yukarıdaki
+    // catch hiç çalışmaz. Boş prefs + dolu yedek = sessiz ayar kaybı → kurtarma bayrağını biz kaldırırız.
+    if (_prefsOrNull != null && _prefsOrNull!.getKeys().isEmpty) {
+      recoveredCorruptPrefs = true;
+      recoveryNote = 'ayar dosyasi BOS dondu (0-byte/bozuk icerik) — yedekten kurtariliyor';
+    }
 
     // Dosya bazlı yedek — URL + API key (key obfuscate edilir, duz metin degil).
     try {
@@ -36,7 +75,9 @@ class StorageService {
             await _prefs.setString(_backendUrlKey, backup[_backendUrlKey]);
           }
           if (getApiKey() == null && backup[_apiKeyKey] != null) {
-            await _prefs.setString(_apiKeyKey, _deobfuscate(backup[_apiKeyKey]));
+            final cozulen = _deobfuscate(backup[_apiKeyKey]);
+            // Biçim doğrulaması: bozuk çözme sonucu base64 çöpü anahtar diye yazılıyordu → her istek 401.
+            if (cozulen.startsWith('SR_')) await _prefs.setString(_apiKeyKey, cozulen);
             if (backup[_apiKeyNameKey] != null) {
               await _prefs.setString(_apiKeyNameKey, backup[_apiKeyNameKey]);
             }
@@ -45,6 +86,25 @@ class StorageService {
           if (getLanTenantSecret() == null && backup[_lanSecretKey] != null) {
             await _prefs.setString(_lanSecretKey, _deobfuscate(backup[_lanSecretKey]));
           }
+          // Yazıcı ayarları + kiracı kimliği geri gelsin (yoksa fiş basılmaz / tenant koruması susar).
+          final yazici = backup['yazici'];
+          if (yazici is Map) {
+            for (final e in yazici.entries) {
+              final k = e.key.toString();
+              if (_prefsOrNull?.getString(k) == null && e.value != null) {
+                await _prefs.setString(k, e.value.toString());
+              }
+            }
+          }
+          if (backup[yazdirPrinterIdsKey] is List && (_prefsOrNull?.getStringList(yazdirPrinterIdsKey) ?? const []).isEmpty) {
+            await _prefs.setStringList(yazdirPrinterIdsKey, List<String>.from(backup[yazdirPrinterIdsKey]));
+          }
+          if (getTenantHash() == null && backup[_tenantHashKey] != null) {
+            await _prefs.setString(_tenantHashKey, backup[_tenantHashKey].toString());
+          }
+          if (getDeviceDisplayName() == null && backup[_deviceDisplayNameKey] != null) {
+            await _prefs.setString(_deviceDisplayNameKey, backup[_deviceDisplayNameKey].toString());
+          }
         }
       }
     } catch (e) {
@@ -52,10 +112,46 @@ class StorageService {
     }
   }
 
+  /// Windows/Linux: shared_preferences.json {ApplicationSupport} altındadır; bozuksa `.corrupt-<ts>` adıyla kenara alır
+  /// (silmez: forensik). macOS/iOS/Android'de dosya yok (NSUserDefaults/SharedPreferences XML) → null.
+  /// Ayar dosyası GERÇEKTEN okunabiliyor mu? Onarım düğmesi sağlam dosyayı silmesin diye
+  /// karantinadan ÖNCE sorulur (dosya yoksa "okunabilir" sayılır: silinecek bir şey yok).
+  static Future<bool> prefsOkunabilir() async {
+    try {
+      if (!(Platform.isWindows || Platform.isLinux)) return true;
+      final dir = await getApplicationSupportDirectory();
+      final f = File('${dir.path}${Platform.pathSeparator}shared_preferences.json');
+      if (!await f.exists()) return true;
+      final icerik = await f.readAsString();
+      if (icerik.trim().isEmpty) return false;       // 0-byte = bozuk
+      return jsonDecode(icerik) is Map;
+    } catch (_) {
+      return false;   // parse edilemiyor = bozuk
+    }
+  }
+
+  static Future<String?> quarantineCorruptPrefsFile() async {
+    try {
+      if (!(Platform.isWindows || Platform.isLinux)) return null;
+      final dir = await getApplicationSupportDirectory();
+      final f = File('${dir.path}${Platform.pathSeparator}shared_preferences.json');
+      if (!await f.exists()) return null;
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-').split('.').first;
+      final target = '${f.path}.corrupt-$ts';
+      await f.rename(target);
+      // Yalnız dosya adı döner: tam yol Windows kullanıcı adını taşır (KVKK) ve bu değer
+      // recoveryNote üzerinden sunucuya/Telegram'a gidiyordu.
+      return target.split(Platform.pathSeparator).last;
+    } catch (e) {
+      if (kDebugMode) print('[Storage] bozuk prefs kenara alınamadı: $e');
+      return null;
+    }
+  }
+
   /// URL bilgilerini dosyaya yedekle (API key YAZILMAZ)
   static const String _hmacSecret = 'SyncRestoPOS_Backup_Integrity';
 
-  String _generateHmac(String data) {
+  static String _generateHmac(String data) {
     final key = utf8.encode(_hmacSecret);
     final bytes = utf8.encode(data);
     return Hmac(sha256, key).convert(bytes).toString();
@@ -66,9 +162,21 @@ class StorageService {
     try {
       final key = getApiKey();
       final lanSecret = getLanTenantSecret();
+      // 14 Eyl denetimi: yedek yalnız URL+anahtar taşıyordu. prefs bozulunca YAZICI ayarları
+      // gidiyordu → kasa fişi/web sipariş fişi sessizce basılmıyordu ("fiş akışı bozulamaz").
+      final yaziciAyarlari = <String, String>{};
+      for (final k in <String>['printers_multi', 'printer_settings', 'printer_beep_ips']) {
+        final v = _prefsOrNull?.getString(k);
+        if (v != null) yaziciAyarlari[k] = v;
+      }
+      final yazdirHedef = _prefsOrNull?.getStringList(yazdirPrinterIdsKey);
       final data = {
         _apiUrlKey: getApiUrl(),
         _backendUrlKey: getBackendUrl(),
+        if (getTenantHash() != null) _tenantHashKey: getTenantHash(),
+        if (getDeviceDisplayName() != null) _deviceDisplayNameKey: getDeviceDisplayName(),
+        if (yaziciAyarlari.isNotEmpty) 'yazici': yaziciAyarlari,
+        if (yazdirHedef != null && yazdirHedef.isNotEmpty) yazdirPrinterIdsKey: yazdirHedef,
         // API key obfuscate (duz metin degil). Yeni key girilince _saveBackup cagrilir -> yedek guncellenir.
         if (key != null) _apiKeyKey: _obfuscate(key),
         if (getApiKeyName() != null) _apiKeyNameKey: getApiKeyName(),
@@ -80,9 +188,12 @@ class StorageService {
       // Atomik yaz: temp'e yaz + flush + rename (yedek sert-kapanmada bozulmasin).
       final tmp = File('${_backupFile!.path}.tmp');
       final raf = await tmp.open(mode: FileMode.write);
-      await raf.writeString(payload);
-      await raf.flush();
-      await raf.close();
+      try {
+        await raf.writeString(payload);
+        await raf.flush();
+      } finally {
+        await raf.close(); // disk dolu/AV kilidi durumunda handle sızmasın
+      }
       await tmp.rename(_backupFile!.path);
     } catch (e) {
       if (kDebugMode) print('[Storage] Yedekleme hatasi: $e');
@@ -91,14 +202,14 @@ class StorageService {
 
   // Cihaza ozel salt ile XOR obfuscate (duz metin onleme — kriptografik guvenlik DEGIL, kurtarma amacli).
   static const String _obfKey = 'SyncRestoPOS_KeyObf_2026';
-  String _obfuscate(String plain) {
+  static String _obfuscate(String plain) {
     final k = utf8.encode(_obfKey);
     final b = utf8.encode(plain);
     final out = List<int>.generate(b.length, (i) => b[i] ^ k[i % k.length]);
     return base64.encode(out);
   }
 
-  String _deobfuscate(String obf) {
+  static String _deobfuscate(String obf) {
     try {
       final k = utf8.encode(_obfKey);
       final b = base64.decode(obf);
@@ -106,6 +217,34 @@ class StorageService {
       return utf8.decode(out);
     } catch (_) {
       return obf; // eski/plain yedek — oldugu gibi don
+    }
+  }
+
+  /// 14 Eyl 2026: prefs HİÇ kurulamadan (çökme sinyali) yedekten kimlik oku — HMAC doğrulamalı, anahtar çözülmüş.
+  /// Örnek kullanım: CrashBeacon; hata olursa null (sinyal kimliksiz gider, sunucu cihaz geçmişinden çözer).
+  static Future<Map<String, String?>?> readBackupCredentials() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final f = File('${dir.path}/pos_settings.json');
+      if (!await f.exists()) return null;
+      final parsed = jsonDecode(await f.readAsString());
+      if (parsed is! Map) return null;
+      Map<String, dynamic> d;
+      if (parsed.containsKey('hmac') && parsed.containsKey('data')) {
+        if (_generateHmac(jsonEncode(parsed['data'])) != parsed['hmac']) return null;
+        d = Map<String, dynamic>.from(parsed['data']);
+      } else {
+        // Eski biçim (HMAC'siz) — _readBackupSecure de kabul ediyor; burada reddetmek cihazı
+        // kimliksiz bırakırdı (asimetri denetimde yakalandı).
+        d = Map<String, dynamic>.from(parsed);
+      }
+      return {
+        'api_url': d[_apiUrlKey]?.toString(),
+        'backend_url': d[_backendUrlKey]?.toString(),
+        'api_key': d[_apiKeyKey] == null ? null : _deobfuscate(d[_apiKeyKey].toString()),
+      };
+    } catch (_) {
+      return null;
     }
   }
 
@@ -132,9 +271,9 @@ class StorageService {
   }
 
   // API Key
-  String? getApiKey() => _prefs.getString(_apiKeyKey);
-  String? getApiKeyName() => _prefs.getString(_apiKeyNameKey);
-  String? getApiUrl() => _prefs.getString(_apiUrlKey);
+  String? getApiKey() => _prefsOrNull?.getString(_apiKeyKey);
+  String? getApiKeyName() => _prefsOrNull?.getString(_apiKeyNameKey);
+  String? getApiUrl() => _prefsOrNull?.getString(_apiUrlKey);
 
   Future<void> saveApiKey(String apiKey, String name) async {
     await _prefs.setString(_apiKeyKey, apiKey);
@@ -146,12 +285,12 @@ class StorageService {
   // Tenant kimligi (key hash) — clear'larda SILINMEZ, tenant-degisim tespiti icin kalir.
   static const String _tenantHashKey = 'pos_tenant_key_hash';
   String hashKey(String apiKey) => sha256.convert(utf8.encode(apiKey)).toString();
-  String? getTenantHash() => _prefs.getString(_tenantHashKey);
+  String? getTenantHash() => _prefsOrNull?.getString(_tenantHashKey);
 
   // 17 Tem 2026: Kasanın panelde görünen adı ('Kasa 1'). validate-key device_name/key_name'den gelir.
   // Offline'da "masayı hangi kasa açtı" için gerekli — restaurant_name (getApiKeyName) DEĞİL.
   static const String _deviceDisplayNameKey = 'pos_device_display_name';
-  String? getDeviceDisplayName() => _prefs.getString(_deviceDisplayNameKey);
+  String? getDeviceDisplayName() => _prefsOrNull?.getString(_deviceDisplayNameKey);
   Future<void> saveDeviceDisplayName(String name) async {
     await _prefs.setString(_deviceDisplayNameKey, name);
     await _saveBackup();
@@ -159,7 +298,7 @@ class StorageService {
 
   // LAN tenant secret (restoran-basina, HMAC icin). validate-key'den gelir.
   static const String _lanSecretKey = 'pos_lan_tenant_secret';
-  String? getLanTenantSecret() => _prefs.getString(_lanSecretKey);
+  String? getLanTenantSecret() => _prefsOrNull?.getString(_lanSecretKey);
   Future<void> saveLanTenantSecret(String secret) async {
     await _prefs.setString(_lanSecretKey, secret);
     await _saveBackup();
@@ -175,7 +314,7 @@ class StorageService {
   }
 
   // Backend URL
-  String? getBackendUrl() => _prefs.getString(_backendUrlKey);
+  String? getBackendUrl() => _prefsOrNull?.getString(_backendUrlKey);
 
   Future<void> saveBackendUrl(String url) async {
     await _prefs.setString(_backendUrlKey, url);
@@ -192,8 +331,8 @@ class StorageService {
   }
 
   // Waiter Token
-  String? getWaiterToken() => _prefs.getString(_waiterTokenKey);
-  String? getWaiterData() => _prefs.getString(_waiterDataKey);
+  String? getWaiterToken() => _prefsOrNull?.getString(_waiterTokenKey);
+  String? getWaiterData() => _prefsOrNull?.getString(_waiterDataKey);
 
   Future<void> saveWaiterSession(String token, String waiterJson) async {
     await _prefs.setString(_waiterTokenKey, token);
@@ -207,7 +346,7 @@ class StorageService {
 
   // POS Ayarları
   Future<bool> getShowProductImages() async {
-    return _prefs.getBool(_showProductImagesKey) ?? true;
+    return _prefsOrNull?.getBool(_showProductImagesKey) ?? true;
   }
 
   Future<void> setShowProductImages(bool value) async {
@@ -219,7 +358,7 @@ class StorageService {
   // Key PUBLIC — printer_settings (yazar) + add_item_modal (okur) ayni prefs anahtarini paylasir.
   static const String variantOnTapKey = 'variant_dialog_on_tap';
   Future<bool> getVariantDialogOnTap() async {
-    return _prefs.getBool(variantOnTapKey) ?? false;
+    return _prefsOrNull?.getBool(variantOnTapKey) ?? false;
   }
 
   Future<void> setVariantDialogOnTap(bool value) async {
@@ -231,7 +370,7 @@ class StorageService {
   // rozetten görülür. Key PUBLIC — printer_settings (yazar) + tables_screen (okur) paylaşır.
   static const String failedPrintAutoPopupKey = 'failed_print_auto_popup';
   Future<bool> getFailedPrintAutoPopup() async {
-    return _prefs.getBool(failedPrintAutoPopupKey) ?? true; // DEFAULT AÇIK
+    return _prefsOrNull?.getBool(failedPrintAutoPopupKey) ?? true; // DEFAULT AÇIK
   }
 
   Future<void> setFailedPrintAutoPopup(bool value) async {
@@ -244,7 +383,7 @@ class StorageService {
   // Kapaliyken satir HIC basilmaz. Key PUBLIC — printer_settings (yazar) + printer_service (okur).
   static const String showKitchenPrintTimeKey = 'fis_basim_zamani_goster';
   Future<bool> getShowKitchenPrintTime() async {
-    return _prefs.getBool(showKitchenPrintTimeKey) ?? true; // DEFAULT ACIK
+    return _prefsOrNull?.getBool(showKitchenPrintTimeKey) ?? true; // DEFAULT ACIK
   }
 
   Future<void> setShowKitchenPrintTime(bool value) async {
@@ -256,7 +395,7 @@ class StorageService {
   // basinca yazici-sec pop-up. Key PUBLIC — printer_settings (yazar) + add_item_modal (okur).
   static const String yazdirPrinterIdsKey = 'yazdir_hedef_yazici_ids';
   Future<List<String>> getYazdirPrinterIds() async {
-    return _prefs.getStringList(yazdirPrinterIdsKey) ?? const [];
+    return _prefsOrNull?.getStringList(yazdirPrinterIdsKey) ?? const [];
   }
 
   Future<void> setYazdirPrinterIds(List<String> ids) async {
@@ -268,7 +407,7 @@ class StorageService {
   // (okur, ham prefs) + printer_settings (yazar) ile AYNI string. Kapaliyken fis BIREBIR eski hali.
   static const String showWaiterTimeCashKey = 'show_waiter_time_cash';
   Future<bool> getShowWaiterTimeCash() async {
-    return _prefs.getBool(showWaiterTimeCashKey) ?? true; // DEFAULT AÇIK
+    return _prefsOrNull?.getBool(showWaiterTimeCashKey) ?? true; // DEFAULT AÇIK
   }
 
   Future<void> setShowWaiterTimeCash(bool value) async {
@@ -277,7 +416,7 @@ class StorageService {
 
   static const String showWaiterTimeKitchenKey = 'show_waiter_time_kitchen';
   Future<bool> getShowWaiterTimeKitchen() async {
-    return _prefs.getBool(showWaiterTimeKitchenKey) ?? true; // DEFAULT AÇIK
+    return _prefsOrNull?.getBool(showWaiterTimeKitchenKey) ?? true; // DEFAULT AÇIK
   }
 
   Future<void> setShowWaiterTimeKitchen(bool value) async {
@@ -289,7 +428,7 @@ class StorageService {
   // (okur, ham prefs) + printer_settings (yazar) ile AYNI string. Kapaliyken fis BIREBIR eski.
   static const String showGroupTitlesKitchenKey = 'show_group_titles_kitchen';
   Future<bool> getShowGroupTitlesKitchen() async {
-    return _prefs.getBool(showGroupTitlesKitchenKey) ?? true; // DEFAULT AÇIK
+    return _prefsOrNull?.getBool(showGroupTitlesKitchenKey) ?? true; // DEFAULT AÇIK
   }
 
   Future<void> setShowGroupTitlesKitchen(bool value) async {
@@ -302,7 +441,7 @@ class StorageService {
   // Key PUBLIC — printer_settings (yazar) + tables_screen (okur) ayni prefs anahtarini paylasir.
   static const String quickSaleEnabledKey = 'quick_sale_enabled';
   Future<bool> getQuickSaleEnabled() async {
-    return _prefs.getBool(quickSaleEnabledKey) ?? false; // DEFAULT KAPALI
+    return _prefsOrNull?.getBool(quickSaleEnabledKey) ?? false; // DEFAULT KAPALI
   }
 
   Future<void> setQuickSaleEnabled(bool value) async {
@@ -312,7 +451,7 @@ class StorageService {
   // Masa takip sıralama tercihi (kalıcı, garson tekrar tekrar değiştirmesin)
   // Değerler: 'time_asc' (default), 'time_desc', 'table_asc', 'table_desc'
   String getOrderTrackingSort() {
-    return _prefs.getString('order_tracking_sort') ?? 'time_asc';
+    return _prefsOrNull?.getString('order_tracking_sort') ?? 'time_asc';
   }
 
   Future<void> setOrderTrackingSort(String mode) async {

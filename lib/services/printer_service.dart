@@ -882,8 +882,8 @@ class PrinterService {
       // Kalemde extras YOKSA hicbir sey basilmaz -> combo'suz/eski siparislerde cikti
       // BIREBIR eskisi gibi kalir. Hata olursa fis DUSMEZ (try/catch, duz listeye don).
       try {
-        final ex = item['extras'];
-        if (ex is List && ex.isNotEmpty) {
+        final ex = _extrasListesi(item['extras']);
+        if (ex.isNotEmpty) {
           for (final e in ex) {
             final satir = _extraSatiri(e);
             if (satir.isNotEmpty) {
@@ -1269,6 +1269,22 @@ class PrinterService {
   double? _ondalik(dynamic v) {
     if (v is num) return v.toDouble();
     return double.tryParse('${v ?? ''}');
+  }
+
+  /// 19 Eyl 2026 — extras iki bicimde gelebilir: sunucu yolunda LISTE (jsonb),
+  /// cevrimdisi yolda JSON METIN (SQLite TEXT). Okuyucular ikisini de kabul etmeli
+  /// (reference_secim_alani_extras_vs_variants). Bozuk/bos veri -> bos liste = eski davranis.
+  List<dynamic> _extrasListesi(dynamic v) {
+    if (v is List) return v;
+    if (v is String && v.trim().isNotEmpty) {
+      try {
+        final d = jsonDecode(v);
+        return d is List ? d : const [];
+      } catch (_) {
+        return const [];
+      }
+    }
+    return const [];
   }
 
   /// 31 Tem 2026 — Fiste bir `extras` ogesinin satiri.
@@ -1815,8 +1831,8 @@ class PrinterService {
       // ilgilenmez. Sadece ADLAR, porsiyon satiriyla ayni girintide.
       // extras yoksa HICBIR SEY basilmaz -> mevcut fisler BIREBIR ayni kalir.
       try {
-        final ex = item['extras'];
-        if (ex is List && ex.isNotEmpty) {
+        final ex = _extrasListesi(item['extras']);
+        if (ex.isNotEmpty) {
           // 10 Agu 2026 — GRUP BASLIKLARI (toggle _gtMutfak, default acik). Grup adi olan
           // secimler (POS 1.7.1+ extras'ta 'group') grup basligi altinda toplanir. Grup
           // degisince baslik basilir. Grupsuz/'-' cikarilan/eski veri -> ESKI davranis BIREBIR.

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
@@ -731,6 +732,12 @@ class ApiService {
     // Urun adi TEMIZ kalir, secimler adisyon/fiste ALT SATIR olarak cikar (web deseni).
     List<Map<String, dynamic>>? extras,
   }) async {
+    // 6 Eki 2026 — SURUYOR KAYIT IZI: printKitchen, burada kaydi bitmemis urun varken fisi
+    // basmasin diye (Green Chef 261006-2159: Bonfile 15 sn askida kaldi, fis 3 sn once basildi,
+    // urun mutfaga 13 dk gec gitti). Kume yalniz sayac/bekleme icin; akisa dokunmaz.
+    final kayitIzi = Completer<void>();
+    _suruyorUrunKayitlari.add(kayitIzi.future);
+    try {
     if (_connectivity.isOnline) {
       try {
         final response = await _dio.post('/api/pos/tickets/$ticketId/items', data: {
@@ -820,6 +827,36 @@ class ApiService {
       'item_id': localItem['id'],
       'offline': true,
     };
+    } finally {
+      _suruyorUrunKayitlari.remove(kayitIzi.future);
+      if (!kayitIzi.isCompleted) kayitIzi.complete();
+    }
+  }
+
+  // 6 Eki 2026 — kaydi suren (sunucuya ya da lokale henuz yazilmamis) urun eklemeleri.
+  final Set<Future<void>> _suruyorUrunKayitlari = {};
+
+  /// Su an kaydi bitmemis urun ekleme sayisi (ekranda "urunler kaydediliyor" demek icin).
+  int get bekleyenUrunKaydi => _suruyorUrunKayitlari.length;
+
+  /// Kaydi suren tum urun eklemelerinin bitmesini bekler. Online istek en fazla ~15 sn
+  /// (Dio zaman asimi) + lokale dusme surer; [azami] dolarsa BEKLEMEYI BIRAKIR ve devam eder
+  /// (mutfak fisi asla sonsuza kadar bekletilmez — bekleyen urun yine "mutfaga gitmedi"
+  /// olarak gorunur). Hata firlatmaz.
+  Future<void> bekleyenUrunKayitlariniBekle({Duration azami = const Duration(seconds: 20)}) async {
+    if (_suruyorUrunKayitlari.isEmpty) return;
+    final baslangic = DateTime.now();
+    final adet = _suruyorUrunKayitlari.length;
+    try {
+      await Future.wait(List<Future<void>>.of(_suruyorUrunKayitlari)).timeout(azami);
+    } catch (_) {}
+    try {
+      _logService.logAction('Mutfak fisi oncesi bekleyen urun kaydi beklendi', details: {
+        'adet': adet,
+        'sure_ms': DateTime.now().difference(baslangic).inMilliseconds,
+        'kalan': _suruyorUrunKayitlari.length,
+      });
+    } catch (_) {}
   }
 
   Future<Map<String, dynamic>> updateTicketItem({
@@ -1848,6 +1885,10 @@ class ApiService {
     int? waiterId,
     int? expectedTableId, // 🔴 6 Tem 2026 DÜZELTME 1: yanlis-masa fis guard (offline)
   }) async {
+    // 6 Eki 2026 — KAYDI SUREN URUN VARSA ONCE ONU BEKLE. Cevrimici/cevrimdisi karari BEKLEMEDEN
+    // SONRA verilir: bekleme sirasinda lokale dusen urun de cevrimdisi fise girer. Tum cagiranlar
+    // (ticket_modal x2, add_item_modal x2, pos_screen) buradan gecer.
+    await bekleyenUrunKayitlariniBekle();
     // OFFLINE PATH: lokal cache'lerden urun + yazici hesaplamasi yap, ayni format don.
     // - cached_products.printer_id (urun yazicisi)
     // - cached_sections.summary_printer_id (ozet fis)

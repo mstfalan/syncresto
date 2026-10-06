@@ -7,6 +7,7 @@ import 'log_service.dart';
 import 'local_db_service.dart';
 import 'connectivity_service.dart'; // Faz 2 K6: offline'da rapor aninda persist
 import 'storage_service.dart'; // 24 Agu 2026: 'Fis Basim' satiri toggle (getShowKitchenPrintTime)
+import 'mutfak_birlestir.dart'; // 6 Eki 2026: mutfak fisinde ayni kalemleri birlestir
 
 /// Yazıcı türleri
 enum PrinterType {
@@ -1274,6 +1275,27 @@ class PrinterService {
   /// 19 Eyl 2026 — extras iki bicimde gelebilir: sunucu yolunda LISTE (jsonb),
   /// cevrimdisi yolda JSON METIN (SQLite TEXT). Okuyucular ikisini de kabul etmeli
   /// (reference_secim_alani_extras_vs_variants). Bozuk/bos veri -> bos liste = eski davranis.
+  /// 6 Eki 2026 — mutfak fisinde iki kalemin TEK SATIRA birlesip birlesemeyecegini belirler.
+  /// Fiste gorunen HER alan anahtarda: urun, ad, porsiyon, not (ham metin), secimler, garson·saat.
+  /// Combo uyesi ya da adsiz kalem ASLA birlesmez (null).
+  String? _mutfakBirlesmeAnahtari(Map k, Map<String, dynamic> ticket, bool garsonSaat) {
+    final ad = (k['product_name'] ?? '').toString();
+    if (ad.trim().isEmpty) return null;
+    if ((k['combo_group_id'] ?? '').toString().trim().isNotEmpty) return null;
+    final secimler = _extrasListesi(k['extras'])
+        .map((e) => e is Map ? jsonEncode(e) : e.toString())
+        .toList();
+    return jsonEncode([
+      (k['product_id'] ?? '').toString(),
+      ad,
+      (k['portion'] ?? '').toString(),
+      (k['notes'] ?? '').toString(),
+      secimler,
+      garsonSaat ? _kalemGarsonSaatStr(k, ticket, maxLen: 15) : '',
+      (k['combo_pick_name'] ?? '').toString(),
+    ]);
+  }
+
   List<dynamic> _extrasListesi(dynamic v) {
     if (v is List) return v;
     if (v is String && v.trim().isNotEmpty) {
@@ -1734,6 +1756,16 @@ class PrinterService {
     } catch (grupErr) {
       print('[Printer] MUTFAK combo gruplama atlandi (duz listeye donuldu): $grupErr');
       _mSatirlar = items.map((e) => {'tip': 'tek', 'kalem': e}).toList();
+    }
+    // 6 Eki 2026 (Mustafa) — AYNI KALEMLER TEK SATIR: 10 sade kofte -> "10 x Kofte"; notlu /
+    // secimli / farkli garson·saatli olan AYRI satirda kalir (mutfak_birlestir.dart). Birlesecek
+    // kalem yoksa liste aynen doner -> fis BIREBIR eski. Hata -> birlestirmesiz (fis dusmez).
+    // 'Toplam N urun' satiri BILEREK degismedi (items.length).
+    try {
+      _mSatirlar = ayniKalemleriBirlestir(
+          _mSatirlar, (k) => _mutfakBirlesmeAnahtari(k, ticket, _gsMutfak));
+    } catch (birErr) {
+      print('[Printer] MUTFAK birlestirme atlandi (tek tek basiliyor): $birErr');
     }
 
     for (final _ms in _mSatirlar) {

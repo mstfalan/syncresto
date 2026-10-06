@@ -288,6 +288,8 @@ class _TicketModalState extends State<TicketModal> {
         return;
       }
 
+      // 6 Eki 2026: kaydi suren urun varsa printKitchen onu bekler (api_service); bilgi ver.
+      if (widget.apiService.bekleyenUrunKaydi > 0) _showSuccess('Ürünler kaydediliyor, mutfağa birazdan gidecek…');
       // Race condition guard (pending addItem'lar commit olsun)
       await Future.delayed(const Duration(milliseconds: 500));
 
@@ -684,6 +686,8 @@ class _TicketModalState extends State<TicketModal> {
       // Race condition guard: garson son urunu ekleyip hemen mutfak'a basarsa,
       // optimistic UI'daki item henuz DB'ye INSERT olmamis olabilir → printKitchen
       // o item'i atlar. 500ms beklemek pending addItem'larin commit olmasini saglar.
+      // 6 Eki 2026: kaydi suren urun varsa printKitchen onu bekler (api_service); bilgi ver.
+      if (widget.apiService.bekleyenUrunKaydi > 0) _showSuccess('Ürünler kaydediliyor, mutfağa birazdan gidecek…');
       await Future.delayed(const Duration(milliseconds: 500));
 
       final result = await widget.apiService.printKitchen(

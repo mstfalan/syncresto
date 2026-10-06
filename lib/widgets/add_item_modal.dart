@@ -3321,6 +3321,9 @@ class _AddItemModalState extends State<AddItemModal> {
     if (widget.printerService == null) return;
 
     try {
+      // 6 Eki 2026: kaydi suren urun varsa printKitchen onu bekler (api_service); ekran donmaz,
+      // garson neden beklendigini gorur.
+      if (widget.apiService.bekleyenUrunKaydi > 0) _showSuccess('Ürünler kaydediliyor, mutfağa birazdan gidecek…');
       // Race condition guard (pending addItem'lar commit olsun)
       await Future.delayed(const Duration(milliseconds: 500));
 
@@ -3832,6 +3835,8 @@ class _AddItemModalState extends State<AddItemModal> {
   Future<void> _sendToKitchenSilent() async {
     if (widget.printerService == null) return;
     try {
+      // 6 Eki 2026 (Fable onerisi): Yazdir+Kapat akisi da kaydi suren urunu bekler; garson nedenini gorsun.
+      if (widget.apiService.bekleyenUrunKaydi > 0) _showSuccess('Ürünler kaydediliyor, mutfağa birazdan gidecek…');
       // Race condition guard (pending addItem'lar commit olsun)
       await Future.delayed(const Duration(milliseconds: 500));
 
@@ -5823,7 +5828,7 @@ class _AddItemModalState extends State<AddItemModal> {
         color: const Color(0xFF7C3AED),
         onTap: hasItems && _selectedItemId != null && _hasPermission('move_item') ? _moveSelectedItem : null,
       ),
-      _buildActionBtnVertical(icon: Icons.restaurant_rounded, label: 'Mutfak', color: const Color(0xFFF59E0B), onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
+      _buildActionBtnVertical(icon: Icons.restaurant_rounded, label: _mutfakEtiketi, color: _mutfakRengi, onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null),
       _buildActionBtnVertical(icon: Icons.print_rounded, label: 'Yazdır', color: Colors.blueGrey, onTap: hasItems && _hasPermission('print_receipt') ? _printTicket : null),
     ];
 
@@ -5946,6 +5951,29 @@ class _AddItemModalState extends State<AddItemModal> {
       },
     );
   }
+
+  // 6 Eki 2026 (Mustafa) — MUTFAGA GITMEYEN URUN GORUNSUN. Kalemdeki kucuk kirmizi
+  // "YAZDIRILMADI" rozeti fark edilmiyordu (Green Chef 261006-2159: Bonfile 13 dk bekledi).
+  // Mutfak fisi cikmamis, yazicili, iptal edilmemis kalem varsa Mutfak butonu KIRMIZI ve
+  // adet yazar. SADECE GORSEL: fis/yazdirma akisina dokunmaz. Hata -> eski gorunum.
+  int get _mutfagaGitmeyenAdet {
+    try {
+      var n = 0;
+      for (final it in _ticketItems) {
+        if ((it['status'] ?? 'active').toString() == 'cancelled') continue;
+        final p = it['printed'];
+        if (p == 1 || p == true || p == '1' || p == 'true') continue;
+        final sk = it['skip_pos_print'];
+        if (sk == true || sk == 1 || sk == '1' || sk == 'true' || sk == 't') continue;
+        n++;
+      }
+      return n;
+    } catch (_) {
+      return 0;
+    }
+  }
+  String get _mutfakEtiketi { final n = _mutfagaGitmeyenAdet; return n > 0 ? 'Mutfak • $n' : 'Mutfak'; }
+  Color get _mutfakRengi => _mutfagaGitmeyenAdet > 0 ? const Color(0xFFDC2626) : const Color(0xFFF59E0B);
 
   Widget _buildActionBtnVertical({required IconData icon, required String label, required Color color, VoidCallback? onTap}) {
     // 22 May 2026: Dokunmatik POS icin iyilestirme (InkWell ripple + min 60 yukseklik).
@@ -6814,8 +6842,8 @@ class _AddItemModalState extends State<AddItemModal> {
               Expanded(
                 child: _buildActionBtn(
                   icon: Icons.restaurant_rounded,
-                  label: 'Mutfak',
-                  color: const Color(0xFFF59E0B),
+                  label: _mutfakEtiketi,
+                  color: _mutfakRengi,
                   onTap: hasItems && _hasPermission('print_receipt') ? _sendToKitchen : null,
                 ),
               ),

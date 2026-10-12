@@ -1945,6 +1945,10 @@ class _AddItemModalState extends State<AddItemModal> {
     // Secilen kalemler (her secim bir opsiyon kopyasi). picks = [{name,price,note}].
     final picks = <Map<String, dynamic>>[];
     int setCount = 1;
+    // 12 Eki 2026 (Mustafa: "combo pop penceresinde urun notu girme alanimiz yok") —
+    // diger varyant pencereleriyle AYNI not alani (_notAlani: hazir not cipleri + serbest metin).
+    final notCtrl = TextEditingController();
+    _notlariYukle(); // engellemez: pencere ANINDA acilir
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -2001,9 +2005,15 @@ class _AddItemModalState extends State<AddItemModal> {
                   ]),
                   const SizedBox(height: 10),
                   // Varyant/opsiyon kartlari — tikla, secim listesine ekle (hedefe kadar)
+                  // 12 Eki 2026 (Fable): secimler + not alani da KAYDIRILABILIR bolgede; klavye
+                  // acilinca pencere tasmaz, "Sepete Ekle" alt barı her zaman gorunur kalir.
                   Flexible(
                     child: SingleChildScrollView(
-                      child: Wrap(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                      Wrap(
                         spacing: 10, runSpacing: 10,
                         children: options.map((opt) {
                           final cnt = picks.where((p) => p['name'] == opt['name'] && p['price'] == opt['price']).length;
@@ -2029,8 +2039,6 @@ class _AddItemModalState extends State<AddItemModal> {
                           );
                         }).toList(),
                       ),
-                    ),
-                  ),
                   const SizedBox(height: 8),
                   // Secilenler ozeti (tek satir + geri al)
                   if (picks.isNotEmpty) ...[
@@ -2044,6 +2052,12 @@ class _AddItemModalState extends State<AddItemModal> {
                     ]),
                     const SizedBox(height: 8),
                   ],
+                  _notAlani(notCtrl, setSt),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
                   // Alt bar
                   Row(children: [
                     if (repeat && canAdd) ...[
@@ -2112,12 +2126,17 @@ class _AddItemModalState extends State<AddItemModal> {
     // Ayni milisaniyedeki iki cagri farkli mikrosaniye alir → kimlik ayrisir.
     final comboGid = 'cg${DateTime.now().millisecondsSinceEpoch}'
         '${(DateTime.now().microsecondsSinceEpoch % 100000).toString().padLeft(5, '0')}';
+    // 12 Eki 2026 — serbest not PAKETIN ILK kalemine yazilir (fiste/mutfakta BIR KEZ cikar;
+    // her secimin altinda tekrarlamaz). Notes'ta yalniz serbest not durur: fis/mutfak combo
+    // grubunda secim adiyla AYNI notu zaten basmiyor, farkli not ">>> not <<<" basilir.
+    // Not bossa HICBIR SEY DEGISMEZ (kalemler bugunku gibi). Combo hesabi notes okumaz.
+    final serbestNot = notCtrl.text.trim();
     for (int i = 0; i < picks.length; i++) {
       final p = picks[i];
       final note = p['note'] as String?;
       final display = note != null ? '$productName ($note)' : productName;
       _addProductWithPrice(product, display, splitPrices[i],
-        variantNote: note,
+        variantNote: (i == 0 && serbestNot.isNotEmpty) ? serbestNot : note,
         comboGroupId: comboGid,
         comboGroupName: productName,          // ANA urun adi → fiste ust satir
         comboPickName: note ?? productName,   // secilen varyant → fiste alt satir

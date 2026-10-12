@@ -813,6 +813,16 @@ class PrinterService {
       print('[Printer] combo gruplama atlandi (duz listeye donuldu): $grupErr');
       _satirlar = items.map((e) => {'tip': 'tek', 'kalem': e}).toList();
     }
+    // 12 Eki 2026 (Mustafa) — KASA FISINDE DE AYNI KALEMLER TEK SATIR (mutfaktaki gibi):
+    // 5 sade kofte -> "5 x Kofte  <toplam> TL". Fiyat, ikram, odeme durumu, not, secim ya da
+    // garson·saat farkli olan AYRI satirda kalir. Birlesecek kalem yoksa liste aynen doner ->
+    // fis BIREBIR eski. Hata -> birlestirmesiz (fis dusmez). Toplamlar adisyondan gelir, degismez.
+    try {
+      _satirlar = ayniKalemleriBirlestir(
+          _satirlar, (k) => _kasaBirlesmeAnahtari(k, ticket, _gsKasa));
+    } catch (birErr) {
+      print('[Printer] KASA birlestirme atlandi (tek tek basiliyor): $birErr');
+    }
 
     for (final _s in _satirlar) {
       // ---- COMBO GRUBU: ana urun ustte, secimler altinda ----
@@ -1292,6 +1302,58 @@ class PrinterService {
       (k['notes'] ?? '').toString(),
       secimler,
       garsonSaat ? _kalemGarsonSaatStr(k, ticket, maxLen: 15) : '',
+      (k['combo_pick_name'] ?? '').toString(),
+    ]);
+  }
+
+  /// 12 Eki 2026 — kasa (adisyon) fisinde iki kalemin TEK SATIRA birlesip birlesemeyecegi.
+  /// Mutfak anahtarina ek olarak BIRIM FIYAT, ikram ve odeme durumu da ayni olmali
+  /// (satir tutari = birim fiyat x adet). Garson·saat kasa fisindeki metinle ayni (maxLen 16).
+  /// Combo uyesi ya da adsiz kalem ASLA birlesmez (null).
+  String? _kasaBirlesmeAnahtari(Map k, Map<String, dynamic> ticket, bool garsonSaat) {
+    final ad = (k['product_name'] ?? '').toString();
+    if (ad.trim().isEmpty) return null;
+    if ((k['combo_group_id'] ?? '').toString().trim().isNotEmpty) return null;
+    // Cevrimdisi adisyon listesi iptal edilen kalemleri de getirebiliyor (Fable) -> asla birlesmez.
+    if ((k['status'] ?? '').toString() == 'cancelled') return null;
+    final fiyat = _ondalik(k['unit_price']);
+    if (fiyat == null) return null;
+    final secimler = _extrasListesi(k['extras'])
+        .map((e) => e is Map ? jsonEncode(e) : e.toString())
+        .toList();
+    return jsonEncode([
+      (k['product_id'] ?? '').toString(),
+      ad,
+      (k['portion'] ?? '').toString(),
+      (k['notes'] ?? '').toString(),
+      secimler,
+      garsonSaat ? _kalemGarsonSaatStr(k, ticket) : '',
+      (k['combo_pick_name'] ?? '').toString(),
+      fiyat.toStringAsFixed(4),
+      (k['is_ikram'] ?? '').toString(),
+      (k['payment_status'] ?? '').toString(),
+    ]);
+  }
+
+  /// 12 Eki 2026 — salon ozet fisinde (tutarsiz) iki kalemin TEK SATIRA birlesmesi.
+  /// Fiste gorunen alanlar ayni olmali: urun, ad, porsiyon, not, secimler, garson·saat (maxLen 31,
+  /// ozet fisindeki satirla ayni). Fiyat basilmadigi icin anahtarda yok. Combo uyesi, adsiz ya da
+  /// iptal edilmis kalem ASLA birlesmez (null).
+  String? _ozetBirlesmeAnahtari(Map k, Map<String, dynamic> ticket, bool garsonSaat) {
+    final ad = (k['product_name'] ?? k['name'] ?? '').toString();
+    if (ad.trim().isEmpty) return null;
+    if ((k['combo_group_id'] ?? '').toString().trim().isNotEmpty) return null;
+    if ((k['status'] ?? '').toString() == 'cancelled') return null;
+    final secimler = _extrasListesi(k['extras'])
+        .map((e) => e is Map ? jsonEncode(e) : e.toString())
+        .toList();
+    return jsonEncode([
+      (k['product_id'] ?? '').toString(),
+      ad,
+      (k['portion'] ?? '').toString(),
+      (k['notes'] ?? '').toString(),
+      secimler,
+      garsonSaat ? _kalemGarsonSaatStr(k, ticket, maxLen: 31) : '',
       (k['combo_pick_name'] ?? '').toString(),
     ]);
   }
@@ -1932,6 +1994,31 @@ class PrinterService {
     required int targetPort,
     String? brandName,
   }) async {
+    // 12 Eki 2026 — kategoride "Salon Ozet Fisinde Gosterme" acik urunler bu fise basilmaz.
+    // Kaynak yerel urun onbellegi (cevrimici/cevrimdisi ayni). Okunamazsa HICBIR SEY gizlenmez
+    // (fis eksiksiz basilir). Kuyruga da FILTRELI adisyon yazilir -> tekrar basimda ayni sonuc.
+    // Kalem bayragi once (sunucu adisyon kalemiyle gonderir: pasif/stoksuz urun de dahil), yoksa
+    // yerel urun onbellegi. Cevrimdisi adisyon iptal edilmis kalemleri de getirebilir -> cikarilir.
+    try {
+      final kalemler = ticket['items'];
+      if (kalemler is List) {
+        Set<int> gizli = const {};
+        try {
+          gizli = await _localDb.ozetFisindeGizliUrunIdleri();
+        } catch (oErr) {
+          print('[Printer] ozet fis gizli urun onbellegi okunamadi: $oErr');
+        }
+        final kalan = kalemler.where((i) => !(i is Map &&
+            ((i['status'] ?? '').toString() == 'cancelled' ||
+                LocalDbService.skipBayragi(i['hide_on_summary_receipt']) == 1 ||
+                gizli.contains(int.tryParse('${i['product_id']}'))))).toList();
+        if (kalan.length != kalemler.length) {
+          ticket = Map<String, dynamic>.from(ticket)..['items'] = kalan;
+        }
+      }
+    } catch (gErr) {
+      print('[Printer] ozet fis gizli kategori filtresi atlandi: $gErr');
+    }
     try {
       onStatusChange?.call('Ozet fis yazdiriliyor...', false);
 
@@ -1995,7 +2082,7 @@ class PrinterService {
     }
   }
 
-  /// Sipariş özeti fişi oluştur (fiyatlı - paket/kasa için)
+  /// Salon özet fişi oluştur — 12 Eki 2026'dan beri TUTARSIZ (ürünler + ödeme yöntemi).
   Future<List<int>> _generateClosingReceipt({
     required Map<String, dynamic> ticket,
     required Map<String, dynamic> table,
@@ -2053,19 +2140,29 @@ class PrinterService {
 
     bytes += generator.hr(ch: '=');
 
-    // Ürünler - fiyatlı
+    // ===== ÜRÜNLER =====
+    // 12 Eki 2026 (Mustafa: "salon ozet fisinde tutarlar olmasin") — bu fiste HICBIR TUTAR YOK:
+    // satir tutari, Ara Toplam, Indirim, TOPLAM kaldirildi (normal "Yazdir" fisi tutarli kalir).
+    // Ayni kalemler tek satir ("5 x Kofte", mutfak/kasa ile ayni yardimci). Kategoride
+    // "Salon Ozet Fisinde Gosterme" acik olan urunler printClosingReceipt'te listeden cikarilir.
     final items = ticket['items'] as List? ?? [];
-    double calculatedTotal = 0;
     // 9 Agu 2026 — kalem garson·saat (kasa toggle; kapanis fisi de kasa grubu). Varsayilan ACIK.
     final bool _gsKasa = await _kalemGarsonSaatGoster(mutfak: false);
+    List<Map<String, dynamic>> _ozSatirlar =
+        items.map((e) => <String, dynamic>{'tip': 'tek', 'kalem': e}).toList();
+    try {
+      _ozSatirlar = ayniKalemleriBirlestir(
+          _ozSatirlar, (k) => _ozetBirlesmeAnahtari(k, ticket, _gsKasa));
+    } catch (birErr) {
+      print('[Printer] OZET birlestirme atlandi (tek tek basiliyor): $birErr');
+    }
 
-    for (final item in items) {
+    for (final _os in _ozSatirlar) {
+      final item = _os['kalem'];
+      if (item is! Map) continue;
       final name = _turkishToAscii(item['product_name'] ?? item['name'] ?? '?');
-      final qty = (item['quantity'] ?? 1) as num;
-      final unitPrice = (item['unit_price'] ?? item['price'] ?? 0) as num;
-      final lineTotal = qty * unitPrice;
-      calculatedTotal += lineTotal;
-      final notes = item['notes'] as String? ?? '';
+      final qty = item['quantity'] ?? 1;
+      final notes = item['notes']?.toString() ?? '';
 
       // Ürün adı ve miktarı büyük kalın fontla
       bytes += generator.text(
@@ -2076,18 +2173,10 @@ class PrinterService {
         ),
       );
 
-      // Fiyat (+ 9 Agu: kasa toggle -> garson·saat AYNI satirda solda kucuk font; alt satir YOK).
+      // Garson·saat (kasa toggle) — tutar yok, yalniz kucuk font satir.
       final _iGs = _gsKasa ? _kalemGarsonSaatStr(item, ticket, maxLen: 31) : '';
-      if (_iGs.isEmpty) {
-        bytes += generator.text(
-          '${lineTotal.toStringAsFixed(2)} TL',
-          styles: const PosStyles(align: PosAlign.right),
-        );
-      } else {
-        bytes += generator.row([
-          PosColumn(text: _iGs, width: 6, styles: const PosStyles(align: PosAlign.left, fontType: PosFontType.fontB)),
-          PosColumn(text: '${lineTotal.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right)),
-        ]);
+      if (_iGs.isNotEmpty) {
+        bytes += generator.text(_iGs, styles: const PosStyles(fontType: PosFontType.fontB));
       }
 
       // Ürün notu varsa ekle
@@ -2099,48 +2188,17 @@ class PrinterService {
       }
     }
 
-    bytes += generator.hr();
-
-    // Ara toplam
-    final ticketSubtotal = (ticket['subtotal'] as num?)?.toDouble() ?? 0;
-    final subtotal = ticketSubtotal > 0 ? ticketSubtotal : calculatedTotal;
-
-    bytes += generator.row([
-      PosColumn(text: 'Ara Toplam:', width: 6, styles: const PosStyles(bold: true)),
-      PosColumn(text: '${subtotal.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true)),
-    ]);
-
-    // İndirim varsa göster
-    final discount = (ticket['discount'] ?? ticket['discount_amount'] ?? 0) as num;
-    if (discount > 0) {
-      bytes += generator.row([
-        PosColumn(text: 'Indirim:', width: 6),
-        PosColumn(text: '-${discount.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right)),
-      ]);
+    // Tum kalemler gizli/iptal ise fis bos gorunmesin (fis yine basilir: masa kapandi + odeme).
+    if (_ozSatirlar.isEmpty) {
+      bytes += generator.text('(Bu fiste gosterilecek urun yok)',
+          styles: const PosStyles(align: PosAlign.center, fontType: PosFontType.fontB));
     }
 
     bytes += generator.hr(ch: '=');
 
-    // Toplam
-    // 3 Agu 2026: salon ozet fisi de ikrami duser (musteri fisiyle AYNI kural).
-    // ticket['total'] DB kolonu = brut (ikram dahil); ikram_total varsa cikarilir.
-    final _ikOzet = ticket['ikram_total'];
-    final _ikOzetTutar = (_ikOzet is num)
-        ? _ikOzet.toDouble()
-        : (double.tryParse('${_ikOzet ?? ''}') ?? 0.0);
-    final ticketTotal = ((ticket['total'] as num?)?.toDouble() ?? 0) -
-        (_ikOzetTutar > 0 ? _ikOzetTutar : 0);
-    final total = ticketTotal > 0 ? ticketTotal : (calculatedTotal - discount.toDouble());
-
-    bytes += generator.row([
-      PosColumn(text: 'TOPLAM:', width: 6, styles: const PosStyles(bold: true, height: PosTextSize.size2)),
-      PosColumn(text: '${total.toStringAsFixed(2)} TL', width: 6, styles: const PosStyles(align: PosAlign.right, bold: true, height: PosTextSize.size2)),
-    ]);
-
-    bytes += generator.hr(ch: '=');
-
-    // Ödeme yöntemi
-    final paymentText = paymentMethod == 'cash' ? 'NAKIT' : 'KREDI KARTI';
+    // Ödeme yöntemi — 12 Eki 2026 (Fable): eski iki secenekli harita multinet/sodexo vb.
+    // HEPSINI "KREDI KARTI" basiyordu. Adisyon fisiyle ayni etiket; bilinmeyen kod HAM basilir.
+    final paymentText = _turkishToAscii(_paymentMethodLabel(paymentMethod)).toUpperCase();
     bytes += generator.text(
       'Odeme: $paymentText',
       styles: const PosStyles(align: PosAlign.center, bold: true, height: PosTextSize.size2),

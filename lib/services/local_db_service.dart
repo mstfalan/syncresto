@@ -63,6 +63,23 @@ class LocalDbService {
     print('[LocalDb] v22 cached_products.skip_pos_print eklendi');
   }
 
+  /// v23 gecisi (12 Eki 2026) — kategori bayragi "Salon Ozet Fisinde Gosterme" urune tasinir
+  /// (backend products ucu COALESCE(c.hide_on_summary_receipt,false)). v22 ile ayni desen:
+  /// idempotent, kolon dogrulanir; eklenemezse firlatir -> surum 22'de kalir.
+  /// DEFAULT 0 = hicbir urun gizlenmez (bugunku davranis).
+  static Future<void> migrasyonV23(DatabaseExecutor db) async {
+    try {
+      await db.execute('ALTER TABLE cached_products ADD COLUMN hide_on_summary_receipt INTEGER DEFAULT 0');
+    } catch (e) {
+      print('[LocalDb] v23 adim zaten var: $e');
+    }
+    final bilgi = await db.rawQuery('PRAGMA table_info(cached_products)');
+    if (!bilgi.any((k) => (k['name'] ?? '').toString() == 'hide_on_summary_receipt')) {
+      throw StateError('v23: cached_products.hide_on_summary_receipt eklenemedi (surum 22 korunuyor)');
+    }
+    print('[LocalDb] v23 cached_products.hide_on_summary_receipt eklendi');
+  }
+
   static int skipBayragi(Object? ham) =>
       (ham == 1 || ham == true || ham == '1' || ham == 'true' || ham == 't') ? 1 : 0;
 
@@ -164,7 +181,7 @@ class LocalDbService {
   Future<Database> _openDb(String path) async {
     return await openDatabase(
       path,
-      version: 22, // v22 (19 Eyl 2026): cached_products.skip_pos_print (cevrimdisi mutfak fisi online kolla parite)
+      version: 23, // v23 (12 Eki 2026): cached_products.hide_on_summary_receipt (salon ozet fisi). v22 (19 Eyl 2026): cached_products.skip_pos_print (cevrimdisi mutfak fisi online kolla parite)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -513,6 +530,7 @@ class LocalDbService {
         ingredients TEXT,
         hide_from_tracking INTEGER DEFAULT 0,
         skip_pos_print INTEGER DEFAULT 0,
+        hide_on_summary_receipt INTEGER DEFAULT 0,
         cached_at TEXT NOT NULL
       )
     ''');
@@ -1082,6 +1100,9 @@ class LocalDbService {
     if (oldVersion < 22) {
       await migrasyonV22(db);
     }
+    if (oldVersion < 23) {
+      await migrasyonV23(db);
+    }
 
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
     // local_tickets: garson/salon adi. local_ticket_items: ekleyen/teslim eden garson, porsiyon,
@@ -1276,10 +1297,23 @@ class LocalDbService {
               (prod['variants_required_pos'] == true || prod['variants_required_pos'] == 1) ? 1 : 0,
           // 21 Tem 2026: Masa Takipte gizle (offline). Backend dondurmese 0 -> gorunur (guvenli).
           'hide_from_tracking': (prod['hide_from_tracking'] == true || prod['hide_from_tracking'] == 1) ? 1 : 0,
+          // v23 (12 Eki 2026): kategori "Salon Ozet Fisinde Gosterme". Backend dondurmese 0 -> basilir.
+          'hide_on_summary_receipt': skipBayragi(prod['hide_on_summary_receipt']),
           'cached_at': now,
         });
       }
     }), opName: 'cacheProducts');
+  }
+
+  /// 12 Eki 2026 — salon ozet fisinde basilmayacak urun kimlikleri (kategori bayragi).
+  /// DIKKAT: onbellek yalniz aktif+stokta urunleri tutar (API listesi) -> pasif/stoksuz urun burada
+  /// YOK; onlar icin sunucu adisyon kalemindeki `hide_on_summary_receipt` alanina bakilir.
+  /// Hata -> cagiran bos kume kabul eder.
+  Future<Set<int>> ozetFisindeGizliUrunIdleri() async {
+    final db = await database;
+    final rows = await db.query('cached_products',
+        columns: ['id'], where: 'hide_on_summary_receipt = 1');
+    return rows.map((r) => int.tryParse('${r['id']}')).whereType<int>().toSet();
   }
 
   // Ürünleri getir

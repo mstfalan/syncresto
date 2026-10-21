@@ -9,6 +9,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+/// "3.15.0 (dev) ..." -> "3.15.0" (acilis logunda hangi motorla derlendigi gorunsun)
+String dartSurumu() => Platform.version.split(' ').first;
+
 /// Log seviyesi
 enum LogLevel { info, warning, error }
 
@@ -101,7 +104,7 @@ class LogService {
     // 23 Tem 2026: acilista build parmak-izi — hangi surumun GERCEKTEN kurulu
     // oldugu tek bakista gorunsun (saha "son surum mu?" belirsizligini bitirir).
     info(LogType.general, 'Log servisi baslatildi (surum $_appVersion)',
-        details: {'app_version': _appVersion, 'platform': _platform});
+        details: {'app_version': _appVersion, 'platform': _platform, 'dart': dartSurumu()});
   }
 
   /// Cihaz bilgilerini yükle

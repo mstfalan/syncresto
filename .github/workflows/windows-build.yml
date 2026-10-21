@@ -26,9 +26,15 @@ jobs:
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
+        # Flutter master SABIT commit'e kilitli: kilitsiz master, onbellek dusunce o gunun
+        # test edilmemis motorunu ceker. Degistirmeden once sahada dene.
         with:
           channel: 'master'
+          flutter-version: 'e8deb86b6faddb6073e1de6efabdb0b4b4dd6813'
           cache: true
+
+      - name: Flutter version
+        run: flutter --version
 
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop

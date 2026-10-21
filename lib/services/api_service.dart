@@ -14,6 +14,7 @@ import 'sync_service.dart';
 import 'auth_failure_classifier.dart'; // 6 Eyl 2026: yanlis PIN cache silmesin
 import 'lan_sync_service.dart';
 import 'log_service.dart';
+import 'istek_olcum.dart';
 import 'websocket_service.dart';
 
 /// Cevrimdisi masa takip sorgusu duserse firlatilir. Cagiran ekran son bilinen listeyi
@@ -87,6 +88,7 @@ class ApiService {
       if (kDebugMode) print('[API] adapter override skip: $e');
     }
 
+    _dio.interceptors.add(IstekOlcum()); // istek suresi olcumu (5 dk ozet + yavas istek)
     _dio.interceptors.add(LogInterceptor(
       requestBody: false,
       responseBody: false,

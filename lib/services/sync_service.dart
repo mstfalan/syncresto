@@ -13,6 +13,7 @@ import 'auth_failure_classifier.dart'; // 6 Eyl 2026: 401/403 siniflandirma
 import 'push_ayna.dart'; // 21 Eki 2026 (F): push ile hedefli ayna
 import 'mark_printed_tekrar.dart';
 import 'websocket_service.dart';
+import 'performans_olcum.dart';
 
 /// API key geçersiz veya pasif olduğunda fırlatılır
 class ApiKeyInvalidException implements Exception {
@@ -78,6 +79,7 @@ class SyncService {
     _settingsListeners.remove(l);
   }
   void _notifySettingsLoaded(Map<String, dynamic> settings) {
+    try { performansOlcumAyarla(settings); } catch (_) {}
     onSettingsLoaded?.call(settings);
     for (final l in List<void Function(Map<String, dynamic>)>.from(_settingsListeners)) {
       try { l(settings); } catch (e) { print('[Sync] settings listener hata: $e'); }
@@ -126,6 +128,9 @@ class SyncService {
     // o masanin aynasi hemen tazelenir (printed=1 gelir; kesintide cevrimdisi fis eski kalemi basmaz).
     // Liste tabanli kayit (contains) -> init tekrar cagrilirsa cift kayit olmaz.
     WebSocketService().addCacheInvalidateRawListener(_onMasaDurumuPush);
+
+    // Performans olcumu anahtari: acilista onbellekteki ayar (sunucu ayari gelince yeniden uygulanir)
+    try { performansOlcumAyarla(await _localDb.getCachedSettings()); } catch (_) {}
 
     // Periyodik sync (her 10 saniye)
     _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
@@ -764,6 +769,11 @@ class SyncService {
     final t0 = DateTime.now();
     while (_isSyncing && DateTime.now().difference(t0) < azami) {
       await Future.delayed(const Duration(milliseconds: 150));
+    }
+    final beklenen = DateTime.now().difference(t0).inMilliseconds;
+    if (performansOlcumAcik && beklenen >= 300) {
+      LogService().info(LogType.general, 'Mutfak oncesi bekleme ${beklenen}ms',
+          details: {'ms': beklenen, 'ticket_id': serverTicketId, 'vazgecildi': _isSyncing});
     }
     if (_isSyncing) return;
     _isSyncing = true;

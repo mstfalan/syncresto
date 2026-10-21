@@ -24,14 +24,20 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
+      # Flutter deposunda 260 karakteri asan test dosya yollari var (Windows MAX_PATH)
+      - name: Enable git long paths
+        run: git config --system core.longpaths true
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         # Flutter master SABIT commit'e kilitli: kilitsiz master, onbellek dusunce o gunun
         # test edilmemis motorunu ceker. Degistirmeden once sahada dene.
+        # cache-path kisa: varsayilan yol 40 haneli sha'yi icerir, dosya yollarini uzatir.
         with:
           channel: 'master'
           flutter-version: 'e8deb86b6faddb6073e1de6efabdb0b4b4dd6813'
           cache: true
+          cache-path: '${{ runner.tool_cache }}/flutter/e8deb86b'
 
       - name: Flutter version
         run: flutter --version

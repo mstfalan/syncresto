@@ -50,7 +50,7 @@ pm2 restart syncresto-api
 ### 5. Doğrulama
 ```bash
 # API'den versiyon kontrolü
-curl -s 'https://api.syncresto.com/api/pos/version' -H 'X-API-Key: SR_bf54112d_821c6f9182fb4148a27034e7' | python3 -m json.tool
+curl -s 'https://api.syncresto.com/api/pos/version' -H 'X-API-Key: <POS_API_ANAHTARI>' | python3 -m json.tool
 ```
 
 ---

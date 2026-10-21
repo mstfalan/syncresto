@@ -102,10 +102,14 @@ class _TicketModalState extends State<TicketModal> {
   }
 
   Future<void> _loadTicket({bool autoOpenAddItem = false}) async {
+    // 16 Eki 2026: pencere await sirasinda kapandiysa sessizce cik (POS-CRASH "Null check" raporlarinin kaynagi).
+    // onItemAdded geri cagrisi, TicketModal kapandiktan sonra AddItemModal'dan da gelebiliyor.
+    if (!mounted) return;
     setState(() => _isLoading = true);
     try {
       final response = await widget.apiService.getTableTicket(_tableId);
       print('[TicketModal] _loadTicket response: $response');
+      if (!mounted) return;
       setState(() {
         if (response != null && response['ticket'] != null) {
           _ticket = response['ticket'];
@@ -136,9 +140,9 @@ class _TicketModalState extends State<TicketModal> {
       }
     } catch (e) {
       print('[TicketModal] _loadTicket error: $e');
-      setState(() => _ticket = null);
+      if (mounted) setState(() => _ticket = null);
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -1399,12 +1403,14 @@ class _TicketModalState extends State<TicketModal> {
   }
 
   void _showError(String message) {
+    if (!mounted) return; // 16 Eki 2026: kapanmis pencerede context yok
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.red),
     );
   }
 
   void _showSuccess(String message) {
+    if (!mounted) return; // 16 Eki 2026: kapanmis pencerede context yok
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.green),
     );

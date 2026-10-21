@@ -74,3 +74,4 @@ windows/flutter/ephemeral/
 # Yedek dosyalar (indir-duzenle-upload akisi) — ASLA commit edilmez
 *.bak-*
 .bak-*/
+CLAUDE.md

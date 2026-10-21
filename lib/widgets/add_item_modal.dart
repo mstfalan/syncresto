@@ -3055,6 +3055,8 @@ class _AddItemModalState extends State<AddItemModal> {
     if (item == null) return;
     final itemId = _safeInt(item['id']);
     if (itemId == null) return;
+    // 21 Eki 2026: ust pencere tazeleme geri cagrisini simdiden yakala (pencere kapansa da cagrilabilsin)
+    final onItemAdded = widget.onItemAdded;
 
     // 23 May 2026: Iki kademeli iptal yetkisi
     //  - cancel_item: HER turlu urun iptal (mutfaga gitmis dahil)
@@ -3310,9 +3312,17 @@ class _AddItemModalState extends State<AddItemModal> {
       }
     }
 
+    // 16 Eki 2026: pencere await sirasinda kapandiysa sessizce cik (POS-CRASH "Null check" raporlarinin kaynagi).
+    // Iptal + iptal fisi bu noktada TAMAMLANDI; yalniz KENDI ekran yenilemesi atlanir.
+    // 21 Eki 2026: ust pencerenin (TicketModal._loadTicket, kendi mounted guard'i var) tazelenmesi
+    // ATLANMAZ, yoksa iptal edilen kalem adisyonda duruyormus gibi gorunur.
+    if (!mounted) {
+      onItemAdded();
+      return;
+    }
     setState(() => _selectedItemId = null);
     await _loadTicketItems();
-    widget.onItemAdded();
+    onItemAdded();
 
     if (basarili == 0) {
       _showError('Ürün iptal edilemedi: ${ilkHata ?? 'bilinmeyen hata'}');
@@ -3698,6 +3708,10 @@ class _AddItemModalState extends State<AddItemModal> {
 
     // methodLabel verilmişse onu kullan (dinamik yöntem); yoksa built-in nakit/kart etiketi.
     final label = methodLabel ?? (paymentMethod == 'cash' ? 'Nakit' : 'Kredi Kartı');
+    // 16 Eki 2026: pencere await sirasinda kapandiysa onay diyalogu acilamaz — sessizce cik
+    // (POS-CRASH "Null check" kaynagi). Ustteki "hepsi odenmis" dali BILEREK korumasiz: kasiyer
+    // kapat'a basmisti, bugunku davranis (pencere kapansa da adisyon kapanir) aynen surer.
+    if (!mounted) return;
     double unpaidTotal = 0;
     for (var item in unpaidItems) {
       unpaidTotal += _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);

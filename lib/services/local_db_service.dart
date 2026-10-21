@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:uuid/uuid.dart';
+import 'ayna_printed.dart'; // 21 Eki 2026: ayna printed birlestirme kurali
 import 'ikram_rules.dart';
 import 'log_service.dart';
 import 'print_queue_reprint_decision.dart'; // 6 Eyl 2026: 'printing' claim / stale sure
@@ -1534,6 +1535,40 @@ class LocalDbService {
     print('[LocalDb] markLocalItemsPrinted: ${localIds.length} item');
   }
 
+  /// 21 Eki 2026 (D/E): ONLINE basim / WebPOS claim sonrasi lokal aynayi ANINDA printed=1'e ceker.
+  /// Sunucu printKitchen bu kalemleri atomik UPDATE ile zaten printed=1 yapti; 90 sn/5 dk donguyu
+  /// beklemek gereksiz (o pencerede internet koparsa cevrimdisi mutfak fisi bunlari yeniden basiyordu).
+  /// sync_queue'ya YAZMAZ (sunucu zaten 1). Lokalde satir yoksa no-op (ayna gelince sunucu 1 getirir).
+  /// Best-effort: hata firlatmaz, fis akisini etkilemez.
+  Future<int> markItemsPrintedByServerIds(List<int> serverIds) async {
+    if (serverIds.isEmpty) return 0;
+    try {
+      final db = await database;
+      final ph = List.filled(serverIds.length, '?').join(',');
+      final n = await db.rawUpdate(
+        'UPDATE local_ticket_items SET printed = 1 WHERE server_id IN ($ph) AND printed = 0',
+        serverIds,
+      );
+      if (n > 0) print('[LocalDb] markItemsPrintedByServerIds: $n kalem');
+      return n;
+    } catch (e) {
+      print('[LocalDb] markItemsPrintedByServerIds atlandi: $e');
+      return 0;
+    }
+  }
+
+  /// 21 Eki 2026 (I): sunucu adisyon id'sine gore bekleyen mark_printed kayitlari
+  /// (sync_queue.server_id eslesir VEYA local_id, server_id'si bu olan lokal adisyona aittir).
+  Future<List<Map<String, dynamic>>> getPendingMarkPrintedForServerTicket(int serverTicketId) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT sq.* FROM sync_queue sq
+       WHERE sq.action = 'mark_printed' AND sq.status = 'pending' AND sq.retry_count < sq.max_retries
+         AND (sq.server_id = ? OR sq.local_id IN (SELECT local_id FROM local_tickets WHERE server_id = ?))
+       ORDER BY sq.created_at ASC
+    ''', [serverTicketId, serverTicketId]);
+  }
+
   // Lokal ticket'in printed=0 + status='active'/'pending' item'larini cek (offline mutfak fisi)
   // Format: [{local_id, server_id, product_id, product_name, quantity, unit_price, notes, printer_id}]
   Future<List<Map<String, dynamic>>> getUnprintedLocalItems(int localTicketId) async {
@@ -2872,9 +2907,15 @@ class LocalDbService {
           final existItem = await txn.query('local_ticket_items',
               columns: ['local_id', 'printed'],
               where: 'server_id = ?', whereArgs: [itemServerId], limit: 1);
-          final existingPrinted = existItem.isNotEmpty
-              ? (existItem.first['printed'] as int? ?? 0)
-              : (it['printed'] == 1 || it['printed'] == true ? 1 : 0);
+          // 21 Eki 2026: printed TEK YONLU birlesir = max(lokal, sunucu).
+          // Eskiden lokal deger aynen korunuyordu: kalem baska cihazda/WebPOS'ta basilmadan ONCE
+          // aynalandiysa lokal printed=0 KALICI kaliyordu -> internet kopunca cevrimdisi mutfak fisi
+          // eski (basilmis) kalemleri de yeniden basiyordu. Sunucu 1 derse 1; lokal 1 (cevrimdisi
+          // basildi, mark_printed sync bekliyor) ise sunucu 0 olsa da 1 KORUNUR.
+          final existingPrinted = printedBirlestir(
+            lokal: existItem.isNotEmpty ? (existItem.first['printed'] as int? ?? 0) : null,
+            sunucu: it['printed'],
+          );
 
           final itemRow = <String, dynamic>{
             'server_id': itemServerId,
@@ -2967,18 +3008,57 @@ class LocalDbService {
   }
 
   // Yerel item'ı sunucu ID ile güncelle
+  // 21 Eki 2026 YARIS KORUMASI: add_item POST yaniti ile bu guncelleme arasinda ayna gelirse ayni
+  // sunucu kalemini "lokalde yok" sanip IKINCI satir INSERT ediyordu (server_id'de UNIQUE yok) ->
+  // cevrimdisi cift basim / cift tutar riski. Tek islemde: aynanin actigi kopya(lar) silinir,
+  // printed max() ile ASIL satira tasinir. ASIL satir kalir (mark_printed payload'i onun local_id'sini tutar).
   Future<void> updateItemServerId(int localId, int serverId) async {
     final db = await database;
-    await db.update(
-      'local_ticket_items',
-      {
+    await _runWithRetry(() => db.transaction((txn) async {
+      final kopyalar = await txn.query('local_ticket_items',
+          columns: ['local_id', 'printed'],
+          where: 'server_id = ? AND local_id != ?', whereArgs: [serverId, localId]);
+      var tasinanPrinted = 0;
+      for (final k in kopyalar) {
+        final kopyaId = k['local_id'] as int;
+        if ((k['printed'] as int? ?? 0) == 1) tasinanPrinted = 1;
+        // Kopyaya bagli bekleyen kuyruk kaydi (mark_printed item_local_ids, mark_served/update_item/
+        // delete_item item_local_id) ASIL satira yonlendirilir; yoksa kopya silinince sonsuza
+        // "bekliyor" kalir / iptal kaybolur.
+        final sq = await txn.query('sync_queue',
+            columns: ['id', 'payload'],
+            where: "status IN ('pending','in_progress') AND payload LIKE ?",
+            whereArgs: ['%$kopyaId%']);
+        for (final row in sq) {
+          try {
+            final pl = Map<String, dynamic>.from(jsonDecode(row['payload'] as String) as Map);
+            var degisti = false;
+            if (pl['item_local_id'] == kopyaId) {
+              pl['item_local_id'] = localId;
+              degisti = true;
+            }
+            final ids = pl['item_local_ids'];
+            if (ids is List && ids.contains(kopyaId)) {
+              pl['item_local_ids'] = {...ids.whereType<int>().map((x) => x == kopyaId ? localId : x)}.toList();
+              degisti = true;
+            }
+            if (degisti) {
+              await txn.update('sync_queue', {'payload': jsonEncode(pl)}, where: 'id = ?', whereArgs: [row['id']]);
+            }
+          } catch (_) {}
+        }
+        await txn.delete('local_ticket_items', where: 'local_id = ?', whereArgs: [kopyaId]);
+      }
+      await txn.update('local_ticket_items', {
         'server_id': serverId,
         'synced': 1,
         'synced_at': DateTime.now().toIso8601String(),
-      },
-      where: 'local_id = ?',
-      whereArgs: [localId],
-    );
+        if (tasinanPrinted == 1) 'printed': 1,
+      }, where: 'local_id = ?', whereArgs: [localId]);
+      if (kopyalar.isNotEmpty) {
+        print('[LocalDb] updateItemServerId: ${kopyalar.length} ayna kopyasi birlestirildi (server_id=$serverId)');
+      }
+    }), opName: 'updateItemServerId');
   }
 
   // Item'ın server ticket ID'sini güncelle

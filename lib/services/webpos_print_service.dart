@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_service.dart';
+import 'local_db_service.dart';
 import 'log_service.dart';
 import 'printer_service.dart';
 
@@ -108,6 +109,17 @@ class WebposPrintService {
         // false (409 = baska POS kapti, hata, claimed!=true) → bu job atlanir.
         final claimed = await api.claimPrintJob(jobId);
         if (!claimed) continue;
+        // 21 Eki 2026 (E): claim BU kasanin. Sunucu kalemleri printKitchen'da zaten printed=1 yapti ->
+        // lokal ayna da hemen 1 (kesintide cevrimdisi fis bunlari yeniden basmasin). Basim kararini
+        // ETKILEMEZ (claim verildi), raporlamaya dokunmaz, best-effort.
+        try {
+          final sIds = ((job['items'] as List?) ?? const [])
+              .map((it) => it is Map ? it['id'] : null)
+              .map((v) => v is int ? v : int.tryParse('${v ?? ''}'))
+              .whereType<int>()
+              .toList();
+          if (sIds.isNotEmpty) await LocalDbService().markItemsPrintedByServerIds(sIds);
+        } catch (_) {}
 
         String? errorMsg;
         try {

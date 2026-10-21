@@ -1907,6 +1907,16 @@ class ApiService {
           final localItemIds = items.map((i) => i['local_id']).whereType<int>().toList();
           if (localItemIds.isNotEmpty) {
             await _localDb.markLocalItemsPrinted(localItemIds);
+            // 21 Eki 2026: olcum logu — cevrimdisi fise giren kalemlerin sunucu id'leri. Sunucuda
+            // panel_print_jobs ile karsilastirilip "daha once basilmis kalem yeniden basildi mi" kesin olculur.
+            try {
+              _logService.logAction('Mutfak fisi cevrimdisi hesaplandi', details: {
+                'ticket_number': (result['ticket'] as Map?)?['ticket_number'],
+                'local_item_ids': localItemIds,
+                'server_item_ids': items.map((i) => i is Map ? i['server_id'] : null).whereType<int>().toList(),
+                'item_count': items.length,
+              });
+            } catch (_) {}
             // 🟠 FINAL-FIX B: DOGRU id uzaylariyla enqueue. Eski kod ticketId'yi (offline ticket'ta
             // LOKAL id!) server_id kolonuna yaziyordu -> yanlis URL'e POST -> backend printed=0
             // kalir -> online devamda CIFT FIS. Simdi gercek local_id + (varsa) gercek server_id.
@@ -1930,6 +1940,13 @@ class ApiService {
     }
 
     try {
+      // 21 Eki 2026 (I): cevrimdisi basilmis ama sunucuya ulasmamis printed=1 varsa ONCE ilet;
+      // yoksa sunucu o kalemleri printed=0 gorup bu fiste YENIDEN basar.
+      try {
+        await _syncService.flushMarkPrintedForTicket(ticketId);
+      } catch (e) {
+        print('[API] mark_printed on-iletim atlandi: $e');
+      }
       // 16 May 2026: Backend broadcast'te bu socket'i skip etmek için X-Socket-Id header
       String? mySocketId;
       try {
@@ -1944,11 +1961,20 @@ class ApiService {
         ),
       );
       if (response.data['success'] == true) {
-        final itemCount = (response.data['items'] as List?)?.length ?? 0;
+        final sunucuKalemler = response.data['items'] as List? ?? const [];
         _logService.logAction('Mutfak fisi gonderildi', details: {
           'ticket_id': ticketId,
-          'item_count': itemCount,
+          'item_count': sunucuKalemler.length,
         });
+        // 21 Eki 2026 (D): sunucu bu kalemleri atomik printed=1 yapti -> lokal ayna da hemen 1
+        // (yoksa 90 sn icinde internet koparsa cevrimdisi fis bunlari yeniden basiyordu).
+        // Yanit AYNEN doner; fis/kuyruk akisi degismez. Best-effort.
+        final sIds = sunucuKalemler
+            .map((i) => i is Map ? i['id'] : null)
+            .map((v) => v is int ? v : int.tryParse('${v ?? ''}'))
+            .whereType<int>()
+            .toList();
+        if (sIds.isNotEmpty) await _localDb.markItemsPrintedByServerIds(sIds);
       }
       return response.data;
     } on DioException catch (e) {

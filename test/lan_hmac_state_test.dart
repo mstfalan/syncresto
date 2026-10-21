@@ -43,7 +43,7 @@ void main() {
 
   group('O3 — Lider state cevabı HMAC doğrulaması', () {
     test('Aynı bayi (aynı key) -> proof eşleşir, masa YANSIR', () {
-      const key = 'SR_bdfea51f_8fc954e9914c6ffa2a920d6f';
+      const key = 'SR_cccccccc_ornekanahtar0000000000000';
       final reply = leaderStateReply(key, nonce, fakeTables);
       expect(clientAcceptsState(key, nonce, reply), isTrue);
     });
@@ -56,19 +56,19 @@ void main() {
     });
 
     test('Sahte cihaz (proof YOK) -> REDDEDİLİR (enjeksiyon önlenir)', () {
-      const key = 'SR_bdfea51f_8fc954e9914c6ffa2a920d6f';
+      const key = 'SR_cccccccc_ornekanahtar0000000000000';
       final reply = {'type': 'state', 'tables': fakeTables}; // proof yok
       expect(clientAcceptsState(key, nonce, reply), isFalse);
     });
 
     test('Sahte cihaz (rastgele proof) -> REDDEDİLİR', () {
-      const key = 'SR_bdfea51f_8fc954e9914c6ffa2a920d6f';
+      const key = 'SR_cccccccc_ornekanahtar0000000000000';
       final reply = {'type': 'state', 'tables': fakeTables, 'proof': 'deadbeefdeadbeef'};
       expect(clientAcceptsState(key, nonce, reply), isFalse);
     });
 
     test('Doğru key ama YANLIŞ nonce (replay) -> REDDEDİLİR', () {
-      const key = 'SR_bdfea51f_8fc954e9914c6ffa2a920d6f';
+      const key = 'SR_cccccccc_ornekanahtar0000000000000';
       // Lider eski bir nonce'a proof üretmiş, client farklı nonce bekliyor.
       final reply = leaderStateReply(key, 'ESKI-NONCE-farkli-deger', fakeTables);
       expect(clientAcceptsState(key, nonce, reply), isFalse);

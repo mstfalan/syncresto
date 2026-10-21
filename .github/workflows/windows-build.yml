@@ -257,7 +257,7 @@ jobs:
             - SHA-256: `${{ steps.checksum.outputs.sha256 }}`
 
             ### Degisiklikler
-            - SyncResto güncellemeleri sağlanmıştır.
+            - Sürüm güncellemesi.
           files: SyncResto-Windows.zip
           draft: false
           prerelease: false

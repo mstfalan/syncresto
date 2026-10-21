@@ -10,6 +10,9 @@ import 'connectivity_service.dart';
 import 'image_cache_service.dart';
 import 'log_service.dart';
 import 'auth_failure_classifier.dart'; // 6 Eyl 2026: 401/403 siniflandirma
+import 'push_ayna.dart'; // 21 Eki 2026 (F): push ile hedefli ayna
+import 'mark_printed_tekrar.dart';
+import 'websocket_service.dart';
 
 /// API key geçersiz veya pasif olduğunda fırlatılır
 class ApiKeyInvalidException implements Exception {
@@ -46,6 +49,10 @@ class SyncService {
   // 17 Tem 2026: tarama 30sn→5dk gevşetildi (push canlı); açık-masa aynası AYRI 90sn döngüye alındı.
   Timer? _mirrorTimer;
   bool _isMirroring = false;            // _runMirrorCycle re-entry guard
+  // 21 Eki 2026 (F): push ile HEDEFLI ayna — 90 sn donguyu beklemeden ~3-5 sn'de tazelenir.
+  final Set<int> _pushAynaMasalari = {};
+  Timer? _pushAynaTimer;
+  int _pushAynaErteleme = 0;
   DateTime? _lastBgUpdateAt;            // sweepAfterReconnect debounce için (SADECE başarılı taramada set)
   DateTime? _lastDisconnectAt;          // kesinti-farkındalıklı debounce (Fable filo bulgusu #11)
   bool _pendingSweep = false;           // tarama sürerken gelen reconnect telafisi kuyruğu (#0)
@@ -114,6 +121,11 @@ class SyncService {
         markDisconnected(); // filo #11: kesinti anını kaydet (debounce referansı)
       }
     });
+
+    // 21 Eki 2026 (F): baska kasa/WebPOS fis basinca sunucu 'table_status' push'u yollar ->
+    // o masanin aynasi hemen tazelenir (printed=1 gelir; kesintide cevrimdisi fis eski kalemi basmaz).
+    // Liste tabanli kayit (contains) -> init tekrar cagrilirsa cift kayit olmaz.
+    WebSocketService().addCacheInvalidateRawListener(_onMasaDurumuPush);
 
     // Periyodik sync (her 10 saniye)
     _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
@@ -698,6 +710,80 @@ class SyncService {
     }
   }
 
+  void _onMasaDurumuPush(List<String> types, Map<String, dynamic> raw) {
+    if (!types.contains('table_status')) return;
+    final secilen = pushAynaMasalariSec(raw);
+    if (secilen.isEmpty) return;
+    _pushAynaMasalari.addAll(secilen);
+    _pushAynaTimer?.cancel(); // 1.2 sn debounce: ardisik push'lar tek tura iner
+    _pushAynaTimer = Timer(const Duration(milliseconds: 1200), _pushAynaCalistir);
+  }
+
+  Future<void> _pushAynaCalistir() async {
+    if (_dio == null || !_connectivity.isOnline) { _pushAynaMasalari.clear(); return; }
+    if (_isMirroring || _isBgUpdating) {
+      // Dongu/tarama zaten ayna yaziyor -> en fazla 3x2 sn ertele, sonra birak (dongu halleder)
+      if (_pushAynaErteleme++ < 3) {
+        _pushAynaTimer = Timer(const Duration(seconds: 2), _pushAynaCalistir);
+        return;
+      }
+      _pushAynaErteleme = 0;
+      _pushAynaMasalari.clear();
+      return;
+    }
+    _pushAynaErteleme = 0;
+    final ids = _pushAynaMasalari.toList();
+    _pushAynaMasalari.clear();
+    _isMirroring = true; // _runMirrorCycle ile AYNI kilit: prune/upsert yarisi yok
+    try {
+      const poolSize = 4;
+      for (var i = 0; i < ids.length; i += poolSize) {
+        await Future.wait(ids.skip(i).take(poolSize).map((tableId) async {
+          try {
+            final resp = await _dio!.get('/api/pos/tickets/table/$tableId');
+            final t = resp.data is Map ? resp.data['ticket'] : null;
+            if (t is Map<String, dynamic>) await _localDb.upsertServerTicket(t);
+          } catch (_) {} // tek masa hatasi digerlerini etkilemez
+        }));
+      }
+      print('[Sync] push ayna: ${ids.length} masa');
+    } finally {
+      _isMirroring = false;
+    }
+  }
+
+  /// 21 Eki 2026: online "Mutfaga Gonder" ONCESI bu adisyonun bekleyen
+  /// mark_printed kayitlarini iletir; yoksa sunucu ayni kalemleri printed=0 gorup YENIDEN basar.
+  /// SADECE mark_printed (sunucu ucu idempotent). add_item gibi tekrari cift kayit ureten eylemlere
+  /// DOKUNMAZ. Periyodik sync suruyorsa bitmesini bekler ve kilidi devralir (ayni kaydi iki kez
+  /// islememek icin); [azami] dolarsa vazgecer -> bugunku davranis. Hata firlatmaz.
+  Future<void> flushMarkPrintedForTicket(int serverTicketId,
+      {Duration azami = const Duration(seconds: 6)}) async {
+    if (_dio == null || !_connectivity.isOnline) return;
+    if ((await _localDb.getPendingMarkPrintedForServerTicket(serverTicketId)).isEmpty) return;
+    final t0 = DateTime.now();
+    while (_isSyncing && DateTime.now().difference(t0) < azami) {
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+    if (_isSyncing) return;
+    _isSyncing = true;
+    try {
+      // kilit alindiktan SONRA yeniden oku (periyodik sync az once tamamlamis olabilir)
+      final rows = await _localDb.getPendingMarkPrintedForServerTicket(serverTicketId);
+      for (final row in rows) {
+        final kalan = azami - DateTime.now().difference(t0);
+        if (kalan <= Duration.zero) break;
+        try {
+          await _processSyncItem(row).timeout(kalan);
+        } catch (e) {
+          print('[Sync] mark_printed on-iletim: $e');
+        }
+      }
+    } finally {
+      _isSyncing = false;
+    }
+  }
+
   /// İki ürün arasında değişiklik var mı kontrol et.
   /// 17 Tem 2026 FIX: kaynaklar tip-farklı (SQLite REAL/0-1 vs JSON "430.00"/true/false) —
   /// düz toString karşılaştırması HER ürünü her taramada "değişti" sayıyordu ("315 ürün
@@ -783,6 +869,22 @@ class SyncService {
             print('[Sync] Bağımlılık henüz tamamlanmadı: $syncId depends on $dependsOn');
           }
         }
+      }
+
+      // 21 Eki 2026: mark_printed bagimsiz oldugu icin bu turda kalemlerden ONCE islenir;
+      // kalemler henuz sunucuda yoksa "bekliyor" der ve ancak 10 sn sonraki turda gider -> o arada
+      // BASKA kasa/WebPOS ayni masaya "Mutfaga Gonder" derse sunucu printed=0 gorup YENIDEN basar.
+      // Bu turda kalem eklendiyse bekleyen mark_printed'lari AYNI turun sonunda bir kez daha dene.
+      // Sunucu ucu idempotent (printed = 0 guard); siralama/oncelik DEGISMEZ.
+      final tekrar = markPrintedTekrarSec(
+        turBasi: allPending,
+        yenidenOkunan: await _localDb.getPendingSyncItems(),
+        tamamlanan: completedSyncIds,
+      );
+      for (final item in tekrar) {
+        final dependsOn = item['depends_on_sync_id'] as int?;
+        if (dependsOn != null && !await _isDependencyCompleted(dependsOn)) continue;
+        if (await _processSyncItem(item)) completedSyncIds.add(item['id'] as int);
       }
 
       print('[Sync] Tüm işlemler tamamlandı');
@@ -1898,6 +2000,8 @@ class SyncService {
     _syncTimer?.cancel();
     _cacheUpdateTimer?.cancel();   // 11 Haz 2026 LEAK FIX
     _mirrorTimer?.cancel();        // 17 Tem 2026: ayna döngüsü
+    _pushAynaTimer?.cancel();      // 21 Eki 2026 (F): push ayna debounce
+    WebSocketService().removeCacheInvalidateRawListener(_onMasaDurumuPush);
     _connectivitySub?.cancel();    // 11 Haz 2026 LEAK FIX
   }
 }

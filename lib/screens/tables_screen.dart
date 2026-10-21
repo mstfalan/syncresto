@@ -617,7 +617,8 @@ class _TablesScreenState extends State<TablesScreen> {
       // 21 Tem 2026: damgayı fetch BAŞLANGICIYLA vur (bitiş değil) — bu load ne kadar
       // ÖNCEKİ veriyi getirdi bilgisi self-echo guard için doğru olur.
       _lastLoadStartedAt = loadStartedAt;
-      if (!silent) {
+      // 16 Eki 2026: try icindeki 'if (!mounted) return' finally'yi atlatmaz — burada da kontrol sart.
+      if (!silent && mounted) {
         setState(() => _isLoading = false);
       }
       // Guard'a takılan silent load kuyruğa alındıysa bir kez daha çalış (yutma yok).
@@ -731,6 +732,7 @@ class _TablesScreenState extends State<TablesScreen> {
   }
 
   void _showError(String message) {
+    if (!mounted) return; // 16 Eki 2026: kapanmis pencerede context yok
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: Colors.red),
     );
@@ -835,6 +837,8 @@ class _TablesScreenState extends State<TablesScreen> {
       // Adisyon var → direkt ürün ekle ekranını aç
       final ticketId = (ticket['id'] as num?)?.toInt() ?? (ticket['local_id'] as num?)?.toInt();
       if (ticketId == null) return;
+      // 16 Eki 2026: pencere await sirasinda kapandiysa sessizce cik (POS-CRASH "Null check" raporlarinin kaynagi).
+      if (!mounted) return;
 
       await showDialog(
         context: context,
@@ -885,6 +889,7 @@ class _TablesScreenState extends State<TablesScreen> {
             if (newTicket != null) {
               final newTicketId = (newTicket['id'] as num?)?.toInt() ?? (newTicket['local_id'] as num?)?.toInt();
               if (newTicketId != null) {
+                if (!mounted) return; // 16 Eki 2026: pencere kapandiysa sessizce cik
                 await showDialog(
                   context: context,
                   barrierDismissible: false,
@@ -915,6 +920,7 @@ class _TablesScreenState extends State<TablesScreen> {
       }
 
       // Normal akış → kişi sayısı seç + adisyon aç popup'ı
+      if (!mounted) return; // 16 Eki 2026: pencere kapandiysa sessizce cik
       await showDialog(
         context: context,
         barrierDismissible: false,

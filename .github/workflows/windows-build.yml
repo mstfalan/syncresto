@@ -42,6 +42,15 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
+      # 1.7.9 yanlis (kilitsiz) motorla derlenmis, kasalarda tiklama gecikmesi yapmisti.
+      # Motor kilitli commit degilse derleme burada DURUR, yayin cikmaz.
+      - name: Verify Flutter revision
+        shell: pwsh
+        run: |
+          $v = flutter --version | Out-String
+          if ($v -notmatch 'revision e8deb86b6f') { Write-Host $v; Write-Error "Flutter motoru kilitli commit degil"; exit 1 }
+          Write-Host "Flutter motoru dogru: e8deb86b6f"
+
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
 

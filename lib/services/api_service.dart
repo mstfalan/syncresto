@@ -89,6 +89,17 @@ class ApiService {
     }
 
     _dio.interceptors.add(IstekOlcum()); // istek suresi olcumu (5 dk ozet + yavas istek)
+    // 26 Eki 2026 (Fable O3): baglanti hatasi alan gercek istek -> hemen yoklama (gercek kesinti hizli tespit).
+    _dio.interceptors.add(InterceptorsWrapper(onError: (e, handler) {
+      if (e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.receiveTimeout) {
+        try {
+          ConnectivityService().agHatasiGoruldu();
+        } catch (_) {}
+      }
+      handler.next(e);
+    }));
     _dio.interceptors.add(LogInterceptor(
       requestBody: false,
       responseBody: false,

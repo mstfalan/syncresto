@@ -246,6 +246,20 @@ class LicenseService {
           debugPrint('[LicenseService] Network hatası, offline moda geçiliyor: ${e.message}');
           // Network hatası - local'e devam
         } else {
+          // 26 Eki 2026: 409 DEVICE_CONFLICT (anahtar sunucuda baska cihaz kimligine bagli) sessizce
+          // yutuluyordu -> lisans tarihi hic yenilenmedi (KASA-GREEN-2: 4007 saat). Davranis ayni
+          // (yerel lisansla devam), ama artik loglanir ki panelden gorulsun.
+          if (e.response?.statusCode == 409) {
+            _logService.warning(
+              LogType.general,
+              'Lisans dogrulanamadi: anahtar baska cihaza kayitli (409)',
+              details: {
+                'hata': e.response?.data is Map ? e.response?.data['error'] : null,
+                'kayitli_cihaz': e.response?.data is Map ? e.response?.data['existing_device'] : null,
+                'son_kontrol_saat': localLicense?.hoursSinceLastCheck,
+              },
+            );
+          }
           // 401, 403 gibi hatalar - lisans geçersiz
           if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
             if (localLicense != null && localLicense.isValid) {

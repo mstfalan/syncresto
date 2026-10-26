@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'log_service.dart';
+import 'yoklama_karari.dart';
 
 class ConnectivityService {
   static final ConnectivityService _instance = ConnectivityService._internal();
@@ -37,7 +38,10 @@ class ConnectivityService {
   }
 
   Timer? _probeTimer;
+  Timer? _teyitTimer;
   bool _isProbing = false;
+  bool _disposed = false;
+  final YoklamaKarari _karar = YoklamaKarari();
 
   Future<void> init() async {
     // 6 Tem 2026 FINAL: RUNTIME KILL-SWITCH — sahada probe sorun cikarirsa yeni build beklemeden
@@ -63,6 +67,12 @@ class ConnectivityService {
     // Sunucuyu yormaz (hafif GET /health ~3ms). NIC yoksa probe atlanir (zaten offline).
     if (enableProbe) {
       await _runProbe(); // ilk probe hemen
+      // 26 Eki 2026 (Fable O2): acilista korunacak "yerlesik online" durumu yok; ilk yoklama
+      // basarisizsa 3 sn teyit beklemeden hemen ikinciyi yap (sabah modem kapali acilis gecikmesin).
+      if (_karar.teyitBekliyor) {
+        _teyitTimer?.cancel();
+        await _runProbe();
+      }
       _probeTimer = Timer.periodic(const Duration(seconds: 12), (_) => _runProbe());
     }
   }
@@ -75,15 +85,25 @@ class ConnectivityService {
       r == ConnectivityResult.mobile
     );
     // NIC kopunca backend de erisilemez sayilir (hizli offline gecisi).
-    if (!_nicOnline) _backendReachable = false;
+    if (!_nicOnline) {
+      _backendReachable = false;
+      _karar.sifirla();
+    }
     // NIC geri gelince backend'i hemen dogrula (online oldugunu varsayma).
     if (_nicOnline && enableProbe) _runProbe();
     _emitIfChanged(wasOnline, notify);
   }
 
-  /// Backend'e GERCEKTEN ulasilabiliyor mu — hafif GET /health (2.5sn timeout, IPv4 force).
+  /// 26 Eki 2026 (Fable O3): gercek bir istek baglanti hatasi aldiginda cagrilir (api_service
+  /// interceptor). 12 sn periyodik yoklamayi beklemeden hemen yoklar; gercek kesinti hizli tespit edilir.
+  void agHatasiGoruldu() {
+    if (_disposed || !enableProbe || !isOnline) return;
+    _runProbe();
+  }
+
+  /// Backend'e GERCEKTEN ulasilabiliyor mu — hafif GET /health (3.5sn timeout, IPv4 force).
   Future<void> _runProbe() async {
-    if (!enableProbe) return;
+    if (!enableProbe || _disposed) return;
     if (_isProbing) return; // re-entry guard (ust uste probe atma)
     _isProbing = true;
     final wasOnline = isOnline;
@@ -94,18 +114,26 @@ class ConnectivityService {
         // Probe hedefi yok -> guvenli: backend erisilir varsay (eski davranis).
         _backendReachable = true;
       } else {
-        _backendReachable = await _pingHealth(_probeBaseUrl!);
+        // Fable O3-2: toplam sure siniri (drain dahil) — _isProbing kilidi asla takili kalmasin.
+        final basarili = await _pingHealth(_probeBaseUrl!)
+            .timeout(const Duration(seconds: 8), onTimeout: () => false);
+        _backendReachable = _karar.uygula(basarili: basarili, erisilebilir: _backendReachable);
+        // 26 Eki 2026: online iken ilk hata -> 12 sn beklemeden kisa teyit yoklamasi.
+        if (_karar.teyitBekliyor && _nicOnline && !_disposed) {
+          _teyitTimer?.cancel();
+          _teyitTimer = Timer(const Duration(seconds: 3), () => _runProbe());
+        }
       }
     } catch (_) {
       // Probe'un KENDISI patlarsa online akisi bozma -> erisilir varsay (guvenli taraf).
       _backendReachable = true;
     } finally {
       _isProbing = false;
-      _emitIfChanged(wasOnline, true);
+      if (!_disposed) _emitIfChanged(wasOnline, true);
     }
   }
 
-  /// GET {base}/health — 2.5sn timeout. true = 2xx/3xx (backend ayakta), false = timeout/hata/5xx.
+  /// GET {base}/health — 3.5sn timeout (26 Eki 2026: 2.5 -> 3.5; her yoklama yeni TLS baglantisi kurar). true = 2xx/3xx (backend ayakta), false = timeout/hata/5xx.
   /// 🔴 6 Tem 2026 FINAL-FIX A (KRİTİK): Eski kod connectionFactory ile DUZ TCP soket donduruyordu;
   /// baseUrl https oldugu icin TLS el sikismasi HIC yapilmiyordu -> Cloudflare 'plain HTTP to HTTPS
   /// port' HTTP 400 -> probe HEP false -> uygulama ACILISTAN ITIBAREN KALICI OFFLINE kaliyordu
@@ -117,9 +145,9 @@ class ConnectivityService {
     try {
       final uri = Uri.parse('$base/health');
       client = HttpClient();
-      client.connectionTimeout = const Duration(milliseconds: 2500);
-      final request = await client.getUrl(uri).timeout(const Duration(milliseconds: 2500));
-      final response = await request.close().timeout(const Duration(milliseconds: 2500));
+      client.connectionTimeout = const Duration(milliseconds: 3500);
+      final request = await client.getUrl(uri).timeout(const Duration(milliseconds: 3500));
+      final response = await request.close().timeout(const Duration(milliseconds: 3500));
       await response.drain<void>();
       return response.statusCode >= 200 && response.statusCode < 400;
     } catch (_) {
@@ -234,7 +262,9 @@ class ConnectivityService {
   }
 
   void dispose() {
+    _disposed = true;
     _probeTimer?.cancel();
+    _teyitTimer?.cancel();
     _connectionController.close();
   }
 }

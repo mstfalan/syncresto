@@ -110,7 +110,7 @@ class WebSocketService {
     if (_serverUrl == null) return;
 
     // 11 Haz 2026: SOCKET LEAK FIX. Eski socket dispose EDİLMEDEN yenisi açılınca
-    // (lisans hatası / 12sa offline / "Tekrar Dene" → InitialSyncScreen tekrar açılıp
+    // (lisans hatası / 48sa offline / "Tekrar Dene" → InitialSyncScreen tekrar açılıp
     // connect() yeniden çağrılınca) eski socket + 6 event handler asılı kalıyordu.
     // Asılı socket'ler reconnect timer çalıştırmaya devam (CPU) + aynı event N kez
     // işleniyor (N kez ses/yazdırma → ÇİFT FİŞ). Uzun açık kalınca birikip donduruyordu.

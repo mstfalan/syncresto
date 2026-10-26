@@ -402,7 +402,7 @@ class _TablesScreenState extends State<TablesScreen> {
 
   /// Periyodik lisans kontrolü - her 12 saatte bir
   /// Online: API'den kontrol et
-  /// Offline: Local cache'den kontrol et (son 12 saat içinde online kontrol yapılmış olmalı)
+  /// Offline: Local cache'den kontrol et (son 48 saat içinde online kontrol yapılmış olmalı)
   void _startLicenseCheck() {
     // İlk kontrol hemen (uygulama açıldığında)
     _checkLicense();
@@ -422,15 +422,17 @@ class _TablesScreenState extends State<TablesScreen> {
       if (!mounted) return;
 
       // Lisans geçersiz ve offline kullanım da mümkün değil
-      // VEYA 12 saatten fazla offline (internet bağlantısı gerekli)
+      // VEYA 48 saatten fazla offline (internet bağlantısı gerekli)
       bool shouldBlock = !result.isValid && !result.canUseOffline;
       String errorMsg = '';
 
-      // 12 saat kontrolü - son online kontrol ne zaman yapıldı?
+      // Son online kontrol ne zaman yapıldı?
+      // 26 Eki 2026: esik 12 -> 48 sa (canUseOffline ile ayni: > 48). 6 Tem'de canUseOffline 48 sa'e
+      // cikarilmisti ama bu esik 12'de kalmisti: sabah ilk acilis + kisa kesinti = kasa girise atiliyordu.
       if (!shouldBlock && result.licenseInfo != null) {
         final hoursSinceCheck = result.licenseInfo!.hoursSinceLastCheck;
-        if (hoursSinceCheck >= 12) {
-          // 12 saatten fazla offline - internet bağlantısı gerekli
+        if (hoursSinceCheck > 48) {
+          // 48 saatten fazla offline - internet bağlantısı gerekli
           if (!_isOnline) {
             shouldBlock = true;
             errorMsg = 'İnternet Bağlantısı Gerekli\n\n'

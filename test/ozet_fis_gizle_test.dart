@@ -90,10 +90,11 @@ void main() {
       expect(filtre, lessThan(p.indexOf('addToPrintQueue(')));
     });
 
-    test('_onUpgrade v23 adımında migrasyonV23 çağrılıyor ve sürüm 23', () {
+    test('_onUpgrade v23 adımında migrasyonV23 çağrılıyor ve sürüm ≥ 23', () {
       final db = File('lib/services/local_db_service.dart').readAsStringSync();
       expect(db.contains('if (oldVersion < 23) {\n      await migrasyonV23(db);'), true);
-      expect(db.contains('version: 23,'), true);
+      // 28 Eki 2026: v24 (kalem bölme) sürümü 24'e çıkardı; v23 adımı yerinde kalmalı.
+      expect(db.contains('version: 24,'), true);
       expect(db.contains('hide_on_summary_receipt INTEGER DEFAULT 0,\n        cached_at TEXT NOT NULL'), true);
     });
   });

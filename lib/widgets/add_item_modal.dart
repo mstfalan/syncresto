@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 import '../services/quick_sale_rules.dart'; // 8 Eyl 2026: gizli hizli-satis masalari secicilerde gorunmez
 import '../services/ikram_rules.dart';
+import '../services/kalem_bolme.dart'; // 28 Eki 2026: parcali odemede "Bol" (1 urun N parca) kurallari
 import '../services/printer_service.dart';
 import '../services/log_service.dart';
 import '../services/image_cache_service.dart';
@@ -2215,6 +2216,15 @@ class _AddItemModalState extends State<AddItemModal> {
       return;
     }
 
+    // KİLİT 3 — 28 Eki 2026 BÖLÜNMÜŞ KALEMDE İÇERİK/FİYAT DEĞİŞMEZ (sunucu da 400 der).
+    // Parçalar ana satırın kopyasıdır; tek üyenin varyantı/fiyatı değişirse grup toplamı
+    // ürün fiyatından kopar. Not serbest (Not Ekle), fiyat/seçim kilitli.
+    if (KalemBolme.grupUyesiMi(item)) {
+      _showError('Bölünmüş kalemin içeriği değiştirilemez (parça ${KalemBolme.parcaEtiketi(item)}). '
+          'Gerekirse kalemi iptal edip (tüm parçalar birlikte iptal olur) yeniden ekleyin.');
+      return;
+    }
+
     final variants = (prod['variants'] is List) ? prod['variants'] as List : const [];
     if (variants.isEmpty) return;
 
@@ -2993,6 +3003,13 @@ class _AddItemModalState extends State<AddItemModal> {
         return;
       }
 
+      // 28 Eki 2026 BÖL: bölünmüş grup üyesinde FİYAT değişmez (sunucu 400 der); NOT serbest.
+      // Fiyat öğesi değişmediyse (newUnitPrice null) yalnız not gider — izinli.
+      if (newUnitPrice != null && KalemBolme.grupUyesiMi(_kalemK)) {
+        _showError('Bölünmüş kalemin fiyatı değiştirilemez; yalnız not düzenlenebilir.');
+        return;
+      }
+
       await widget.apiService.updateTicketItem(
         ticketId: ticketId,
         itemId: itemId,
@@ -3146,6 +3163,58 @@ class _AddItemModalState extends State<AddItemModal> {
       }
     }
 
+    // =========================================================================
+    // 28 Eki 2026 — BÖLÜNMÜŞ KALEM: grup BİRLİKTE iptal edilir (sunucu yapar; TEK istek,
+    // iptal fişi/log ana satır adına 1 kez). Grupta ÖDENMİŞ parça varsa sunucu 400 der —
+    // burada önceden söylenir (istek hiç atılmaz; deleteTicketItem'ın ağ-hatası offline
+    // yoluna da düşmez). Grup değilse akış BİREBİR eskisi gibi.
+    // =========================================================================
+    if (KalemBolme.grupUyesiMi(item)) {
+      if (KalemBolme.gruptaOdenmisVarMi(item, _ticketItems)) {
+        _showError('Bölünmüş kalemin ödenmiş parçası var — iptal edilemez.');
+        return;
+      }
+      final parcaSayisi = KalemBolme.grupKalemleri(item, _ticketItems).length;
+      if (!mounted) return;
+      final onay = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          title: const Row(children: [
+            Icon(Icons.call_split_rounded, color: Color(0xFF7C3AED)),
+            SizedBox(width: 8),
+            Expanded(child: Text('Bölünmüş Kalem', style: TextStyle(fontSize: 17))),
+          ]),
+          content: Text(
+            'Bölünmüş kalemin tüm parçaları iptal edilecek '
+            '(${item['product_name'] ?? ''} · $parcaSayisi parça).',
+            style: const TextStyle(fontSize: 15),
+          ),
+          actionsAlignment: MainAxisAlignment.spaceEvenly,
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          actions: [
+            SizedBox(
+              width: 140, height: 52,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87),
+                child: const Text('Vazgeç', style: TextStyle(fontSize: 16)),
+              ),
+            ),
+            SizedBox(
+              width: 200, height: 52,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                child: const Text('Tümünü İptal Et', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (onay != true || !mounted) return;
+    }
+
     // 1 Haz 2026 (v1.5.6): Mutfağa GİTMEMİŞ ürün iptalinde uyarı YOK.
     //  - printed=0 → direkt sil, reason='Mutfağa gönderilmedi' otomatik
     //  - printed=1 → mevcut sebep seçme dialog'u (panel_pos_cancel_reasons)
@@ -3279,6 +3348,12 @@ class _AddItemModalState extends State<AddItemModal> {
           cancelReason: selectedReason,
           waiterId: widget.waiterId,
         );
+        // 28 Eki 2026 (ORTA-3): sunucu iş kuralıyla reddetti (400/409; ör. bölünmüş kalemin
+        // ödenmiş parçası var) -> başarı SAYILMAZ, yerel iptal YOK, mesaj kullanıcıya gider.
+        if (cancelResponse['success'] == false) {
+          ilkHata ??= cancelResponse['error']?.toString() ?? 'İşlem reddedildi';
+          continue;
+        }
         basarili++;
 
         // Backend "cancel_print" payload döndüyse → mutfağa iptal fişi bas
@@ -4148,6 +4223,11 @@ class _AddItemModalState extends State<AddItemModal> {
 
     if (!mounted) return;
 
+    // 28 Eki 2026 BOL: pencere kapaninca (bolme / kismi odeme sonrasi) BU ekranin listesi de
+    // sunucudan tazelenir. Eskiden yalniz ust pencere (onItemAdded -> TicketModal._loadTicket)
+    // tazeleniyor, buradaki _ticketItems bayat kaliyordu (parca satirlari / odeme rozetleri
+    // gorunmuyordu). Adisyon kapandiysa (allPaid) ekran zaten kapaniyor -> tazeleme YOK.
+    var adisyonBitti = false;
     await showDialog(
       context: context,
       barrierDismissible: false,
@@ -4158,6 +4238,7 @@ class _AddItemModalState extends State<AddItemModal> {
         apiService: widget.apiService,
         onPaymentComplete: (allPaid) {
           if (allPaid) {
+            adisyonBitti = true;
             // Tüm ürünler ödendi, adisyon kapanır - dialog ve modal kapanır
             Navigator.pop(ctx);
             widget.onItemAdded();
@@ -4167,9 +4248,22 @@ class _AddItemModalState extends State<AddItemModal> {
             widget.onItemAdded();
           }
         },
+        // 28 Eki 2026 BOL: bolme sonrasi ust pencere (TicketModal._loadTicket) de tazelensin.
+        onItemsChanged: () => widget.onItemAdded(),
+        // Odeme sonrasi pencere listesi SUNUCUDAN tazelenir (bolme + odeme tutarli kalsin).
+        reloadItems: () async {
+          // Cevrimdisinda liste YEREL id'li satirlarla degismesin (secim sunucu id'siyle odenir).
+          if (!widget.apiService.isOnline) return null;
+          await _loadTicketItems();
+          if (!mounted) return null;
+          return _ticketItems.where((i) => i['status'] != 'cancelled').toList();
+        },
         onClose: () => Navigator.pop(ctx),
       ),
     );
+    if (!adisyonBitti && mounted) {
+      await _loadTicketItems();
+    }
   }
 
   // ==========================================================================
@@ -4380,6 +4474,49 @@ class _AddItemModalState extends State<AddItemModal> {
     if (itemId == null) {
       _showError('Ürün ID alınamadı');
       return;
+    }
+
+    // 28 Eki 2026 BÖL: bölünmüş grup BİRLİKTE taşınır (sunucu yapar) — kasiyer bunu önceden
+    // görsün. Grup değilse akış BİREBİR eskisi gibi.
+    if (KalemBolme.grupUyesiMi(selectedItem)) {
+      final parcaSayisi = KalemBolme.grupKalemleri(selectedItem, _ticketItems).length;
+      final onay = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          title: const Row(children: [
+            Icon(Icons.call_split_rounded, color: Color(0xFF7C3AED)),
+            SizedBox(width: 8),
+            Expanded(child: Text('Bölünmüş Kalem', style: TextStyle(fontSize: 17))),
+          ]),
+          content: Text(
+            'Bölünmüş kalemin tüm parçaları birlikte taşınacak '
+            '(${selectedItem['product_name'] ?? ''} · $parcaSayisi parça). Devam edilsin mi?',
+            style: const TextStyle(fontSize: 15),
+          ),
+          actionsAlignment: MainAxisAlignment.spaceEvenly,
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          actions: [
+            SizedBox(
+              width: 140, height: 52,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[300], foregroundColor: Colors.black87),
+                child: const Text('Vazgeç', style: TextStyle(fontSize: 16)),
+              ),
+            ),
+            SizedBox(
+              width: 200, height: 52,
+              child: ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7C3AED), foregroundColor: Colors.white),
+                child: const Text('Birlikte Taşı', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (onay != true || !mounted) return;
     }
 
     try {
@@ -6376,8 +6513,12 @@ class _AddItemModalState extends State<AddItemModal> {
         final gruplar = <String, Map<String, dynamic>>{};
         for (final i in aktif) {
           final k = anahtar(i as Map);
-          final adet = (_safeInt(i['quantity']) ?? 1);
-          final tutar = _safeDouble(i['unit_price']) * adet;
+          // 28 Eki 2026 BOL: parca satiri FIZIKSEL urun degil -> adet 0 (ana satir 1 sayar;
+          // ayni anahtarda birlesince grup "1x" gorunur). Tutar ise kendi satir tutari
+          // (para okuyucu: parcalarin toplami = urun fiyati, degismez).
+          final gercekAdet = (_safeInt(i['quantity']) ?? 1);
+          final adet = KalemBolme.parcaSatiriMi(i) ? 0 : gercekAdet;
+          final tutar = _safeDouble(i['unit_price']) * gercekAdet;
           if (gruplar.containsKey(k)) {
             gruplar[k]!['adet'] = (gruplar[k]!['adet'] as int) + adet;
             gruplar[k]!['tutar'] = (gruplar[k]!['tutar'] as double) + tutar;
@@ -6667,6 +6808,23 @@ class _AddItemModalState extends State<AddItemModal> {
                       color: isPaid ? Colors.green[700] : const Color(0xFF1F2937),
                     ),
                   ),
+                  // 28 Eki 2026 BOL: bolunmus kalem parca etiketi (1/2, 2/2) — adisyona bakan
+                  // herkes gorsun (parcali odeme penceresini acmak zorunda kalmasin).
+                  if (KalemBolme.parcaEtiketi(item) != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF7C3AED).withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text('Bölünmüş · parça ${KalemBolme.parcaEtiketi(item)}',
+                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF6D28D9))),
+                        ),
+                      ]),
+                    ),
                   if (notes != null && notes.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 1),
@@ -7188,6 +7346,10 @@ class _PartialPaymentDialog extends StatefulWidget {
   final ApiService apiService;
   final Function(bool allPaid) onPaymentComplete;
   final VoidCallback onClose;
+  // 28 Eki 2026 BOL: bolme sonrasi ust ekrani tazele (odeme olmadan da kalem listesi degisti).
+  final VoidCallback? onItemsChanged;
+  // 28 Eki 2026 BOL: pencere listesini SUNUCUDAN tazele (aktif kalemleri doner; null = tazelenemedi).
+  final Future<List<dynamic>?> Function()? reloadItems;
 
   const _PartialPaymentDialog({
     required this.items,
@@ -7196,6 +7358,8 @@ class _PartialPaymentDialog extends StatefulWidget {
     required this.onPaymentComplete,
     required this.onClose,
     this.waiterId,
+    this.onItemsChanged,
+    this.reloadItems,
   });
 
   @override
@@ -7310,6 +7474,10 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
           }
         }
         widget.onPaymentComplete(allPaid);
+        // 28 Eki 2026 BOL: kismi odemede liste SUNUCUDAN tazelenir (yukaridaki yerel isaretleme
+        // aninda gorunum icin kalir; sunucu kopyasi bolme + odeme durumunu tutarli tutar).
+        // allPaid'de pencere zaten kapandi (onPaymentComplete pop etti) -> dokunma.
+        if (!allPaid) await _sunucudanYenile();
       } else {
         _showError(result['error'] ?? 'Ödeme başarısız');
       }
@@ -7318,6 +7486,99 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     } finally {
       if (mounted) setState(() => _isProcessing = false);
     }
+  }
+
+  // ==========================================================================
+  // 28 Eki 2026 — BOL (Mustafa: "200 TL'lik 1 urunu iki kisi 100+100 ya da elle tutarla
+  // odeyebilsin"). 1 urun N parcaya bolunur; her parca ayri satir olarak odenir.
+  // SADECE ONLINE: sunucu tek transaction'da parca satirlarini uretir ve TUM kalem listesini
+  // doner -> pencere listesi SUNUCU yanitiyla DEGISTIRILIR (yerel kopya bayatlamasin).
+  // Bolme fis KESMEZ, mutfaga BASMAZ. Hesap saf KalemBolme'de (test edilir).
+  // ==========================================================================
+  Future<void> _bol(Map<String, dynamic> item) async {
+    if (_isProcessing) return;
+    final itemId = KalemBolme.tamSayi(item['id']);
+    if (itemId == null) return;
+    final satirTutari = _safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1);
+    final secim = await showDialog<Map<String, dynamic>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _BolDialog(
+        urunAdi: item['product_name']?.toString() ?? '',
+        satirTutari: satirTutari,
+      ),
+    );
+    if (secim == null || !mounted) return;
+    final amounts = (secim['amounts'] as List?)?.map((a) => (a as num).toDouble()).toList();
+    // Sunucu KURUS esitligi arar (yuvarlama/fallback YOK) — gondermeden once dogrula.
+    if (amounts != null && !KalemBolme.toplamTutuyorMu(satirTutari, amounts)) {
+      _showError('Parçaların toplamı satır tutarına eşit değil');
+      return;
+    }
+    setState(() => _isProcessing = true);
+    try {
+      final result = await widget.apiService.splitItem(
+        ticketId: widget.ticketId,
+        itemId: itemId,
+        mode: secim['mode'] as String,
+        parts: secim['parts'] as int?,
+        amounts: amounts,
+        waiterId: widget.waiterId,
+      );
+      if (!mounted) return;
+      if (result['success'] == true) {
+        final items = result['items'];
+        if (items is List) {
+          setState(() {
+            _items = items
+                .whereType<Map>()
+                .where((i) => (i['status'] ?? 'active').toString() != 'cancelled')
+                .map((i) => Map<String, dynamic>.from(i))
+                .toList();
+            _selectedIds.clear();
+          });
+        } else {
+          await _sunucudanYenile();
+        }
+        widget.onItemsChanged?.call();
+        final parcaSayisi = (result['parts'] as List?)?.length ?? secim['parts'] ?? 2;
+        _showInfo('Ürün $parcaSayisi parçaya bölündü');
+      } else {
+        _showError(result['error']?.toString() ?? 'Bölme başarısız');
+        // Hata/409 (zaten bölünmüş, başka kasa ödedi…) sonrasında da liste SUNUCUDAN tazelenir:
+        // kasiyer güncel parça/ödeme durumunu görsün, bayat satıra tekrar "Böl" demesin.
+        await _sunucudanYenile();
+      }
+    } catch (e) {
+      _showError('Bölme hatası: $e');
+      await _sunucudanYenile();
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
+  /// Pencere listesini SUNUCUDAN tazele (ust ekran _loadTicketItems'i cagirir, aktif kalemleri
+  /// doner). Tazelenemezse mevcut liste KALIR (yerel isaretleme zaten yapildi).
+  Future<void> _sunucudanYenile() async {
+    final yenile = widget.reloadItems;
+    if (yenile == null) return;
+    try {
+      final liste = await yenile();
+      if (liste == null || !mounted) return;
+      setState(() {
+        _items = liste.whereType<Map>().map((i) => Map<String, dynamic>.from(i)).toList();
+        _selectedIds.removeWhere((id) => !_items.any((i) => i['id'] == id));
+      });
+    } catch (e) {
+      print('[PartialPayment] sunucudan tazeleme atlandi: $e');
+    }
+  }
+
+  void _showInfo(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: const Color(0xFF059669)),
+    );
   }
 
   Future<void> _closeAll(String paymentMethod) async {
@@ -7613,6 +7874,10 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
     final paymentMethod = item['payment_method']?.toString().toUpperCase() ?? '';
     // 3 Agu 2026 IKRAM: kilitli gorunum — secilemez, tutari ustu cizili, turuncu rozet
     final isIkram = !isPaid && IkramRules.kalemIkramMi(item);
+    // 28 Eki 2026 BOL: "Bol" dugmesi yalniz bolunebilen satirda (odenmemis, ikram/combo degil,
+    // 1 adet, henuz bolunmemis). Parca etiketi (1/2, 2/2) bolunmus grup uyesinde.
+    final bolunebilir = !isPaid && !isIkram && KalemBolme.bolunebilirMi(item);
+    final parcaEtiketi = KalemBolme.parcaEtiketi(item);
 
     // Renk şeması:
     //   Ödenmiş → yeşil
@@ -7700,6 +7965,47 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
                   ),
                 ),
               ),
+              // 28 Eki 2026 BOL: parca etiketi — bolunmus grup uyesi (ana 1/N, parcalar 2..N/N)
+              if (parcaEtiketi != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF7C3AED).withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF7C3AED).withOpacity(0.5)),
+                  ),
+                  child: Text(
+                    'PARÇA $parcaEtiketi',
+                    style: const TextStyle(color: Color(0xFF6D28D9), fontSize: 10, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              // 28 Eki 2026 BOL: 1 urunu N kisiye bol (esit / tutar yaz). Dokunmatik: min 44.
+              if (bolunebilir)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: Material(
+                    color: _isProcessing ? Colors.grey[300] : const Color(0xFF7C3AED),
+                    borderRadius: BorderRadius.circular(8),
+                    child: InkWell(
+                      onTap: _isProcessing ? null : () => _bol(item),
+                      borderRadius: BorderRadius.circular(8),
+                      splashColor: Colors.white.withOpacity(0.35),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 44, minWidth: 68),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.call_split_rounded, color: Colors.white, size: 18),
+                            SizedBox(width: 4),
+                            Text('Böl', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               // Badge (ödenmişse — yeşil/mavi; ikramsa — turuncu İKRAM; ödenmemişse — kırmızı)
               if (isPaid)
                 Container(
@@ -7795,6 +8101,295 @@ class _PartialPaymentDialogState extends State<_PartialPaymentDialog> {
   }
 }
 
+/// 28 Eki 2026 — BÖL penceresi (dokunmatik kasa: büyük düğmeler, küçük pencere).
+/// "Eşit böl" 2/3/4 tek dokunuşla; "Tutar yaz" (Web POS ile AYNI): 1..N-1. parçalar yazılır,
+/// son parça KALAN; "+ Parça ekle / − Parça çıkar" ile en çok 10 parça. Döner:
+///   {'mode':'equal','parts':N} | {'mode':'amounts','amounts':[p1, ..., kalan]} | null (vazgeç).
+/// Hesap/dogrulama saf KalemBolme'de (test edilir); burada yalnız görünüm + mesaj.
+class _BolDialog extends StatefulWidget {
+  final String urunAdi;
+  final double satirTutari;
+
+  const _BolDialog({required this.urunAdi, required this.satirTutari});
+
+  @override
+  State<_BolDialog> createState() => _BolDialogState();
+}
+
+class _BolDialogState extends State<_BolDialog> {
+  static const _mor = Color(0xFF7C3AED);
+  // Elle yazılan parçalar (1..N-1); son parça KALAN. 9 yazılan + kalan = en çok 10.
+  final List<TextEditingController> _girdiler = [TextEditingController()];
+  static const int _enCokYazilan = KalemBolme.enCokParca - 1;
+
+  @override
+  void dispose() {
+    for (final c in _girdiler) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  String _tl(double v) => '${v.toStringAsFixed(2)} TL';
+
+  bool get _yazilanVar => _girdiler.any((c) => c.text.trim().isNotEmpty);
+
+  List<double>? get _yazilanTutarlar {
+    final l = <double>[];
+    for (final c in _girdiler) {
+      final v = KalemBolme.tutarAyristir(c.text);
+      if (v == null) return null;
+      l.add(v);
+    }
+    return l;
+  }
+
+  List<double>? get _tutarParcalari {
+    final y = _yazilanTutarlar;
+    if (y == null) return null;
+    return KalemBolme.tutarlarlaBol(widget.satirTutari, y);
+  }
+
+  /// Kalan parça (kuruş). Geçersiz girdi sayılmaz (Web POS gibi anlık gösterim).
+  int get _kalanKurus {
+    var top = 0;
+    for (final c in _girdiler) {
+      final v = KalemBolme.tutarAyristir(c.text);
+      if (v != null) top += KalemBolme.kurus(v);
+    }
+    return KalemBolme.kurus(widget.satirTutari) - top;
+  }
+
+  String? get _tutarHatasi {
+    if (!_yazilanVar) return null;
+    for (var i = 0; i < _girdiler.length; i++) {
+      if (KalemBolme.tutarAyristir(_girdiler[i].text) == null) {
+        return '${i + 1}. parça için geçerli bir tutar yazın (örn. 120 veya 120,50)';
+      }
+    }
+    if (_tutarParcalari == null) {
+      return 'Yazılan tutarlar satır tutarını (${_tl(widget.satirTutari)}) aşıyor veya kalan parçaya pay bırakmıyor';
+    }
+    return null;
+  }
+
+  void _parcaEkle() {
+    if (_girdiler.length >= _enCokYazilan) return;
+    setState(() => _girdiler.add(TextEditingController()));
+  }
+
+  void _parcaCikar() {
+    if (_girdiler.length <= 1) return;
+    final c = _girdiler.removeLast();
+    setState(() {});
+    // TextField agactan ciktiktan SONRA kapat (dispose edilmis controller'a erisim olmasin).
+    WidgetsBinding.instance.addPostFrameCallback((_) => c.dispose());
+  }
+
+  void _tutarlaGonder() {
+    final p = _tutarParcalari;
+    if (p != null) Navigator.pop(context, {'mode': 'amounts', 'amounts': p});
+  }
+
+  Widget _esitDugme(int parca, String etiket) {
+    final parcalar = KalemBolme.esitBol(widget.satirTutari, parca);
+    final aktif = parcalar != null;
+    final onizleme = aktif ? parcalar.map((p) => p.toStringAsFixed(2)).join(' + ') : '—';
+    return Expanded(
+      child: Material(
+        color: aktif ? _mor : Colors.grey[200],
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: aktif ? () => Navigator.pop(context, {'mode': 'equal', 'parts': parca}) : null,
+          borderRadius: BorderRadius.circular(10),
+          splashColor: Colors.white.withOpacity(0.35),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 76),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(etiket,
+                    style: TextStyle(
+                        color: aktif ? Colors.white : Colors.grey[500],
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 4),
+                Text(onizleme,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        color: aktif ? Colors.white.withOpacity(0.9) : Colors.grey[500],
+                        fontSize: 12)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final parcalar = _tutarParcalari;
+    final hata = _tutarHatasi;
+    final kalan = _kalanKurus;
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      // Kucuk kasa ekraninda (768 px) hata metniyle tasmasin: pencere kaydirilabilir.
+      child: SingleChildScrollView(
+        child: Container(
+        width: 480,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              const Icon(Icons.call_split_rounded, color: _mor, size: 26),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Böl: ${widget.urunAdi}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close_rounded),
+                iconSize: 28,
+                onPressed: () => Navigator.pop(context),
+              ),
+            ]),
+            const SizedBox(height: 2),
+            Text('Satır tutarı: ${_tl(widget.satirTutari)}',
+                style: TextStyle(fontSize: 15, color: Colors.grey[700], fontWeight: FontWeight.w600)),
+            const SizedBox(height: 16),
+            Text('Eşit böl', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.grey[700])),
+            const SizedBox(height: 8),
+            Row(children: [
+              _esitDugme(2, "2'ye böl"),
+              const SizedBox(width: 8),
+              _esitDugme(3, "3'e böl"),
+              const SizedBox(width: 8),
+              _esitDugme(4, "4'e böl"),
+            ]),
+            const SizedBox(height: 18),
+            Text('Tutar yaz — son parça kalan tutar olur',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.grey[700])),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.3),
+              child: SingleChildScrollView(
+                child: Column(children: [
+                  for (var i = 0; i < _girdiler.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(children: [
+                        SizedBox(
+                          width: 74,
+                          child: Text('${i + 1}. parça',
+                              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                        ),
+                        Expanded(
+                          child: TextField(
+                            controller: _girdiler[i],
+                            autofocus: i == 0,
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                            decoration: const InputDecoration(
+                              hintText: '0,00',
+                              suffixText: 'TL',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                            ),
+                            onChanged: (_) => setState(() {}),
+                            onSubmitted: (_) => _tutarlaGonder(),
+                          ),
+                        ),
+                      ]),
+                    ),
+                  Row(children: [
+                    SizedBox(
+                      width: 74,
+                      child: Text('${_girdiler.length + 1}. parça',
+                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                    ),
+                    Text('Kalan: ${_tl(KalemBolme.tl(kalan))}',
+                        style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                            color: kalan < 1 ? Colors.red[700] : const Color(0xFF047857))),
+                  ]),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: SizedBox(
+                  height: 48,
+                  child: OutlinedButton(
+                    onPressed: _girdiler.length >= _enCokYazilan ? null : _parcaEkle,
+                    child: const Text('+ Parça ekle', style: TextStyle(fontSize: 16)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SizedBox(
+                  height: 48,
+                  child: OutlinedButton(
+                    onPressed: _girdiler.length <= 1 ? null : _parcaCikar,
+                    child: const Text('− Parça çıkar', style: TextStyle(fontSize: 16)),
+                  ),
+                ),
+              ),
+            ]),
+            if (hata != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(hata, style: TextStyle(fontSize: 14, color: Colors.red[700])),
+              ),
+            const SizedBox(height: 16),
+            Row(children: [
+              Expanded(
+                child: SizedBox(
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.grey[300], foregroundColor: Colors.black87),
+                    child: const Text('Vazgeç', style: TextStyle(fontSize: 17)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: SizedBox(
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: parcalar == null ? null : _tutarlaGonder,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _mor,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: Colors.grey[300],
+                      disabledForegroundColor: Colors.grey[500],
+                    ),
+                    child: const Text('Tutarlarla Böl', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ),
+            ]),
+          ],
+        ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 3 Agu 2026 — IKRAM Dialog (Parcali Odeme kalibiyla ayni iskelet: kalem sec -> onayla).
 /// SADECE ISARETLEME yapar (PUT .../ikram) — odeme almaz. Basarida kapanir, cagiran
 /// "Tumunu Gor" gorunumune doner ve tazelenir. Geri alma: ikramli kalem sec -> Geri Al
@@ -7843,8 +8438,10 @@ class _IkramDialogState extends State<_IkramDialog> {
     _items = widget.items.whereType<Map>().map((i) => Map<String, dynamic>.from(i)).toList();
   }
 
+  // 28 Eki 2026 BOL: bolunmus grup uyesi de KILITLI (sunucu ikrami 400 ile reddeder).
   bool _secilebilir(Map<String, dynamic> item) =>
-      item['payment_status'] != 'paid'; // odenmis kalem backend'de zaten reddedilir
+      item['payment_status'] != 'paid' && // odenmis kalem backend'de zaten reddedilir
+      !KalemBolme.grupUyesiMi(item);
 
   List<Map<String, dynamic>> get _secili =>
       _items.where((i) => _selectedIds.contains(i['id'])).toList();
@@ -8185,7 +8782,7 @@ class _IkramDialogState extends State<_IkramDialog> {
                             const SizedBox(height: 16),
                             Padding(
                               padding: const EdgeInsets.only(bottom: 8),
-                              child: Text('Ödenmiş kalemler (ikram edilemez)',
+                              child: Text('Ödenmiş / bölünmüş kalemler (ikram edilemez)',
                                   style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green[700])),
                             ),
                             ...odenmisler.map((item) => _kalemSatiri(item, kilitli: true)),
@@ -8336,6 +8933,19 @@ class _IkramDialogState extends State<_IkramDialog> {
                   ],
                 ),
               ),
+              // 28 Eki 2026 BOL: parca etiketi (kilitli satirda neden kilitli oldugu gorunsun)
+              if (KalemBolme.parcaEtiketi(item) != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF7C3AED).withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF7C3AED).withOpacity(0.5)),
+                  ),
+                  child: Text('PARÇA ${KalemBolme.parcaEtiketi(item)}',
+                      style: const TextStyle(color: Color(0xFF6D28D9), fontSize: 10, fontWeight: FontWeight.bold)),
+                ),
               if (isIkram)
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),

@@ -8,6 +8,7 @@ import 'local_db_service.dart';
 import 'connectivity_service.dart'; // Faz 2 K6: offline'da rapor aninda persist
 import 'storage_service.dart'; // 24 Agu 2026: 'Fis Basim' satiri toggle (getShowKitchenPrintTime)
 import 'mutfak_birlestir.dart'; // 6 Eki 2026: mutfak fisinde ayni kalemleri birlestir
+import 'kalem_bolme.dart'; // 28 Eki 2026: bolunmus kalem (parcali odeme "Bol") fis kurallari
 
 /// Yazıcı türleri
 enum PrinterType {
@@ -806,12 +807,22 @@ class PrinterService {
     // kalem). Kanit yoksa `_comboGrupla` listeyi AYNEN, SIRASI BOZULMADAN doner -> combo'suz
     // siparislerde cikti BIREBIR eskisi gibi. Hesaplama patlasa bile fis DUSMEZ: catch ile
     // duz listeye donuluyor.
+    // 28 Eki 2026 — BOLUNMUS KALEM (parcali odeme "Bol"): parca satirlari ANA satira KATLANIR,
+    // musteri 1 urun gorur (tek satir, tutar = grup toplami). Kanit (split_parent_id) yoksa
+    // liste AYNEN doner -> fis BIREBIR eski. Hata -> katlamasiz (fis dusmez). Toplamlar
+    // adisyondan gelir, degismez (parca tutarlari zaten subtotal'da).
+    List<dynamic> _kasaKalemler = items;
+    try {
+      _kasaKalemler = KalemBolme.parcalariAnaSatiraKatla(items);
+    } catch (bolErr) {
+      print('[Printer] bolunmus kalem katlama atlandi (parcalar ayri basiliyor): $bolErr');
+    }
     List<Map<String, dynamic>> _satirlar;
     try {
-      _satirlar = _comboGrupla(items);
+      _satirlar = _comboGrupla(_kasaKalemler);
     } catch (grupErr) {
       print('[Printer] combo gruplama atlandi (duz listeye donuldu): $grupErr');
-      _satirlar = items.map((e) => {'tip': 'tek', 'kalem': e}).toList();
+      _satirlar = _kasaKalemler.map((e) => {'tip': 'tek', 'kalem': e}).toList();
     }
     // 12 Eki 2026 (Mustafa) — KASA FISINDE DE AYNI KALEMLER TEK SATIR (mutfaktaki gibi):
     // 5 sade kofte -> "5 x Kofte  <toplam> TL". Fiyat, ikram, odeme durumu, not, secim ya da
@@ -1812,12 +1823,22 @@ class PrinterService {
     // Kural aynen musteri fisindeki gibi: gruplama SADECE kanit varsa (combo_group_id +
     // ayni kimlikte >=2 kalem); kanit yoksa liste AYNEN doner -> mevcut mutfak fisleri
     // BIREBIR degismez. Gruplama patlarsa catch ile DUZ LISTEYE donulur, fis yine basilir.
+    // 28 Eki 2026 — BOLUNMUS KALEM: parca satiri (split_parent_id dolu) mutfaga BASILMAZ (fiziksel
+    // urun degil; ana satir zaten listede, printed ana satirdan kopya). Kaynaklar (sunucu
+    // printKitchen / getUnprintedLocalItems) parcayi zaten suzer; bu SON savunma. Parca yoksa
+    // AYNI liste -> fis BIREBIR eski. Hata -> suzgecsiz (fis dusmez).
+    List<dynamic> _mKalemler = items;
+    try {
+      _mKalemler = KalemBolme.parcasiz(items);
+    } catch (bolErr) {
+      print('[Printer] MUTFAK parca suzgeci atlandi: $bolErr');
+    }
     List<Map<String, dynamic>> _mSatirlar;
     try {
-      _mSatirlar = _comboGrupla(items);
+      _mSatirlar = _comboGrupla(_mKalemler);
     } catch (grupErr) {
       print('[Printer] MUTFAK combo gruplama atlandi (duz listeye donuldu): $grupErr');
-      _mSatirlar = items.map((e) => {'tip': 'tek', 'kalem': e}).toList();
+      _mSatirlar = _mKalemler.map((e) => {'tip': 'tek', 'kalem': e}).toList();
     }
     // 6 Eki 2026 (Mustafa) — AYNI KALEMLER TEK SATIR: 10 sade kofte -> "10 x Kofte"; notlu /
     // secimli / farkli garson·saatli olan AYRI satirda kalir (mutfak_birlestir.dart). Birlesecek
@@ -1974,7 +1995,7 @@ class PrinterService {
 
     bytes += generator.hr(ch: '=');
     bytes += generator.text(
-      'Toplam ${items.length} urun',
+      'Toplam ${_mKalemler.length} urun', // 28 Eki 2026: parca satiri sayilmaz (parca yoksa = items.length)
       styles: const PosStyles(align: PosAlign.center),
     );
 
@@ -2148,8 +2169,16 @@ class PrinterService {
     final items = ticket['items'] as List? ?? [];
     // 9 Agu 2026 — kalem garson·saat (kasa toggle; kapanis fisi de kasa grubu). Varsayilan ACIK.
     final bool _gsKasa = await _kalemGarsonSaatGoster(mutfak: false);
+    // 28 Eki 2026 — BOLUNMUS KALEM: ozet fisi FIZIKSEL (tutarsiz) -> parca satiri basilmaz,
+    // salon 1 urun gorur. Parca yoksa AYNI liste -> fis BIREBIR eski. Hata -> suzgecsiz.
+    List<dynamic> _ozKalemler = items;
+    try {
+      _ozKalemler = KalemBolme.parcasiz(items);
+    } catch (bolErr) {
+      print('[Printer] OZET parca suzgeci atlandi: $bolErr');
+    }
     List<Map<String, dynamic>> _ozSatirlar =
-        items.map((e) => <String, dynamic>{'tip': 'tek', 'kalem': e}).toList();
+        _ozKalemler.map((e) => <String, dynamic>{'tip': 'tek', 'kalem': e}).toList();
     try {
       _ozSatirlar = ayniKalemleriBirlestir(
           _ozSatirlar, (k) => _ozetBirlesmeAnahtari(k, ticket, _gsKasa));

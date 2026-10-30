@@ -78,6 +78,15 @@ class _TicketModalState extends State<TicketModal> {
     return int.tryParse(value.toString());
   }
 
+  /// 28 Eki 2026: backend fiyat/adet String ('230.00') VEYA num donebilir; sert `as num`
+  /// cast String'de TypeError ile satiri (ve ekrani) dusuruyordu. add_item_modal ile ayni desen.
+  double _safeDouble(dynamic value, [double defaultValue = 0]) {
+    if (value == null) return defaultValue;
+    if (value is double) return value;
+    if (value is num) return value.toDouble();
+    return double.tryParse(value.toString()) ?? defaultValue;
+  }
+
   /// Garsonun belirli bir yetkiye sahip olup olmadığını kontrol eder
   /// - Online modda: Garsonun yetkilerine göre butonlar gösterilir
   /// - Offline modda: Sadece temel işlemlere izin verilir (adisyon aç, ürün ekle, nakit/kart ile kapat, iptal)
@@ -622,11 +631,17 @@ class _TicketModalState extends State<TicketModal> {
     try {
       final ticketId = _safeInt(_ticket!['id']);
       if (ticketId == null) throw Exception('Ticket ID is null');
-      await widget.apiService.deleteTicketItem(
+      final silme = await widget.apiService.deleteTicketItem(
         ticketId: ticketId,
         itemId: itemId,
         waiterId: _waiterId,
       );
+      // 28 Eki 2026 (ORTA-3): sunucu is kuraliyla reddetti (400/409) -> basari degil, liste tazelenir.
+      if (silme['success'] == false) {
+        await _loadTicket();
+        _showError('Urun iptal edilemedi: ${silme['error'] ?? 'İşlem reddedildi'}');
+        return;
+      }
       await _loadTicket();
       _showSuccess('Urun iptal edildi');
     } catch (e) {
@@ -1758,7 +1773,7 @@ class _TicketModalState extends State<TicketModal> {
 
           // Price
           Text(
-            '${((item['unit_price'] as num) * (item['quantity'] as num)).toStringAsFixed(2)} TL',
+            '${(_safeDouble(item['unit_price']) * _safeDouble(item['quantity'], 1)).toStringAsFixed(2)} TL',
             style: TextStyle(
               color: isCancelled ? Colors.red[400] : const Color(0xFF1F2937),
               fontWeight: FontWeight.bold,

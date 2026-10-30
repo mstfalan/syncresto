@@ -47,6 +47,7 @@ const String _sorgu = '''
      WHERE t.status = 'open' AND COALESCE(t.lan_origin,'self') = 'self'
        AND i.status != 'cancelled'
        AND COALESCE(cp.hide_from_tracking, 0) = 0
+       AND i.split_parent_id IS NULL
      ORDER BY i.created_at
 ''';
 
@@ -179,7 +180,8 @@ void main() {
           quantity INTEGER, notes TEXT, extras TEXT, printed INTEGER DEFAULT 0,
           status TEXT, added_by INTEGER, added_by_name TEXT,
           delivered_at TEXT, delivered_by INTEGER, delivered_by_name TEXT,
-          created_at TEXT, skip_pos_print INTEGER DEFAULT 0
+          created_at TEXT, skip_pos_print INTEGER DEFAULT 0,
+          split_parent_id INTEGER, split_seq INTEGER, split_parts INTEGER
         )
       ''');
       await db.execute('''
@@ -309,6 +311,18 @@ void main() {
       await kalemEkle({'product_id': 24, 'product_name': 'C'});
       final r = await db.rawQuery(_sorgu);
       expect(r.map((e) => e['product_name']).toList(), ['C']);
+    });
+
+    test('28 Eki 2026 BÖL: parça satırı (split_parent_id dolu) masa takipte GÖRÜNMEZ, ana satır görünür', () async {
+      // Parçalı ödemede 1 ürün 2 parçaya bölündü: ana satır (seq 1) + parça (seq 2, parent=ana).
+      // Fiziksel okuyucu yalnız ANA satırı sayar — garson 2 ayrı tavuk görmemeli.
+      await kalemEkle({'local_id': 501, 'product_id': 24, 'product_name': 'Dağ Kekikli Tavuk',
+          'split_seq': 1, 'split_parts': 2});
+      await kalemEkle({'local_id': 502, 'product_id': 24, 'product_name': 'Dağ Kekikli Tavuk',
+          'split_parent_id': 501, 'split_seq': 2, 'split_parts': 2});
+      final r = await db.rawQuery(_sorgu);
+      expect(r.length, 1);
+      expect(r.first['_local_item_id'], 501);
     });
   });
 }

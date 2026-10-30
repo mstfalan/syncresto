@@ -967,6 +967,24 @@ class ApiService {
     return {'success': true, 'offline': true, 'queued': true};
   }
 
+  /// 28 Eki 2026 (denetim ORTA-3): sunucunun İŞ KURALI reddi (400/409) ağ hatası DEĞİLDİR —
+  /// offline kuyruğa düşürülmez. Eskiden her DioException offline yola düşüyordu: reddedilen
+  /// istek kuyrukta dönüp dead-letter oluyor, yerelde ise "yapılmış" görünüyordu (bölünmüş
+  /// kalemde ödenmiş parça varken iptal, combo/parça taşıma vb.). Yalnız ağ hatası (yanıt yok),
+  /// 5xx ve 404 (geçici id yarışı) eski offline yola gider.
+  /// Döner: çağırana gösterilecek red {'success':false,'error':..,'status':..}; null = offline yola devam.
+  Map<String, dynamic>? _isKuraliReddi(DioException e) {
+    final sc = e.response?.statusCode;
+    if (sc != 400 && sc != 409) return null;
+    final body = e.response?.data;
+    final mesaj = body is Map ? body['error']?.toString() : null;
+    return {
+      'success': false,
+      'error': (mesaj != null && mesaj.trim().isNotEmpty) ? mesaj : 'İşlem reddedildi',
+      'status': sc,
+    };
+  }
+
   Future<Map<String, dynamic>> deleteTicketItem({
     required int ticketId,
     required int itemId,
@@ -985,12 +1003,32 @@ class ApiService {
             'item_id': itemId,
             'cancel_reason': cancelReason,
           });
+          // 28 Eki 2026 BÖL: sunucu bölünmüş grubu BİRLİKTE iptal edince cancelled_item_ids döner
+          // -> yerel aynada hepsi iptal işaretlenir (sonraki aynalamayı beklemeden kart/toplam doğru).
+          // Alan yoksa (eski sunucu / düz kalem) hiçbir şey yapılmaz = bugünkü davranış.
+          try {
+            final ids = response.data['cancelled_item_ids'];
+            if (ids is List && ids.isNotEmpty) {
+              await _localDb.cancelLocalItemsByServerIds(ids);
+            }
+          } catch (mErr) {
+            print('[API] cancelled_item_ids yerel isaretleme atlandi: $mErr');
+          }
         }
         return response.data;
       } on DioException catch (e) {
+        // 28 Eki 2026 (ORTA-3): 400/409 = iş kuralı reddi -> kullanıcıya göster, kuyruğa ALMA.
+        final red = _isKuraliReddi(e);
+        if (red != null) {
+          print('[API] deleteTicketItem sunucu reddi (${red['status']}): ${red['error']}');
+          _logService.warning(LogType.action, 'Urun iptali sunucu tarafindan reddedildi', details: {
+            'ticket_id': ticketId, 'item_id': itemId, 'status': red['status'], 'error': red['error'],
+          });
+          return red;
+        }
         print('[API] Online deleteTicketItem basarisiz, offline path: ${e.message}');
         _logService.warning(LogType.action, 'Online delete basarisiz, offline path', details: {'ticket_id': ticketId, 'item_id': itemId});
-        // Network hatasinda offline yola dus
+        // Network hatasinda (yanit yok / 5xx / 404) offline yola dus
       }
     }
 
@@ -1503,6 +1541,59 @@ class ApiService {
     }
   }
 
+  /// 28 Eki 2026 — BÖL: 1 ürünü N parçaya böl (parçalı ödeme; iki kişi 100+100 ödeyebilsin).
+  /// SADECE ONLINE — kuyruğa ALINMAZ (sunucu tek transaction'da parça satırlarını üretir,
+  /// offline'da parça kimliği üretilemez). payItems ile aynı hata deseni.
+  /// Backend: POST /api/pos/tickets/:ticketId/items/:itemId/split
+  ///   {mode:'equal', parts:N(2..10)} | {mode:'amounts', amounts:[120,80]} (+waiter_id)
+  /// Yanıt 200: {success, parent_id, part_ids, parts:[{id,seq,amount}], items:[getByTable biçimi]}
+  /// Hata 400/404/409: {success:false, error:'<Türkçe mesaj>'} — mesaj AYNEN kullanıcıya gösterilir.
+  Future<Map<String, dynamic>> splitItem({
+    required int ticketId,
+    required int itemId,
+    required String mode,
+    int? parts,
+    List<double>? amounts,
+    int? waiterId,
+  }) async {
+    if (!_connectivity.isOnline) {
+      return {'success': false, 'error': 'Bölme için internet gerekli'};
+    }
+    try {
+      final response = await _dio.post('/api/pos/tickets/$ticketId/items/$itemId/split', data: {
+        'mode': mode,
+        if (parts != null) 'parts': parts,
+        // TL, 2 ondalık (sözleşme): 33.333… gibi değer gitmesin, sunucu kuruş eşitliği arar.
+        if (amounts != null) 'amounts': amounts.map((a) => double.parse(a.toStringAsFixed(2))).toList(),
+        if (waiterId != null) 'waiter_id': waiterId,
+      });
+      final data = response.data;
+      if (data is Map<String, dynamic>) {
+        if (data['success'] == true) {
+          _logService.logAction('Ürün bölündü', details: {
+            'ticket_id': ticketId, 'item_id': itemId, 'mode': mode,
+            'parts': parts, 'amounts': amounts, 'part_ids': data['part_ids'],
+          });
+        }
+        return data;
+      }
+      return {'success': false, 'error': 'Sunucudan beklenmeyen yanıt'};
+    } on DioException catch (e) {
+      print('[API] splitItem hatası: status=${e.response?.statusCode} body=${e.response?.data}');
+      final body = e.response?.data;
+      final sunucuMesaji = body is Map ? body['error']?.toString() : null;
+      String errorMsg;
+      if (sunucuMesaji != null && sunucuMesaji.trim().isNotEmpty) {
+        errorMsg = sunucuMesaji; // 400/404/409 Türkçe mesaj (zaten bölünmüş, ödenmiş, combo…)
+      } else if (e.response?.statusCode == 404) {
+        errorMsg = 'Adisyon sunucuda bulunamadi. Lutfen sayfayi tazeleyip tekrar deneyin.';
+      } else {
+        errorMsg = e.message ?? 'Bölme başarısız';
+      }
+      return {'success': false, 'error': errorMsg};
+    }
+  }
+
   // 16 May 2026: Tek ürün taşı — online + offline
   // Online: backend POST → lokal DB update
   // Offline: lokal DB update + sync_queue'ya move_item operation ekle
@@ -1522,22 +1613,44 @@ class ApiService {
           // Lokal DB'yi de güncelle (cache senkron kalsın)
           try {
             final targetTicketId = response.data['target_ticket_id'] ?? ticketId;
-            await _localDb.moveLocalItem(
-              itemId: itemId,
-              sourceTicketId: ticketId,
-              targetTicketId: targetTicketId,
-              targetTableId: newTableId,
-              waiterId: waiterId,
-            );
+            // 28 Eki 2026 BÖL: sunucu bölünmüş grubu BİRLİKTE taşıyınca moved_item_ids döner ->
+            // yerelde hepsi taşınır. Alan yoksa eski tek id (bugünkü davranış).
+            final movedRaw = response.data['moved_item_ids'];
+            final movedIds = (movedRaw is List)
+                ? movedRaw.map((x) => x is num ? x.toInt() : int.tryParse('$x')).whereType<int>().toList()
+                : const <int>[];
+            final tasinacak = movedIds.isNotEmpty ? movedIds : <int>[itemId];
+            for (final id in tasinacak) {
+              await _localDb.moveLocalItem(
+                itemId: id,
+                sourceTicketId: ticketId,
+                targetTicketId: targetTicketId,
+                targetTableId: newTableId,
+                waiterId: waiterId,
+              );
+            }
           } catch (_) {}
           _logService.logAction('Ürün taşındı', details: {
             'ticket_id': ticketId, 'item_id': itemId, 'new_table_id': newTableId,
+            'moved_item_ids': response.data['moved_item_ids'],
           });
         }
         return response.data;
+      } on DioException catch (e) {
+        // 28 Eki 2026 (ORTA-3): 400/409 = iş kuralı reddi -> kullanıcıya göster, yerelde TAŞIMA,
+        // kuyruğa ALMA. Ağ hatası / 5xx / 404 eski offline yola düşer.
+        final red = _isKuraliReddi(e);
+        if (red != null) {
+          print('[API] moveItem sunucu reddi (${red['status']}): ${red['error']}');
+          _logService.warning(LogType.action, 'Urun tasima sunucu tarafindan reddedildi', details: {
+            'ticket_id': ticketId, 'item_id': itemId, 'status': red['status'], 'error': red['error'],
+          });
+          return red;
+        }
+        print('[API] moveItem online error, offline fallback: ${e.message}');
       } catch (e) {
         print('[API] moveItem online error, offline fallback: $e');
-        // Online başarısızsa offline akışa düş
+        // Online başarısızsa (ağ/beklenmeyen) offline akışa düş
       }
     }
 

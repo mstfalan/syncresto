@@ -81,6 +81,39 @@ class LocalDbService {
     print('[LocalDb] v23 cached_products.hide_on_summary_receipt eklendi');
   }
 
+  /// v24 gecisi (28 Eki 2026) — KALEM BOLME ("Bol"): local_ticket_items'a split_parent_id /
+  /// split_seq / split_parts (sunucu panel_pos_ticket_items ile ayni ad). Ayna (upsertServerTicket)
+  /// bu alanlari yazar; cevrimdisi fiziksel okuyucular (mutfak fisi, masa takip) parca satirini
+  /// `split_parent_id IS NULL` ile suzer. v22/v23 ile ayni desen: idempotent, kolonlar dogrulanir;
+  /// biri eklenemezse FIRLATIR -> sqflite yukseltmeyi geri alir, surum 23'te kalir (veri kaybi yok).
+  /// Hepsi NULL varsayilan = bolunmemis kalem (bugunku davranis).
+  static Future<void> migrasyonV24(DatabaseExecutor db) async {
+    const kolonlar = ['split_parent_id', 'split_seq', 'split_parts'];
+    for (final k in kolonlar) {
+      try {
+        await db.execute('ALTER TABLE local_ticket_items ADD COLUMN $k INTEGER');
+      } catch (e) {
+        print('[LocalDb] v24 adim zaten var ($k): $e');
+      }
+    }
+    final bilgi = await db.rawQuery('PRAGMA table_info(local_ticket_items)');
+    final mevcut = bilgi.map((k) => (k['name'] ?? '').toString()).toSet();
+    for (final k in kolonlar) {
+      if (!mevcut.contains(k)) {
+        throw StateError('v24: local_ticket_items.$k eklenemedi (surum 23 korunuyor)');
+      }
+    }
+    print('[LocalDb] v24 local_ticket_items split_parent_id/split_seq/split_parts eklendi');
+  }
+
+  /// Sunucudan gelen split_* alani int VEYA '187' gelebilir; bos/bozuk -> NULL (bolunmemis).
+  static int? splitTamSayi(dynamic v) {
+    if (v == null) return null;
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse(v.toString().trim());
+  }
+
   static int skipBayragi(Object? ham) =>
       (ham == 1 || ham == true || ham == '1' || ham == 'true' || ham == 't') ? 1 : 0;
 
@@ -182,7 +215,7 @@ class LocalDbService {
   Future<Database> _openDb(String path) async {
     return await openDatabase(
       path,
-      version: 23, // v23 (12 Eki 2026): cached_products.hide_on_summary_receipt (salon ozet fisi). v22 (19 Eyl 2026): cached_products.skip_pos_print (cevrimdisi mutfak fisi online kolla parite)
+      version: 24, // v24 (28 Eki 2026): local_ticket_items.split_parent_id/split_seq/split_parts (kalem bolme). v23 (12 Eki 2026): cached_products.hide_on_summary_receipt (salon ozet fisi). v22 (19 Eyl 2026): cached_products.skip_pos_print (cevrimdisi mutfak fisi online kolla parite)
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       // Sahada: sync_service + print_queue_service + tables_screen aynı anda
@@ -667,6 +700,9 @@ class LocalDbService {
         combo_pick_name TEXT,
         is_ikram INTEGER DEFAULT 0,
         ikram_reason TEXT,
+        split_parent_id INTEGER,
+        split_seq INTEGER,
+        split_parts INTEGER,
         FOREIGN KEY (local_ticket_id) REFERENCES local_tickets(local_id)
       )
     ''');
@@ -1103,6 +1139,10 @@ class LocalDbService {
     }
     if (oldVersion < 23) {
       await migrasyonV23(db);
+    }
+    // v24 (28 Eki 2026): kalem bolme kolonlari (ayna + cevrimdisi fiziksel suzgec).
+    if (oldVersion < 24) {
+      await migrasyonV24(db);
     }
 
     // v11 (7 Tem 2026): offline-parity — masa detayi + masa takip ekrani canliyla birebir olsun.
@@ -1597,6 +1637,9 @@ class LocalDbService {
        WHERE i.local_ticket_id = ?
          AND i.printed = 0
          AND (i.status IS NULL OR i.status != 'cancelled')
+         -- 28 Eki 2026 KALEM BOLME: parca satiri (split_parent_id dolu) FIZIKSEL urun degil,
+         -- mutfaga ANA satir gider. printed ana satirdan kopya; yine de parca BASILMAZ.
+         AND i.split_parent_id IS NULL
        ORDER BY i.created_at
     ''', [localTicketId]);
     // sqflite satirlari SALT OKUNUR: once kopyala (yoksa UnsupportedError -> printKitchen
@@ -2291,6 +2334,29 @@ class LocalDbService {
     if (tid != null) await recalcTicketTotals(tid);
   }
 
+  /// 28 Eki 2026 BÖL: sunucu bölünmüş grubu BİRLİKTE iptal edince `cancelled_item_ids` (server id)
+  /// döner -> yerel aynada hepsi 'cancelled' + etkilenen adisyonlar recalc. Aynada olmayan
+  /// (henüz aynalanmamış) id sessizce atlanır; sonraki ayna (hayalet-iptal) zaten tamamlar.
+  /// Sync kuyruğuna HİÇBİR ŞEY yazmaz (iptal sunucuda zaten yapıldı).
+  Future<void> cancelLocalItemsByServerIds(List<dynamic> serverIds) async {
+    final ids = serverIds
+        .map((x) => x is num ? x.toInt() : int.tryParse('$x'))
+        .whereType<int>()
+        .toSet()
+        .toList();
+    if (ids.isEmpty) return;
+    final db = await database;
+    final ph = List.filled(ids.length, '?').join(',');
+    final rows = await db.query('local_ticket_items',
+        columns: ['local_ticket_id'], where: 'server_id IN ($ph)', whereArgs: ids);
+    if (rows.isEmpty) return;
+    await db.update('local_ticket_items', {'status': 'cancelled'},
+        where: "server_id IN ($ph) AND status != 'cancelled'", whereArgs: ids);
+    for (final tid in rows.map((r) => r['local_ticket_id']).whereType<int>().toSet()) {
+      await recalcTicketTotals(tid);
+    }
+  }
+
   /// Bir local ticket'ın subtotal/total'ını item'larından yeniden hesapla (offline tutar).
   /// Formül getLocalTicket + closeLocalTicket ile BİREBİR aynı (tutarlılık).
   /// v20 IKRAM: is_ikram=1 kalemler tahsil edilmez -> toplama girmez (COALESCE guard:
@@ -2945,6 +3011,11 @@ class LocalDbService {
             // koparsa offline gorunum + kapanis tutari dogru kalir. Esnek guard (bool/int/str).
             'is_ikram': (it['is_ikram'] == true || it['is_ikram'] == 1 || it['is_ikram'] == '1') ? 1 : 0,
             'ikram_reason': it['ikram_reason']?.toString(),
+            // v24 KALEM BOLME (28 Eki 2026): sunucu authoritative; bolunmemis kalemde NULL yazilir.
+            // Cevrimdisi mutfak fisi / masa takip parca satirini bu alanla suzer.
+            'split_parent_id': splitTamSayi(it['split_parent_id']),
+            'split_seq': splitTamSayi(it['split_seq']),
+            'split_parts': splitTamSayi(it['split_parts']),
             'printed': existingPrinted, // KORUNUR
             'synced': 1,
             'synced_at': now,
@@ -4136,6 +4207,9 @@ class LocalDbService {
      WHERE t.status = 'open' AND COALESCE(t.lan_origin,'self') = 'self'
        AND i.status != 'cancelled'
        AND COALESCE(cp.hide_from_tracking, 0) = 0
+       -- 28 Eki 2026 KALEM BOLME: parca satiri masa takipte GORUNMEZ (online getPendingOrders
+       -- ile eslenik: split_parent_id IS NULL). Teslim/bekleyen sayimi ANA satirdan.
+       AND i.split_parent_id IS NULL
      ORDER BY i.created_at
     ''');
   }
